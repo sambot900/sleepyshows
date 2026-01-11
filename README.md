@@ -16,12 +16,16 @@ A robust video player with sleep timer functionality, episode browser, and playl
    - **mpv**: `sudo apt install libmpv2`
    - **Qt Requirements**: `sudo apt install libxcb-cursor0` (Required for play button/window to appear on some Linux distributions)
 
-   - Windows: `python-mpv` needs `libmpv-2.dll`. This repo includes an mpv build archive in `drivers/` and a script that builds the app and copies the DLL into `dist/` automatically.
-     - One command: `powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1`
+   - Windows: `python-mpv` needs `libmpv-2.dll`. The build script will build the app and copy the DLL into `dist/` automatically (it will install `mpv.net` via `winget` if needed).
+     - Prereq: install 7-Zip (so `7z.exe` is available): `winget install --id 7zip.7zip -e`
+     - Navigate to the project directory first, then run: `powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1`
 
 ## Building Executable
 ### Linux
 Run `./build_linux.sh`
 
 ### Windows
-Run: `powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1`
+Navigate to the project directory, then run:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1
+```
