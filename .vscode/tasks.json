@@ -1,0 +1,13 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Sleepy Shows",
+			"type": "shell",
+			"command": "export LD_LIBRARY_PATH=\"${workspaceFolder}/libs\":\"$LD_LIBRARY_PATH\" && \"${workspaceFolder}/venv/bin/python\" src/main.py",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
