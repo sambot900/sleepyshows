@@ -20,4 +20,5 @@ dist/
 temp_dump.txt
 
 # Windows runtime binaries (downloaded locally)
+# (We source libmpv-2.dll from the archive in drivers/ via scripts/windows_build.ps1)
 libmpv-2.dll

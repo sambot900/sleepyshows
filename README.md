@@ -16,16 +16,12 @@ A robust video player with sleep timer functionality, episode browser, and playl
    - **mpv**: `sudo apt install libmpv2`
    - **Qt Requirements**: `sudo apt install libxcb-cursor0` (Required for play button/window to appear on some Linux distributions)
 
-   - Windows: `python-mpv` needs `libmpv-2.dll`. This repo does not commit the DLL because it's a third-party binary (licensing/security/updates), but you shouldn't have to hunt for it.
-     - Install mpv (recommended): `winget install --id=mpv.mpv -e` (or `scoop install mpv`)
-     - Then run: `powershell -ExecutionPolicy Bypass -File scripts\get-libmpv.ps1 -Destination .`
-     - You can also put `libmpv-2.dll` in your system PATH or next to `src/main.py`.
+   - Windows: `python-mpv` needs `libmpv-2.dll`. This repo includes an mpv build archive in `drivers/` and a script that builds the app and copies the DLL into `dist/` automatically.
+     - One command: `powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1`
 
 ## Building Executable
 ### Linux
 Run `./build_linux.sh`
 
 ### Windows
-1. `pip install pyinstaller`
-2. `pyinstaller --name "SleepyShows" --windowed --noconsole src/main.py`
-3. Copy `libmpv-2.dll` into the `dist/SleepyShows/` folder. (If you installed mpv, you can run `powershell -ExecutionPolicy Bypass -File scripts\get-libmpv.ps1 -Destination dist\SleepyShows`)
+Run: `powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1`
