@@ -19,6 +19,10 @@ dist/
 # Local scratch
 temp_dump.txt
 
+# Auto-generated playlists (contain machine-specific absolute paths)
+playlists/Bob's Burgers.json
+playlists/King of the Hill.json
+
 # Windows runtime binaries (downloaded locally)
 # (We source libmpv-2.dll from the archive in drivers/ via scripts/windows_build.ps1)
 libmpv-2.dll

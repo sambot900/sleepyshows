@@ -269,7 +269,15 @@ class PlaylistManager:
         
         # Scan this specific folder
         structure = {}
-        source_name = os.path.basename(folder_path)
+
+        # If the selected folder is a generic leaf like "Episodes", include its parent
+        # so multiple shows don't end up with the same source label.
+        base = os.path.basename(folder_path)
+        parent = os.path.basename(os.path.dirname(folder_path))
+        if base.lower() in ('episodes', 'episodesl') and parent:
+            source_name = f"{parent}/{base}"
+        else:
+            source_name = base
         
         for root, dirs, files in os.walk(folder_path):
             # Sort directories and files using natural sort

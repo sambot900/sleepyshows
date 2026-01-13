@@ -128,6 +128,23 @@ class MpvPlayer(QWidget):
         if self.mpv:
             self.mpv.volume = volume
 
+    def set_audio_normalization(self, enabled: bool):
+        """Enable/disable audio normalization (dynamic range leveling).
+
+        Uses mpv's ffmpeg lavfi filter. Best-effort; if unsupported it fails silently.
+        """
+        if not self.mpv:
+            return
+        try:
+            if enabled:
+                # Dynamic audio normalization to reduce loud/quiet swings.
+                self.mpv.af = "lavfi=[dynaudnorm]"
+            else:
+                # Clear audio filters.
+                self.mpv.af = ""
+        except Exception:
+            return
+
     def shutdown(self):
         if self.mpv:
             self.mpv.terminate()
