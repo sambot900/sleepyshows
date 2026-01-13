@@ -17,7 +17,13 @@ class BumpManager:
         # - "that takes faces" ~ 1.2s
         # - "by resizing... facial features" ~ 3.0s
         self._ms_per_char = 41
+        # Extra time applied only to the character-derived portion of the model.
+        # (Requested: +15% more time in the character-duration logic.)
+        self._ms_per_char_scale = 1.15
         self._base_card_ms = 550
+        # Bonus time for short, single-line cards to improve readability.
+        # Applied after the main scaling so the bonus is a true +800ms.
+        self._one_line_bonus_ms = 800
         self._min_card_ms = 900
         self._max_card_ms = 6000
         # Overall timing multiplier for bump card readability.
@@ -40,10 +46,22 @@ class BumpManager:
         # Make whitespace consistent so char counting is stable.
         return re.sub(r'\s+', ' ', str(text or '')).strip()
 
+    def _is_single_line_card(self, text):
+        # Treat as single-line if there's 0-1 non-empty lines.
+        raw = str(text or '').strip()
+        if not raw:
+            return True
+        non_empty_lines = [ln for ln in raw.splitlines() if ln.strip()]
+        return len(non_empty_lines) <= 1
+
     def _card_duration_ms_for_text(self, text):
+        is_single_line = self._is_single_line_card(text)
         t = self._normalize_card_text(text)
         chars = len(t)
-        ms = int((self._base_card_ms + (chars * self._ms_per_char)) * float(self._duration_scale))
+        ms = (self._base_card_ms + (chars * self._ms_per_char * float(self._ms_per_char_scale))) * float(self._duration_scale)
+        if is_single_line:
+            ms += int(self._one_line_bonus_ms)
+        ms = int(ms)
         if ms < self._min_card_ms:
             ms = self._min_card_ms
         if ms > self._max_card_ms:
