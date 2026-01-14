@@ -19,6 +19,9 @@ dist/
 # Local scratch
 temp_dump.txt
 
+# Script-generated scratch
+scripts/_tmp_bumps/
+
 # Auto-generated playlists (contain machine-specific absolute paths)
 playlists/Bob's Burgers.json
 playlists/King of the Hill.json

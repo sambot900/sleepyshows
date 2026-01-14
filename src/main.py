@@ -3,16 +3,20 @@ import os
 import json
 import time
 import platform
+import html
+import random
+import glob
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QFileDialog, QTreeWidget, 
                                QTreeWidgetItem, QSplitter, QLabel, QSlider, QTabWidget,
                                QListWidget, QListWidgetItem, QInputDialog, QMessageBox, QMenu, QStackedWidget,
                                QDockWidget, QFrame, QSizePolicy, QToolButton, QStyle, QGridLayout,
-                               QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider)
+                               QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider,
+                               QLineEdit)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage
 
-from player_backend import MpvPlayer
+from player_backend import MpvPlayer, MpvAudioPlayer
 from playlist_manager import PlaylistManager, VIDEO_EXTENSIONS, natural_sort_key
 from ui_styles import DARK_THEME
 
@@ -21,6 +25,117 @@ THEME_COLOR = "#0e1a77"
 
 # White strokes are intentionally transparent so the global background gradient shows through.
 WHITE_STROKE_ALPHA = 0
+
+
+class BumpImageView(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._pixmap = None
+        self._mode = 'default'
+        self._percent = None
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def clear(self):
+        self._pixmap = None
+        self._mode = 'default'
+        self._percent = None
+        self.update()
+
+    def set_image(self, pixmap: QPixmap, *, mode: str = 'default', percent: float | None = None):
+        self._pixmap = pixmap if (pixmap is not None and not pixmap.isNull()) else None
+        self._mode = str(mode or 'default')
+        self._percent = percent
+        self.update()
+
+    def _compute_target_rect(self, vw: int, vh: int, iw: int, ih: int):
+        if vw <= 0 or vh <= 0 or iw <= 0 or ih <= 0:
+            return QRect(0, 0, 0, 0)
+
+        if self._mode == 'percent':
+            p = self._percent
+            try:
+                p = float(p)
+            except Exception:
+                p = None
+            if p is None:
+                p = 20.0
+            p = max(0.0, float(p)) / 100.0
+            target_w = vw * p
+            target_h = vh * p
+            if target_w <= 0 or target_h <= 0:
+                return QRect(0, 0, 0, 0)
+
+            # Scale down maintaining aspect ratio until either width or height hits the target percent.
+            s_w = target_w / float(iw)
+            s_h = target_h / float(ih)
+            scale = max(s_w, s_h)
+            # Safety: never exceed viewport.
+            scale = min(scale, min(vw / float(iw), vh / float(ih)))
+            w = int(round(iw * scale))
+            h = int(round(ih * scale))
+            x = int(round((vw - w) / 2.0))
+            y = int(round((vh - h) / 2.0))
+            return QRect(x, y, w, h)
+
+        # Default/lines behavior: fit-to-viewport with optional stretch.
+        fit_scale = min(vw / float(iw), vh / float(ih))
+        if fit_scale > 1.0:
+            scale = min(2.0, fit_scale)
+        else:
+            scale = fit_scale
+
+        w0 = float(iw) * float(scale)
+        h0 = float(ih) * float(scale)
+
+        # If we scaled to 200% and still don't hit either dimension, just center.
+        if abs(scale - 2.0) < 1e-6 and w0 < vw and h0 < vh:
+            x = int(round((vw - w0) / 2.0))
+            y = int(round((vh - h0) / 2.0))
+            return QRect(x, y, int(round(w0)), int(round(h0)))
+
+        w = w0
+        h = h0
+
+        # Stretch rules when one dimension matches and the other is deficient.
+        if abs(h0 - vh) <= 2 and w0 < (vw - 2):
+            # Height matches viewport, width is deficient.
+            need = vw / float(w0) if w0 > 0 else 999.0
+            if need <= 1.2:
+                w = float(vw)
+            else:
+                w = float(w0) * 1.15
+            h = float(vh)
+        elif abs(w0 - vw) <= 2 and h0 < (vh - 2):
+            # Width matches viewport, height is deficient.
+            need = vh / float(h0) if h0 > 0 else 999.0
+            if need <= 1.2:
+                h = float(vh)
+            else:
+                h = float(h0) * 1.10
+            w = float(vw)
+
+        x = int(round((vw - w) / 2.0))
+        y = int(round((vh - h) / 2.0))
+        return QRect(x, y, int(round(w)), int(round(h)))
+
+    def paintEvent(self, event):
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+
+        vw = int(self.width())
+        vh = int(self.height())
+        iw = int(self._pixmap.width())
+        ih = int(self._pixmap.height())
+        target = self._compute_target_rect(vw, vh, iw, ih)
+        if target.isNull() or target.width() <= 0 or target.height() <= 0:
+            return
+
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            p.drawPixmap(target, self._pixmap)
+        finally:
+            p.end()
 
 
 def _derive_theme_hsl():
@@ -577,6 +692,34 @@ class BumpsModeWidget(QWidget):
             lambda checked: self.main_window.set_normalize_audio_enabled(checked),
         )
 
+        # Auto-config external drive name
+        drive_row = QHBoxLayout()
+        drive_row.setContentsMargins(0, 0, 0, 0)
+        drive_row.setSpacing(10)
+
+        drive_lbl = QLabel("Auto-Config External Drive Name:")
+        drive_lbl.setStyleSheet("font-size: 16px; color: white;")
+
+        self.input_auto_drive = QLineEdit()
+        self.input_auto_drive.setText(str(getattr(self.main_window, 'auto_config_volume_label', 'T7') or 'T7'))
+        self.input_auto_drive.setPlaceholderText("T7")
+        self.input_auto_drive.setStyleSheet(
+            "QLineEdit { background: #333; color: white; padding: 6px 10px; border: 1px solid #111; border-radius: 4px; }"
+            "QLineEdit:focus { border: 1px solid #0e1a77; }"
+        )
+
+        def _commit_drive_name():
+            try:
+                self.main_window.set_auto_config_volume_label(self.input_auto_drive.text())
+            except Exception:
+                pass
+
+        self.input_auto_drive.editingFinished.connect(_commit_drive_name)
+
+        drive_row.addWidget(drive_lbl)
+        drive_row.addWidget(self.input_auto_drive, 1)
+        layout.addLayout(drive_row)
+
         info = QLabel("Global bumps play between episodes.")
         info.setStyleSheet("font-size: 14px; color: #e0e0e0;")
         layout.addWidget(info)
@@ -599,9 +742,47 @@ class BumpsModeWidget(QWidget):
         self.lbl_music.setStyleSheet("font-size: 16px; color: white;")
         layout.addWidget(self.lbl_music)
 
+        layout.addSpacing(10)
+
+        self.btn_images = QPushButton("Set Bump Images Folder")
+        self.btn_images.clicked.connect(self.main_window.choose_bump_images)
+        layout.addWidget(self.btn_images)
+
+        self.lbl_images = QLabel("Images: (not set)")
+        self.lbl_images.setStyleSheet("font-size: 14px; color: #e0e0e0;")
+        layout.addWidget(self.lbl_images)
+
+        layout.addSpacing(10)
+
+        self.btn_audio_fx = QPushButton("Set Bump Audio FX Folder")
+        self.btn_audio_fx.clicked.connect(self.main_window.choose_bump_audio_fx)
+        layout.addWidget(self.btn_audio_fx)
+
+        self.lbl_audio_fx = QLabel("Audio FX: (not set)")
+        self.lbl_audio_fx.setStyleSheet("font-size: 14px; color: #e0e0e0;")
+        layout.addWidget(self.lbl_audio_fx)
+
         layout.addStretch(1)
 
     def refresh_status(self):
+        def _count_files(folder, exts):
+            try:
+                folder = str(folder or '')
+                if not folder or not os.path.isdir(folder):
+                    return 0
+                exts_l = {str(e).lower() for e in (exts or set())}
+                n = 0
+                for root, _, files in os.walk(folder):
+                    for f in files:
+                        if os.path.splitext(f)[1].lower() in exts_l:
+                            n += 1
+                return int(n)
+            except Exception:
+                return 0
+
+        image_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'}
+        audio_exts = {'.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac', '.opus', '.webm', '.mp4'}
+
         try:
             scripts_n = len(self.main_window.playlist_manager.bump_manager.bump_scripts)
         except Exception:
@@ -614,6 +795,20 @@ class BumpsModeWidget(QWidget):
 
         self.lbl_scripts.setText(f"Scripts: {scripts_n}")
         self.lbl_music.setText(f"Music: {music_n}")
+
+        try:
+            img_dir = getattr(self.main_window, 'bump_images_dir', None)
+            img_n = _count_files(img_dir, image_exts)
+            self.lbl_images.setText(f"Images: {img_n}")
+        except Exception:
+            pass
+
+        try:
+            fx_dir = getattr(self.main_window, 'bump_audio_fx_dir', None)
+            fx_n = _count_files(fx_dir, audio_exts)
+            self.lbl_audio_fx.setText(f"Audio FX: {fx_n}")
+        except Exception:
+            pass
 
         # Sync toggle icons/checked state from main window settings.
         try:
@@ -1091,6 +1286,96 @@ def auto_detect_tv_vibe_music_dir(volume_label='T7'):
     return None
 
 
+def auto_detect_tv_vibe_images_dir(volume_label='T7'):
+    """Best-effort detection for bump images on the same drive as episodes.
+
+    Expected layout: <mount_root>/Sleepy Shows Data/TV Vibe/images
+    (Falls back to <mount_root>/TV Vibe/images for older layouts.)
+    Returns the images folder path if found, else None.
+    """
+    def probe_mount(mount_root):
+        if not mount_root or not os.path.isdir(mount_root):
+            return None
+
+        data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+        roots_to_probe = []
+        if os.path.isdir(data_root):
+            roots_to_probe.append(data_root)
+        roots_to_probe.append(mount_root)
+
+        for root in roots_to_probe:
+            direct = os.path.join(root, 'TV Vibe', 'images')
+            if os.path.isdir(direct):
+                return direct
+
+            tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+            if not tv_vibe_dir:
+                continue
+
+            images_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'images')
+            if images_dir and os.path.isdir(images_dir):
+                return images_dir
+
+        return None
+
+    for mount_root in _iter_mount_roots_for_label(volume_label) or []:
+        found = probe_mount(mount_root)
+        if found:
+            return found
+
+    for mount_root in _iter_mount_roots_fallback() or []:
+        found = probe_mount(mount_root)
+        if found:
+            return found
+
+    return None
+
+
+def auto_detect_tv_vibe_audio_fx_dir(volume_label='T7'):
+    """Best-effort detection for bump audio FX on the same drive as episodes.
+
+    Expected layout: <mount_root>/Sleepy Shows Data/TV Vibe/audio
+    (Falls back to <mount_root>/TV Vibe/audio for older layouts.)
+    Returns the audio folder path if found, else None.
+    """
+    def probe_mount(mount_root):
+        if not mount_root or not os.path.isdir(mount_root):
+            return None
+
+        data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+        roots_to_probe = []
+        if os.path.isdir(data_root):
+            roots_to_probe.append(data_root)
+        roots_to_probe.append(mount_root)
+
+        for root in roots_to_probe:
+            direct = os.path.join(root, 'TV Vibe', 'audio')
+            if os.path.isdir(direct):
+                return direct
+
+            tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+            if not tv_vibe_dir:
+                continue
+
+            audio_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'audio')
+            if audio_dir and os.path.isdir(audio_dir):
+                return audio_dir
+
+        return None
+
+    for mount_root in _iter_mount_roots_for_label(volume_label) or []:
+        found = probe_mount(mount_root)
+        if found:
+            return found
+
+    for mount_root in _iter_mount_roots_fallback() or []:
+        found = probe_mount(mount_root)
+        if found:
+            return found
+
+    return None
+
+
 def _scan_episode_files(folder_path):
     """Return naturally sorted full paths of video files under folder_path."""
     results = []
@@ -1194,12 +1479,16 @@ class AutoConfigWorker(QObject):
             'playlists_updated': False,
             'tv_vibe_scripts_dir': None,
             'tv_vibe_music_dir': None,
+            'tv_vibe_images_dir': None,
+            'tv_vibe_audio_fx_dir': None,
         }
 
         try:
             show_folders = auto_detect_show_folders(volume_label=self.volume_label)
             result['tv_vibe_scripts_dir'] = auto_detect_tv_vibe_scripts_dir(volume_label=self.volume_label)
             result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir(volume_label=self.volume_label)
+            result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir(volume_label=self.volume_label)
+            result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir(volume_label=self.volume_label)
             sources = []
             for key in ("King of the Hill", "Bob's Burgers"):
                 p = show_folders.get(key)
@@ -1248,8 +1537,9 @@ class WelcomeScreen(QWidget):
         self.btn_vibes_check = None
         self.btn_sleep_label = None
         self.btn_sleep_check = None
-        self.is_vibes_on = False
-        self.is_sleep_on = False
+        # Defaults: TV Vibes ON and Sleepy Time ON (3 hours).
+        self.is_vibes_on = True
+        self.is_sleep_on = True
         self.show_btns = [] # Track buttons for resizing
         self.setup_ui()
         
@@ -1457,8 +1747,21 @@ class WelcomeScreen(QWidget):
         self.lbl_logo.raise_() 
 
         # Init visual state
-        self.update_checkbox(self.btn_vibes_check, False)
-        self.update_checkbox(self.btn_sleep_check, False)
+        self.update_checkbox(self.btn_vibes_check, self.is_vibes_on)
+        self.update_checkbox(self.btn_sleep_check, self.is_sleep_on)
+
+        # Sync underlying app state with the toggles.
+        try:
+            self.main_window.set_bumps_enabled(self.is_vibes_on)
+        except Exception:
+            pass
+        try:
+            if self.is_sleep_on:
+                self.main_window.start_sleep_timer(getattr(self.main_window, 'sleep_timer_default_minutes', 180))
+            else:
+                self.main_window.cancel_sleep_timer()
+        except Exception:
+            pass
 
     def set_show_pending(self, show_name, pending):
         btn = None
@@ -2306,6 +2609,19 @@ class MainWindow(QMainWindow):
         self._settings = self._load_user_settings()
         self.startup_crickets_enabled = bool(self._settings.get('startup_crickets_enabled', True))
         self.normalize_audio_enabled = bool(self._settings.get('normalize_audio_enabled', False))
+        self.bump_images_dir = self._settings.get('bump_images_dir', None)
+        self.bump_audio_fx_dir = self._settings.get('bump_audio_fx_dir', None)
+        self.auto_config_volume_label = str(self._settings.get('auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
+
+        try:
+            self.playlist_manager.bump_manager.bump_images_dir = self.bump_images_dir
+        except Exception:
+            pass
+
+        try:
+            self.playlist_manager.bump_manager.bump_audio_fx_dir = self.bump_audio_fx_dir
+        except Exception:
+            pass
 
         # Startup ambient audio
         self._startup_ambient_playing = False
@@ -2380,6 +2696,25 @@ class MainWindow(QMainWindow):
         self.player = MpvPlayer(self.video_container)
         container_layout.addWidget(self.player)
 
+        # Audio-only MPV instance used for bump sound effects.
+        self.fx_player = MpvAudioPlayer()
+        self._bump_fx_stop_timer = QTimer()
+        self._bump_fx_stop_timer.setSingleShot(True)
+        self._bump_fx_stop_timer.timeout.connect(self._stop_bump_fx)
+        self._bump_fx_active = False
+        self._bump_fx_policy = None  # None | 'duration' | 'card' | 'ms'
+        self._bump_fx_interrupt_prev_mute = None
+
+        # Bump music cut: when True, bump music is muted for the remainder of the bump.
+        self._bump_music_cut_active = False
+        self._bump_music_cut_prev_mute = None
+
+        # Outro audio exclusivity: when True, block other bump FX so outro audio is the only sound.
+        self._bump_outro_audio_exclusive = False
+
+        # Optional outro audio (<outro ... audio>): pick a random sound from this folder.
+        self._outro_sounds_dir = os.path.join('/media', 'tyler', 'T7', 'Sleepy Shows Data', 'TV Vibe', 'outro sounds')
+
         # Apply audio normalization as early as possible.
         try:
             self.player.set_audio_normalization(self.normalize_audio_enabled)
@@ -2410,11 +2745,41 @@ class MainWindow(QMainWindow):
         self.bump_widget = QWidget()
         self.bump_widget.setStyleSheet("background-color: black;")
         bump_layout = QVBoxLayout(self.bump_widget)
+        self._bump_layout = bump_layout
+        self._bump_safe_vpad_ratio = 0.15
         self.lbl_bump_text = QLabel("")
         self.lbl_bump_text.setAlignment(Qt.AlignCenter)
         self.lbl_bump_text.setWordWrap(True)
         self.lbl_bump_text.setFont(QFont("Arial", 28, QFont.Bold))
+        self.lbl_bump_text.setStyleSheet("color: white;")
+
+        self.lbl_bump_text_top = QLabel("")
+        self.lbl_bump_text_top.setAlignment(Qt.AlignCenter)
+        self.lbl_bump_text_top.setWordWrap(True)
+        self.lbl_bump_text_top.setFont(QFont("Arial", 28, QFont.Bold))
+        self.lbl_bump_text_top.setStyleSheet("color: white;")
+
+        self.bump_image_view = BumpImageView(self.bump_widget)
+        self.bump_image_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.lbl_bump_text_bottom = QLabel("")
+        self.lbl_bump_text_bottom.setAlignment(Qt.AlignCenter)
+        self.lbl_bump_text_bottom.setWordWrap(True)
+        self.lbl_bump_text_bottom.setFont(QFont("Arial", 28, QFont.Bold))
+        self.lbl_bump_text_bottom.setStyleSheet("color: white;")
+
         bump_layout.addWidget(self.lbl_bump_text)
+        bump_layout.addWidget(self.lbl_bump_text_top)
+        bump_layout.addWidget(self.bump_image_view, 1)
+        bump_layout.addWidget(self.lbl_bump_text_bottom)
+
+        # Start with text-only mode visible.
+        self.lbl_bump_text_top.hide()
+        self.bump_image_view.hide()
+        self.lbl_bump_text_bottom.hide()
+
+        # Keep bump text out of the extreme top/bottom of the screen.
+        self.bump_widget.installEventFilter(self)
         
         # --- UI Setup ---
         self.setup_ui()
@@ -2533,7 +2898,7 @@ class MainWindow(QMainWindow):
                     pass
 
             self._auto_config_thread = QThread(self)
-            self._auto_config_worker = AutoConfigWorker(volume_label='T7')
+            self._auto_config_worker = AutoConfigWorker(volume_label=getattr(self, 'auto_config_volume_label', 'T7'))
             self._auto_config_worker.moveToThread(self._auto_config_thread)
 
             self._auto_config_thread.started.connect(self._auto_config_worker.run)
@@ -2546,6 +2911,18 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._auto_config_running = False
             print(f"DEBUG: Auto library detection failed: {e}")
+
+    def set_auto_config_volume_label(self, label: str):
+        value = str(label or '').strip()
+        if not value:
+            value = 'T7'
+
+        self.auto_config_volume_label = value
+        try:
+            self._settings['auto_config_volume_label'] = value
+            self._save_user_settings()
+        except Exception:
+            pass
 
     def _on_auto_config_finished(self, result):
         try:
@@ -2578,6 +2955,8 @@ class MainWindow(QMainWindow):
             # Auto-detect bumps scripts/music on the same external drive.
             tv_vibe_scripts_dir = (result or {}).get('tv_vibe_scripts_dir', None)
             tv_vibe_music_dir = (result or {}).get('tv_vibe_music_dir', None)
+            tv_vibe_images_dir = (result or {}).get('tv_vibe_images_dir', None)
+            tv_vibe_audio_fx_dir = (result or {}).get('tv_vibe_audio_fx_dir', None)
             if tv_vibe_scripts_dir and os.path.isdir(tv_vibe_scripts_dir):
                 try:
                     default_scripts_dir = get_local_bumps_scripts_dir()
@@ -2601,6 +2980,34 @@ class MainWindow(QMainWindow):
                             pass
                         try:
                             bump_mgr.scan_music(tv_vibe_music_dir)
+                        except Exception:
+                            pass
+
+                    if tv_vibe_images_dir and os.path.isdir(tv_vibe_images_dir):
+                        # Only override if the user hasn't configured one yet.
+                        if not getattr(self, 'bump_images_dir', None):
+                            self.bump_images_dir = tv_vibe_images_dir
+                            try:
+                                self._settings['bump_images_dir'] = tv_vibe_images_dir
+                                self._save_user_settings()
+                            except Exception:
+                                pass
+                        try:
+                            bump_mgr.bump_images_dir = self.bump_images_dir
+                        except Exception:
+                            pass
+
+                    if tv_vibe_audio_fx_dir and os.path.isdir(tv_vibe_audio_fx_dir):
+                        # Only override if the user hasn't configured one yet.
+                        if not getattr(self, 'bump_audio_fx_dir', None):
+                            self.bump_audio_fx_dir = tv_vibe_audio_fx_dir
+                            try:
+                                self._settings['bump_audio_fx_dir'] = tv_vibe_audio_fx_dir
+                                self._save_user_settings()
+                            except Exception:
+                                pass
+                        try:
+                            bump_mgr.bump_audio_fx_dir = self.bump_audio_fx_dir
                         except Exception:
                             pass
 
@@ -2642,6 +3049,21 @@ class MainWindow(QMainWindow):
                      cw = w
                      ch = 180 # Fixed height
                      ctrls.setGeometry(0, h - ch, cw, ch)
+
+        if obj == getattr(self, 'bump_widget', None) and event.type() == QEvent.Resize:
+            try:
+                h = int(event.size().height())
+                pad = int(round(h * float(getattr(self, '_bump_safe_vpad_ratio', 0.15))))
+                # Clamp so we never consume the whole view.
+                pad = max(0, min(pad, max(0, (h // 2) - 1)))
+
+                layout = getattr(self, '_bump_layout', None) or self.bump_widget.layout()
+                if layout is not None:
+                    l, t, r, b = layout.getContentsMargins()
+                    if t != pad or b != pad:
+                        layout.setContentsMargins(l, pad, r, pad)
+            except Exception:
+                pass
         
         if event.type() == QEvent.MouseMove:
             self.on_mouse_move()
@@ -3019,16 +3441,26 @@ class MainWindow(QMainWindow):
         is_active = bool(self.sleep_timer_active)
         active_mins = int(self.current_sleep_minutes) if hasattr(self, 'current_sleep_minutes') else 0
         
-        check_icon = QIcon(get_asset_path("check.png"))
-        empty_icon = QIcon()
+        # Cache icons so update_sleep_menu_state() can reuse them.
+        self._sleep_check_icon = QIcon(get_asset_path("check.png"))
+        self._sleep_empty_icon = QIcon()
+
+        check_icon = self._sleep_check_icon
+        empty_icon = self._sleep_empty_icon
+
+        # Track buttons so we can update checkmarks while the dropdown is open.
+        self._sleep_dropdown_buttons = {}
         
         # Helper to add item
-        def add_item(text, is_checked, callback):
+        def add_item(text, is_checked, callback, minutes_value=None):
             btn = QPushButton(text)
             if is_checked:
                 btn.setIcon(check_icon)
             else:
                 btn.setIcon(empty_icon) # Keep alignment
+
+            if minutes_value is not None:
+                self._sleep_dropdown_buttons[int(minutes_value)] = btn
 
             # clicked(bool) -> ignore the bool
             btn.clicked.connect(lambda _=False: callback())
@@ -3036,7 +3468,7 @@ class MainWindow(QMainWindow):
             layout.addWidget(btn)
 
         # 1. Off
-        add_item("Off", not is_active, lambda: self.cancel_sleep_timer())
+        add_item("Off", not is_active, lambda: self.cancel_sleep_timer(), minutes_value=0)
         
         # 2. Durations
         durations = [30, 60, 90, 120, 180]
@@ -3050,7 +3482,7 @@ class MainWindow(QMainWindow):
                 label = f"{mins} Minutes"
                 
             is_checked = is_active and (mins == active_mins)
-            add_item(label, is_checked, lambda m=mins: self.start_sleep_timer(m))
+            add_item(label, is_checked, lambda m=mins: self.start_sleep_timer(m), minutes_value=mins)
             
         # Position it
         anchor = anchor_widget if anchor_widget is not None else self.btn_sleep_timer
@@ -3129,7 +3561,33 @@ class MainWindow(QMainWindow):
 
     # Old method removed as logic is now inside show_sleep_timer_dropdown
     def update_sleep_menu_state(self):
-        pass
+        try:
+            # Only relevant while the dropdown is visible.
+            if not hasattr(self, 'sleep_dropdown') or not self.sleep_dropdown or not self.sleep_dropdown.isVisible():
+                return
+            if not hasattr(self, '_sleep_dropdown_buttons') or not isinstance(self._sleep_dropdown_buttons, dict):
+                return
+
+            check_icon = getattr(self, '_sleep_check_icon', None)
+            empty_icon = getattr(self, '_sleep_empty_icon', None)
+            if check_icon is None or empty_icon is None:
+                return
+
+            is_active = bool(getattr(self, 'sleep_timer_active', False))
+            active_mins = int(getattr(self, 'current_sleep_minutes', 0) or 0)
+
+            for mins, btn in list(self._sleep_dropdown_buttons.items()):
+                if btn is None:
+                    continue
+
+                if mins == 0:
+                    is_checked = not is_active
+                else:
+                    is_checked = is_active and (mins == active_mins)
+
+                btn.setIcon(check_icon if is_checked else empty_icon)
+        except Exception:
+            return
 
     def _ensure_sleep_status_label(self):
         if hasattr(self, 'lbl_sleep_status') and self.lbl_sleep_status is not None:
@@ -3369,6 +3827,52 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Bumps", f"Found {len(self.playlist_manager.bump_manager.music_files)} music files.")
             if hasattr(self, 'bumps_mode_widget'):
                 self.bumps_mode_widget.refresh_status()
+
+    def choose_bump_images(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Bump Images Directory")
+        if not folder:
+            return
+
+        self.bump_images_dir = folder
+        try:
+            self._settings['bump_images_dir'] = folder
+            self._save_user_settings()
+        except Exception:
+            pass
+
+        try:
+            self.playlist_manager.bump_manager.bump_images_dir = folder
+        except Exception:
+            pass
+
+        if hasattr(self, 'bumps_mode_widget'):
+            try:
+                self.bumps_mode_widget.refresh_status()
+            except Exception:
+                pass
+
+    def choose_bump_audio_fx(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Bump Audio FX Directory")
+        if not folder:
+            return
+
+        self.bump_audio_fx_dir = folder
+        try:
+            self._settings['bump_audio_fx_dir'] = folder
+            self._save_user_settings()
+        except Exception:
+            pass
+
+        try:
+            self.playlist_manager.bump_manager.bump_audio_fx_dir = folder
+        except Exception:
+            pass
+
+        if hasattr(self, 'bumps_mode_widget'):
+            try:
+                self.bumps_mode_widget.refresh_status()
+            except Exception:
+                pass
 
     def set_bumps_enabled(self, enabled):
         self.bumps_enabled = bool(enabled)
@@ -3655,6 +4159,14 @@ class MainWindow(QMainWindow):
         
         self.video_stack.setCurrentIndex(1) # Bump View
         self.setWindowTitle("Sleepy Shows - [AS]")
+
+        # Reset any lingering FX from a prior bump.
+        self._stop_bump_fx()
+
+        # Reset per-bump audio control state.
+        self._bump_music_cut_active = False
+        self._bump_music_cut_prev_mute = None
+        self._bump_outro_audio_exclusive = False
         
         if audio:
             self.player.play(audio)
@@ -3663,6 +4175,204 @@ class MainWindow(QMainWindow):
             self.current_bump_script = script.get('cards', [])
             self.current_card_index = 0
             self.advance_bump_card()
+
+    def _remaining_bump_ms(self):
+        try:
+            cards = self.current_bump_script or []
+            idx = int(getattr(self, 'current_card_index', 0) or 0)
+            if idx < 0:
+                idx = 0
+            total = 0
+            for c in cards[idx:]:
+                try:
+                    total += int(c.get('duration', 0) or 0)
+                except Exception:
+                    continue
+            return max(0, int(total))
+        except Exception:
+            return 0
+
+    def _stop_bump_fx(self):
+        try:
+            if hasattr(self, '_bump_fx_stop_timer') and self._bump_fx_stop_timer.isActive():
+                self._bump_fx_stop_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'fx_player') and self.fx_player:
+                self.fx_player.stop()
+        except Exception:
+            pass
+
+        # Restore bump music mute state if we interrupted (unless a permanent cut is active).
+        try:
+            if not bool(getattr(self, '_bump_music_cut_active', False)):
+                prev = getattr(self, '_bump_fx_interrupt_prev_mute', None)
+                if prev is not None and hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                    try:
+                        self.player.mpv.mute = bool(prev)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        self._bump_fx_interrupt_prev_mute = None
+        self._bump_fx_active = False
+        self._bump_fx_policy = None
+
+    def _pick_random_outro_sound(self):
+        # Prefer the default T7 location; fall back to any mounted drive under /media/tyler.
+        folders = []
+        try:
+            p = str(getattr(self, '_outro_sounds_dir', '') or '').strip()
+            if p and os.path.isdir(p):
+                folders.append(p)
+        except Exception:
+            pass
+
+        try:
+            pattern = os.path.join('/media', 'tyler', '*', 'Sleepy Shows Data', 'TV Vibe', 'outro sounds')
+            for p in glob.glob(pattern):
+                if os.path.isdir(p):
+                    folders.append(p)
+        except Exception:
+            pass
+
+        audio_exts = {'.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac', '.opus', '.webm', '.mp4'}
+
+        for folder in folders:
+            try:
+                files = []
+                for name in os.listdir(folder):
+                    full = os.path.join(folder, name)
+                    if not os.path.isfile(full):
+                        continue
+                    if os.path.splitext(name)[1].lower() in audio_exts:
+                        files.append(full)
+                if files:
+                    return random.choice(files)
+            except Exception:
+                continue
+
+        return None
+
+    def _play_outro_audio(self):
+        path = self._pick_random_outro_sound()
+        if not path or not os.path.exists(path):
+            return
+
+        # Outro audio is always a CUT and trumps all other audio:
+        # - stop any other FX
+        # - mute bump music for the remainder of the bump
+        # - block subsequent FX so this is the only sound playing
+        try:
+            self._stop_bump_fx()
+        except Exception:
+            pass
+
+        self._bump_outro_audio_exclusive = True
+        try:
+            if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                if not bool(getattr(self, '_bump_music_cut_active', False)):
+                    self._bump_music_cut_prev_mute = bool(getattr(self.player.mpv, 'mute', False))
+                self._bump_music_cut_active = True
+                self.player.mpv.mute = True
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'fx_player') and self.fx_player:
+                self.fx_player.play(path)
+        except Exception:
+            self._stop_bump_fx()
+            return
+
+        self._bump_fx_active = True
+        self._bump_fx_policy = 'ms'
+        try:
+            self._bump_fx_stop_timer.start(800)
+        except Exception:
+            pass
+
+    def _play_bump_fx_for_card(self, card, card_duration_ms):
+        try:
+            # If outro-audio exclusivity is active, don't play any other FX.
+            if bool(getattr(self, '_bump_outro_audio_exclusive', False)):
+                return
+            if not isinstance(card, dict):
+                return
+            sound = card.get('sound')
+            if not isinstance(sound, dict):
+                return
+
+            path = str(sound.get('path') or '').strip()
+            if not path or not os.path.exists(path):
+                return
+
+            mix = str(sound.get('mix') or 'add').strip().lower()
+            play_for = str(sound.get('play_for') or 'card').strip().lower()
+
+            remaining_ms = int(self._remaining_bump_ms())
+            if remaining_ms <= 0:
+                return
+
+            limit_ms = None
+            if play_for == 'duration':
+                # Play the file, but never longer than the remaining bump length.
+                limit_ms = remaining_ms
+            elif play_for == 'ms':
+                try:
+                    limit_ms = int(sound.get('ms', 0) or 0)
+                except Exception:
+                    limit_ms = 0
+                if limit_ms <= 0:
+                    limit_ms = int(card_duration_ms)
+                limit_ms = min(limit_ms, remaining_ms)
+            else:
+                # 'card'
+                limit_ms = min(int(card_duration_ms), remaining_ms)
+
+            # Starting a new FX replaces any currently playing FX.
+            self._stop_bump_fx()
+
+            if mix == 'cut':
+                # Permanently mute bump music for the remainder of the bump.
+                try:
+                    if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                        if not bool(getattr(self, '_bump_music_cut_active', False)):
+                            self._bump_music_cut_prev_mute = bool(getattr(self.player.mpv, 'mute', False))
+                        self._bump_music_cut_active = True
+                        self.player.mpv.mute = True
+                except Exception:
+                    pass
+
+            if mix == 'interrupt':
+                try:
+                    if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                        self._bump_fx_interrupt_prev_mute = bool(getattr(self.player.mpv, 'mute', False))
+                        self.player.mpv.mute = True
+                except Exception:
+                    self._bump_fx_interrupt_prev_mute = None
+
+            try:
+                if hasattr(self, 'fx_player') and self.fx_player:
+                    self.fx_player.play(path)
+            except Exception:
+                # Ensure we don't leave bump music muted if FX couldn't play.
+                self._stop_bump_fx()
+                return
+
+            self._bump_fx_active = True
+            self._bump_fx_policy = play_for
+
+            try:
+                if limit_ms is not None and int(limit_ms) > 0:
+                    self._bump_fx_stop_timer.start(int(limit_ms))
+            except Exception:
+                pass
+        except Exception:
+            return
 
     def advance_bump_card(self):
          if not self.current_bump_script:
@@ -3684,15 +4394,132 @@ class MainWindow(QMainWindow):
              self.play_next()
              return
 
+         # Card ended: stop any card-scoped FX before showing the next card.
+         if getattr(self, '_bump_fx_policy', None) == 'card' and getattr(self, '_bump_fx_active', False):
+             self._stop_bump_fx()
+
          card = self.current_bump_script[self.current_card_index]
          # Card durations are stored in milliseconds.
          duration = int(card.get('duration', 1200))
-         
+
+         # Play any sound FX for this card.
+         self._play_bump_fx_for_card(card, duration)
+
+         def _hide_all_bump_widgets():
+             self.lbl_bump_text.hide()
+             self.lbl_bump_text_top.hide()
+             self.bump_image_view.hide()
+             self.lbl_bump_text_bottom.hide()
+             self.lbl_bump_text.setText("")
+             self.lbl_bump_text_top.setText("")
+             self.lbl_bump_text_bottom.setText("")
+             try:
+                 self.lbl_bump_text_top.setMaximumHeight(16777215)
+                 self.lbl_bump_text_bottom.setMaximumHeight(16777215)
+                 self.lbl_bump_text_top.setMinimumHeight(0)
+                 self.lbl_bump_text_bottom.setMinimumHeight(0)
+             except Exception:
+                 pass
+             try:
+                 self.bump_image_view.clear()
+             except Exception:
+                 pass
+
          ctype = card.get('type', 'text')
          if ctype == 'text':
+             _hide_all_bump_widgets()
+             self.lbl_bump_text.setTextFormat(Qt.PlainText)
              self.lbl_bump_text.setText(card.get('text', ''))
+             self.lbl_bump_text.show()
+             if bool(card.get('outro_audio', False)):
+                 self._play_outro_audio()
          elif ctype == 'pause':
-             self.lbl_bump_text.setText("")
+             _hide_all_bump_widgets()
+         elif ctype == 'img_char':
+             _hide_all_bump_widgets()
+             img_info = card.get('image') if isinstance(card.get('image'), dict) else {}
+             img_path = str(img_info.get('path') or '')
+             pm = QPixmap(img_path) if img_path else QPixmap()
+             if pm.isNull():
+                 try:
+                     print(f"DEBUG: Bump image failed to load (img_char): {img_path} exists={os.path.exists(img_path) if img_path else False}")
+                 except Exception:
+                     pass
+                 # Fallback: render without image.
+                 self.lbl_bump_text.setTextFormat(Qt.PlainText)
+                 self.lbl_bump_text.setText(str(card.get('template', '')).replace('[[IMG]]', ''))
+                 self.lbl_bump_text.show()
+             else:
+                 template = str(card.get('template', ''))
+                 parts = template.split('[[IMG]]')
+                 before = html.escape(parts[0]) if parts else ''
+                 after = html.escape(parts[1]) if len(parts) > 1 else ''
+                 # Preserve line breaks.
+                 before = before.replace('\n', '<br>')
+                 after = after.replace('\n', '<br>')
+                 font_px = max(1, int(self.lbl_bump_text.fontMetrics().height()))
+                 img_html = f'<img src="{html.escape(img_path)}" style="height:{font_px}px;" />'
+                 html_body = f'<div align="center">{before}{img_html}{after}</div>'
+                 self.lbl_bump_text.setTextFormat(Qt.RichText)
+                 self.lbl_bump_text.setText(html_body)
+                 self.lbl_bump_text.show()
+         elif ctype == 'img':
+             _hide_all_bump_widgets()
+             img_info = card.get('image') if isinstance(card.get('image'), dict) else {}
+             img_path = str(img_info.get('path') or '')
+             pm = QPixmap(img_path) if img_path else QPixmap()
+             if pm.isNull():
+                 try:
+                     print(f"DEBUG: Bump image failed to load (img): {img_path} exists={os.path.exists(img_path) if img_path else False} mode={img_info.get('mode')}")
+                 except Exception:
+                     pass
+                 # Fallback: show text only.
+                 combined = "\n".join([str(card.get('text_before') or ''), str(card.get('text_after') or '')]).strip()
+                 self.lbl_bump_text.setTextFormat(Qt.PlainText)
+                 self.lbl_bump_text.setText(combined)
+                 self.lbl_bump_text.show()
+             else:
+                 mode = str(img_info.get('mode') or 'default')
+                 percent = None
+                 try:
+                     percent = float(img_info.get('percent')) if 'percent' in img_info else None
+                 except Exception:
+                     percent = None
+
+                 before = str(card.get('text_before') or '').strip()
+                 after = str(card.get('text_after') or '').strip()
+
+                 # If "lines" mode, reserve space for the explicit number of text lines.
+                 if mode == 'lines':
+                     fm = self.lbl_bump_text.fontMetrics()
+                     line_h = int(fm.lineSpacing())
+                     top_lines = int(card.get('before_lines', 0) or 0)
+                     bot_lines = int(card.get('after_lines', 0) or 0)
+
+                     if before:
+                         self.lbl_bump_text_top.setTextFormat(Qt.PlainText)
+                         self.lbl_bump_text_top.setText(before)
+                         self.lbl_bump_text_top.setFixedHeight(max(0, top_lines * line_h))
+                         self.lbl_bump_text_top.show()
+                     if after:
+                         self.lbl_bump_text_bottom.setTextFormat(Qt.PlainText)
+                         self.lbl_bump_text_bottom.setText(after)
+                         self.lbl_bump_text_bottom.setFixedHeight(max(0, bot_lines * line_h))
+                         self.lbl_bump_text_bottom.show()
+                 else:
+                     if before:
+                         self.lbl_bump_text_top.setTextFormat(Qt.PlainText)
+                         self.lbl_bump_text_top.setText(before)
+                         self.lbl_bump_text_top.show()
+                     if after:
+                         self.lbl_bump_text_bottom.setTextFormat(Qt.PlainText)
+                         self.lbl_bump_text_bottom.setText(after)
+                         self.lbl_bump_text_bottom.show()
+
+                 self.bump_image_view.set_image(pm, mode=mode, percent=percent)
+                 self.bump_image_view.show()
+         else:
+             _hide_all_bump_widgets()
              
          self.current_card_index += 1
          # MPV audio is running independently. We just time the cards.
@@ -3713,7 +4540,36 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Stop any active FX and restore bump music mute.
+        self._stop_bump_fx()
+
+        # Restore bump music mute state if a "cut" was applied.
+        try:
+            prev = getattr(self, '_bump_music_cut_prev_mute', None)
+            if prev is not None and hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                try:
+                    self.player.mpv.mute = bool(prev)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        self._bump_music_cut_active = False
+        self._bump_music_cut_prev_mute = None
+        self._bump_outro_audio_exclusive = False
+
         self.current_bump_script = None
+        try:
+            if hasattr(self, 'lbl_bump_text'):
+                self.lbl_bump_text.setText("")
+            if hasattr(self, 'lbl_bump_text_top'):
+                self.lbl_bump_text_top.setText("")
+            if hasattr(self, 'lbl_bump_text_bottom'):
+                self.lbl_bump_text_bottom.setText("")
+            if hasattr(self, 'bump_image_view'):
+                self.bump_image_view.clear()
+        except Exception:
+            pass
 
     def toggle_play(self):
         # If player is idle but we have a playlist, start playing

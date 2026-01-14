@@ -148,3 +148,61 @@ class MpvPlayer(QWidget):
     def shutdown(self):
         if self.mpv:
             self.mpv.terminate()
+
+
+class MpvAudioPlayer:
+    """Audio-only MPV instance for short sound effects.
+
+    This is intentionally minimal: it does not render video and does not bind input.
+    """
+
+    def __init__(self):
+        self.mpv = None
+        self._init_mpv()
+
+    def _init_mpv(self):
+        try:
+            import mpv
+            # vo=null ensures no video output; input bindings disabled to avoid stealing keys.
+            self.mpv = mpv.MPV(
+                input_default_bindings=False,
+                input_vo_keyboard=False,
+                osc=False,
+                vo='null',
+            )
+            try:
+                # Ensure we never try to render a video track.
+                self.mpv.vid = 'no'
+            except Exception:
+                pass
+        except Exception:
+            self.mpv = None
+
+    def play(self, filepath):
+        if self.mpv:
+            try:
+                self.mpv.play(filepath)
+                self.mpv.pause = False
+            except Exception:
+                return
+
+    def stop(self):
+        if self.mpv:
+            try:
+                self.mpv.stop()
+            except Exception:
+                return
+
+    def set_volume(self, volume):
+        if self.mpv:
+            try:
+                self.mpv.volume = volume
+            except Exception:
+                return
+
+    def shutdown(self):
+        if self.mpv:
+            try:
+                self.mpv.terminate()
+            except Exception:
+                return
