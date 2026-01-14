@@ -43,11 +43,15 @@ class PlaylistManager:
         self.playback_history = []
         self.playback_history_pos = -1
 
+        # Special-case sequencing overrides (e.g., multipart episodes).
+        self._forced_next_episode_index = None
+
     def reset_playback_state(self):
         self.play_queue = []
         self.episode_history = []
         self.playback_history = []
         self.playback_history_pos = -1
+        self._forced_next_episode_index = None
 
     def is_episode_item(self, item):
         if isinstance(item, dict):
@@ -87,6 +91,30 @@ class PlaylistManager:
         # Best-effort: sort by full path using natural sort.
         eps = self._episode_indices()
         return sorted(eps, key=lambda i: natural_sort_key(self._episode_path_for_index(i)))
+
+    def _is_koth_playlist(self):
+        # Heuristic: if any episode path includes "King of the Hill" (common folder name),
+        # treat this as a KOTH playlist.
+        for idx in self._episode_indices()[:30]:
+            p = (self._episode_path_for_index(idx) or '').lower()
+            if 'king of the hill' in p or 'koth' in p:
+                return True
+        return False
+
+    def _is_part1_episode(self, path):
+        if not path:
+            return False
+        base = os.path.splitext(os.path.basename(str(path)))[0]
+        return re.search(r'\(1\)\s*$', base.strip()) is not None
+
+    def _next_chronological_episode_index_after(self, episode_index):
+        ordered = self._chronological_episode_indices()
+        if not ordered or episode_index not in ordered:
+            return -1
+        pos = ordered.index(episode_index)
+        if pos + 1 >= len(ordered):
+            return -1
+        return ordered[pos + 1]
 
     def mark_episode_started(self, index):
         # Track episode history for avoidance rules.
@@ -236,12 +264,53 @@ class PlaylistManager:
             cur_item = self.current_playlist[self.current_index]
             if not self.is_episode_item(cur_item):
                 nxt = self.current_index + 1
+                if nxt < len(self.current_playlist) and not self.is_episode_item(self.current_playlist[nxt]):
+                    return nxt
+
+                # If we have a forced next episode pending (e.g., multipart), honor it
+                # once we're done with any injection(s).
+                if self._forced_next_episode_index is not None:
+                    forced = int(self._forced_next_episode_index)
+                    self._forced_next_episode_index = None
+                    if forced in self.play_queue:
+                        self.play_queue = [i for i in self.play_queue if i != forced]
+                    if 0 <= forced < len(self.current_playlist):
+                        return forced
+
                 return nxt if nxt < len(self.current_playlist) else -1
 
             # If the next item is an injection (interstitial/bump), play it next.
             nxt = self.current_index + 1
             if nxt < len(self.current_playlist) and not self.is_episode_item(self.current_playlist[nxt]):
+                # If this was a multipart part-1 episode, remember the forced next episode
+                # so that after the injection we still continue to part 2.
+                if self.shuffle_mode in ('standard', 'season'):
+                    cur_path = self._episode_path_for_index(self.current_index)
+                    if self._is_koth_playlist() and self._is_part1_episode(cur_path):
+                        forced = self._next_chronological_episode_index_after(self.current_index)
+                        if forced != -1:
+                            self._forced_next_episode_index = forced
                 return nxt
+
+            # Multipart KOTH rule: in shuffle mode, if episode ends with "(1)", force
+            # the next chronological episode once, then resume shuffling.
+            if self.shuffle_mode in ('standard', 'season') and self._forced_next_episode_index is None:
+                cur_path = self._episode_path_for_index(self.current_index)
+                if self._is_koth_playlist() and self._is_part1_episode(cur_path):
+                    forced = self._next_chronological_episode_index_after(self.current_index)
+                    if forced != -1 and forced != self.current_index:
+                        if forced in self.play_queue:
+                            self.play_queue = [i for i in self.play_queue if i != forced]
+                        return forced
+
+        # If we have a pending forced next episode, honor it now.
+        if self._forced_next_episode_index is not None:
+            forced = int(self._forced_next_episode_index)
+            self._forced_next_episode_index = None
+            if forced in self.play_queue:
+                self.play_queue = [i for i in self.play_queue if i != forced]
+            if 0 <= forced < len(self.current_playlist):
+                return forced
 
         # We are moving to the next episode.
         if not self.play_queue:

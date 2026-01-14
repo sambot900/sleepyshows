@@ -1846,9 +1846,31 @@ class PlayModeWidget(QWidget):
         self.main_window = main_window
         self.setup_ui()
 
+    def _tint_pixmap(self, pixmap, color=Qt.white):
+        if pixmap is None or pixmap.isNull():
+            return pixmap
+        out = QPixmap(pixmap.size())
+        out.fill(Qt.transparent)
+
+        painter = QPainter(out)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(out.rect(), QColor(color))
+        painter.end()
+        return out
+
+    def _tint_icon(self, icon, size: QSize, color=Qt.white):
+        if icon is None or icon.isNull():
+            return icon
+        pm = icon.pixmap(size)
+        if pm.isNull():
+            return icon
+        return QIcon(self._tint_pixmap(pm, color=color))
+
     def _make_play_slash_pause_icon(self, icon_h=40):
-        play_pm = self.style().standardIcon(QStyle.SP_MediaPlay).pixmap(icon_h, icon_h)
-        pause_pm = self.style().standardIcon(QStyle.SP_MediaPause).pixmap(icon_h, icon_h)
+        play_pm = self._tint_pixmap(self.style().standardIcon(QStyle.SP_MediaPlay).pixmap(icon_h, icon_h), Qt.white)
+        pause_pm = self._tint_pixmap(self.style().standardIcon(QStyle.SP_MediaPause).pixmap(icon_h, icon_h), Qt.white)
 
         gap = max(6, icon_h // 6)
         slash_w = max(10, icon_h // 3)
@@ -2022,6 +2044,8 @@ class PlayModeWidget(QWidget):
         )
         if menu_icon.isNull():
             menu_icon = self._make_hamburger_icon(size=32)
+        else:
+            menu_icon = self._tint_icon(menu_icon, QSize(32, 32), Qt.white)
         self.btn_menu.setIcon(menu_icon)
         self.btn_menu.setIconSize(QSize(32, 32))
         self.btn_menu.clicked.connect(self.toggle_sidebar)
@@ -2038,7 +2062,7 @@ class PlayModeWidget(QWidget):
         
         self.btn_prev = TriStrokeButton("<<")
         self.btn_prev.setText("")
-        self.btn_prev.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipBackward))
+        self.btn_prev.setIcon(self._tint_icon(self.style().standardIcon(QStyle.SP_MediaSkipBackward), QSize(32, 32), Qt.white))
         self.btn_prev.setIconSize(QSize(32, 32))
         self.btn_prev.setFixedSize(100, button_height)
         self.btn_prev.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
@@ -2056,7 +2080,7 @@ class PlayModeWidget(QWidget):
         
         self.btn_next = TriStrokeButton(">>")
         self.btn_next.setText("")
-        self.btn_next.setIcon(self.style().standardIcon(QStyle.SP_MediaSkipForward))
+        self.btn_next.setIcon(self._tint_icon(self.style().standardIcon(QStyle.SP_MediaSkipForward), QSize(32, 32), Qt.white))
         self.btn_next.setIconSize(QSize(32, 32))
         self.btn_next.setFixedSize(100, button_height)
         self.btn_next.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
@@ -2095,6 +2119,7 @@ class PlayModeWidget(QWidget):
         )
         if shuffle_icon.isNull():
             shuffle_icon = self.style().standardIcon(QStyle.SP_BrowserReload)
+        shuffle_icon = self._tint_icon(shuffle_icon, QSize(32, 32), Qt.white)
         self.btn_shuffle.setIcon(shuffle_icon)
         self.btn_shuffle.setIconSize(QSize(32, 32))
         self.btn_shuffle.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
@@ -2149,6 +2174,7 @@ class PlayModeWidget(QWidget):
         )
         if enter_fs_icon.isNull():
             enter_fs_icon = self.style().standardIcon(QStyle.SP_TitleBarMaxButton)
+        enter_fs_icon = self._tint_icon(enter_fs_icon, QSize(32, 32), Qt.white)
         self.btn_fullscreen.setIcon(enter_fs_icon)
         self.btn_fullscreen.setIconSize(QSize(32, 32))
         self.btn_fullscreen.setFixedSize(button_height, button_height)
@@ -2701,6 +2727,8 @@ class MainWindow(QMainWindow):
             )
             if exit_fs_icon.isNull():
                 exit_fs_icon = self.style().standardIcon(QStyle.SP_TitleBarNormalButton)
+            if hasattr(self, 'play_mode_widget') and self.play_mode_widget is not None:
+                exit_fs_icon = self.play_mode_widget._tint_icon(exit_fs_icon, QSize(32, 32), Qt.white)
             btn.setIcon(exit_fs_icon)
         else:
             enter_fs_icon = QIcon.fromTheme(
@@ -2709,6 +2737,8 @@ class MainWindow(QMainWindow):
             )
             if enter_fs_icon.isNull():
                 enter_fs_icon = self.style().standardIcon(QStyle.SP_TitleBarMaxButton)
+            if hasattr(self, 'play_mode_widget') and self.play_mode_widget is not None:
+                enter_fs_icon = self.play_mode_widget._tint_icon(enter_fs_icon, QSize(32, 32), Qt.white)
             btn.setIcon(enter_fs_icon)
 
     def toggle_fullscreen(self):
