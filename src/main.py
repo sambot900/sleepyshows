@@ -2831,6 +2831,7 @@ class MainWindow(QMainWindow):
         self._bump_fx_active = False
         self._bump_fx_policy = None  # None | 'duration' | 'card' | 'ms'
         self._bump_fx_interrupt_prev_mute = None
+        self._bump_fx_prev_volume = None
 
         # Bump music cut: when True, bump music is muted for the remainder of the bump.
 
@@ -4843,6 +4844,19 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Restore FX volume if it was temporarily adjusted (e.g. outro attenuation).
+        try:
+            prev_vol = getattr(self, '_bump_fx_prev_volume', None)
+            if prev_vol is not None and hasattr(self, 'fx_player') and self.fx_player:
+                try:
+                    self.fx_player.set_volume(float(prev_vol))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        self._bump_fx_prev_volume = None
+
         try:
             if hasattr(self, 'fx_player') and self.fx_player:
                 self.fx_player.stop()
@@ -4899,6 +4913,18 @@ class MainWindow(QMainWindow):
 
         try:
             if hasattr(self, 'fx_player') and self.fx_player:
+                # Reduce outro sounds by 3 dB.
+                # mpv volume is a linear scale (0..100), so multiply by 10^(-3/20).
+                try:
+                    prev_vol = None
+                    if getattr(self.fx_player, 'mpv', None) is not None:
+                        prev_vol = getattr(self.fx_player.mpv, 'volume', None)
+                    if prev_vol is not None:
+                        self._bump_fx_prev_volume = float(prev_vol)
+                        atten = 10 ** (-3.0 / 20.0)
+                        self.fx_player.set_volume(float(prev_vol) * float(atten))
+                except Exception:
+                    self._bump_fx_prev_volume = None
                 self.fx_player.play(path)
         except Exception:
             self._stop_bump_fx()
