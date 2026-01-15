@@ -1,7 +1,7 @@
 import os
 import sys
 from PySide6.QtWidgets import QWidget, QVBoxLayout
-from PySide6.QtCore import Signal, Slot, Qt
+from PySide6.QtCore import Signal, Slot, Qt, QMetaObject, Q_ARG
 
 class MpvPlayer(QWidget):
     # Signals to communicate with the main application
@@ -21,6 +21,34 @@ class MpvPlayer(QWidget):
         
         self.mpv = None
         self._init_mpv()
+
+    @Slot(float)
+    def _emit_position(self, value: float):
+        self.positionChanged.emit(float(value))
+
+    @Slot(float)
+    def _emit_duration(self, value: float):
+        self.durationChanged.emit(float(value))
+
+    @Slot(bool)
+    def _emit_paused(self, value: bool):
+        self.playbackPaused.emit(bool(value))
+
+    @Slot()
+    def _emit_finished(self):
+        self.playbackFinished.emit()
+
+    @Slot()
+    def _emit_mouse_moved(self):
+        self.mouseMoved.emit()
+
+    @Slot()
+    def _emit_fullscreen_requested(self):
+        self.fullscreenRequested.emit()
+
+    @Slot()
+    def _emit_escape_pressed(self):
+        self.escapePressed.emit()
         
     def _init_mpv(self):
         try:
@@ -38,35 +66,56 @@ class MpvPlayer(QWidget):
 
             @self.mpv.on_key_press('MOUSE_BTN0_DBL')
             def mouse_dbl_click_handler():
-                self.fullscreenRequested.emit()
+                try:
+                    QMetaObject.invokeMethod(self, "_emit_fullscreen_requested", Qt.QueuedConnection)
+                except Exception:
+                    pass
 
             # Key triggers
             @self.mpv.on_key_press('f')
             def f_key_handler():
-                self.fullscreenRequested.emit()
+                try:
+                    QMetaObject.invokeMethod(self, "_emit_fullscreen_requested", Qt.QueuedConnection)
+                except Exception:
+                    pass
                 
             @self.mpv.on_key_press('F')
             def big_f_key_handler():
-                self.fullscreenRequested.emit()
+                try:
+                    QMetaObject.invokeMethod(self, "_emit_fullscreen_requested", Qt.QueuedConnection)
+                except Exception:
+                    pass
 
             @self.mpv.on_key_press('ESC')
             def esc_key_handler():
-                self.escapePressed.emit()
+                try:
+                    QMetaObject.invokeMethod(self, "_emit_escape_pressed", Qt.QueuedConnection)
+                except Exception:
+                    pass
 
             # Setup event callbacks
             @self.mpv.property_observer('time-pos')
             def time_observer(_name, value):
                 if value is not None:
-                    self.positionChanged.emit(value)
+                    try:
+                        QMetaObject.invokeMethod(self, "_emit_position", Qt.QueuedConnection, Q_ARG(float, float(value)))
+                    except Exception:
+                        pass
 
             @self.mpv.property_observer('duration')
             def duration_observer(_name, value):
                 if value is not None:
-                    self.durationChanged.emit(value)
+                    try:
+                        QMetaObject.invokeMethod(self, "_emit_duration", Qt.QueuedConnection, Q_ARG(float, float(value)))
+                    except Exception:
+                        pass
 
             @self.mpv.property_observer('pause')
             def pause_observer(_name, value):
-                self.playbackPaused.emit(value if value is not None else False)
+                try:
+                    QMetaObject.invokeMethod(self, "_emit_paused", Qt.QueuedConnection, Q_ARG(bool, bool(value if value is not None else False)))
+                except Exception:
+                    pass
 
             # Some mpv configurations may not trigger end-file in a way that
             # reaches us (e.g., keep-open behavior). eof-reached is a reliable
@@ -74,12 +123,18 @@ class MpvPlayer(QWidget):
             @self.mpv.property_observer('eof-reached')
             def eof_observer(_name, value):
                 if value:
-                    self.playbackFinished.emit()
+                    try:
+                        QMetaObject.invokeMethod(self, "_emit_finished", Qt.QueuedConnection)
+                    except Exception:
+                        pass
 
             # NOTE: We use property observer for mouse position to detect hover
             @self.mpv.property_observer('mouse-pos')
             def mouse_pos_observer(_name, value):
-                 self.mouseMoved.emit()
+                 try:
+                     QMetaObject.invokeMethod(self, "_emit_mouse_moved", Qt.QueuedConnection)
+                 except Exception:
+                     pass
 
             @self.mpv.event_callback('end-file')
             def end_file_callback(event):
@@ -89,7 +144,10 @@ class MpvPlayer(QWidget):
                     props = event.get('event_props', {}) if isinstance(event, dict) else {}
                     reason = props.get('reason')
                     if reason in (0, 'eof', 'EOF'):
-                        self.playbackFinished.emit()
+                        try:
+                            QMetaObject.invokeMethod(self, "_emit_finished", Qt.QueuedConnection)
+                        except Exception:
+                            pass
                 except Exception:
                     # Never let callback errors break playback.
                     pass

@@ -1,0 +1,105 @@
+CONTROL VARIABLE
+----------------
+durationNormalizationExponent (α)
+
+Meaning:
+α = 0   → fully equalized scaling
+α = 1   → proportional to character-based duration
+0<α<1   → blended behavior
+α > 1   → exaggerated character-based scaling
+
+
+GLOBAL ELIGIBILITY RULE (MUSIC MATCHING)
+---------------------------------------
+Let:
+T_music = exact music duration (ms)
+ε       = 0.20   (overage tolerance)
+
+Estimated bump duration BEFORE scaling:
+T_estimated = T_fixed + T_scalable_orig
+
+Eligibility condition for this music track:
+T_estimated <= T_music * (1 + ε)
+
+If condition fails:
+- Bump script is NOT a candidate for this music track
+- No scaling attempt is performed
+
+Example:
+15s music → T_music = 15000ms
+Max eligible estimate = 18000ms
+
+
+PER-CARD BASELINE VALUES
+-----------------------
+For each card i:
+c_i        = character count (text only)
+t_i        = original estimated duration from readability model (ms)
+t_min_i    = 0.4 * t_i
+isScalable = true if card has no fixed ms/s override and is not outro
+
+
+STEP 1 — FIXED VS SCALABLE TIME
+-------------------------------
+T_fixed  = sum of all fixed durations
+           (explicit ms/s cards, +/- deltas, outro)
+
+T_target = min(T_music, 29000)
+
+T_scalable_target  = T_target - T_fixed
+T_scalable_orig    = Σ t_i for all scalable cards
+
+Δ = T_scalable_orig - T_scalable_target
+
+If Δ <= 0:
+	no scaling required
+
+
+STEP 2 — WEIGHT COMPUTATION (POWER NORMALIZATION)
+-------------------------------------------------
+For each scalable card i:
+w_i_raw = (t_i)^α
+
+Normalize:
+w_i = w_i_raw / Σ w_i_raw
+
+
+STEP 3 — IDEAL REDUCTION ALLOCATION
+-----------------------------------
+r_i_ideal = Δ * w_i
+t_i_proposed = t_i - r_i_ideal
+
+
+STEP 4 — MAXIMUM REDUCTION LIMIT
+--------------------------------
+r_i_max = t_i - t_min_i
+
+
+STEP 5 — EXPONENTIAL SOFT CLAMP
+-------------------------------
+x_i = r_i_ideal / r_i_max
+
+r_i = r_i_max * (1 - e^(-k * x_i))
+
+k ≈ 3–5
+
+Final duration:
+t_i' = t_i - r_i
+
+
+STEP 6 — RESIDUAL REDISTRIBUTION LOOP
+------------------------------------
+If Σ r_i < Δ:
+	Δ_remaining = Δ - Σ r_i
+	Remove cards where r_i ≈ r_i_max
+	Repeat Steps 2–5 until Δ_remaining ≈ 0
+
+
+OUTCOME
+-------
+- Short music tracks only accept scripts within 20% overage
+- Scaling is never used to force large mismatches
+- Fixed durations preserved
+- Scalable cards reduced smoothly
+- α controls normalization between equalized and character-weighted timing
+- Cards never drop below 40% of original duration

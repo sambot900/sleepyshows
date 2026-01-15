@@ -6,13 +6,17 @@ import platform
 import html
 import random
 import glob
+import hashlib
+import shutil
+import tempfile
+import threading
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QFileDialog, QTreeWidget, 
                                QTreeWidgetItem, QSplitter, QLabel, QSlider, QTabWidget,
                                QListWidget, QListWidgetItem, QInputDialog, QMessageBox, QMenu, QStackedWidget,
                                QDockWidget, QFrame, QSizePolicy, QToolButton, QStyle, QGridLayout,
                                QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider,
-                               QLineEdit)
+                               QLineEdit, QProgressBar)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor
 
@@ -846,6 +850,118 @@ def get_asset_path(filename):
     if not os.path.exists(path):
         print(f"DEBUG: Asset missing at {path}")
     return path
+
+
+def _darker_hex(hex_color: str, factor: float = 0.5) -> str:
+    """Return a darker hex color (factor in [0..1], where 0.5 is 50% darker)."""
+    try:
+        c = QColor(str(hex_color or '').strip())
+        if not c.isValid():
+            return str(hex_color)
+        f = float(factor)
+        f = max(0.0, min(1.0, f))
+        r = int(round(c.red() * f))
+        g = int(round(c.green() * f))
+        b = int(round(c.blue() * f))
+        return QColor(r, g, b).name()
+    except Exception:
+        return str(hex_color)
+
+
+class StartupLoadingScreen(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint
+            | Qt.Dialog
+            | Qt.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WA_StyledBackground, True)
+
+        self._progress = 0
+        self._status = "Starting..."
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(12)
+        layout.setAlignment(Qt.AlignCenter)
+
+        self.logo = QLabel()
+        self.logo.setAlignment(Qt.AlignCenter)
+        self.logo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._logo_pm = QPixmap(get_asset_path("sleepy-shows-logo.png"))
+        layout.addWidget(self.logo)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(22)
+        self.progress_bar.setMaximumWidth(420)
+        self.progress_bar.setStyleSheet(
+            "QProgressBar{background: rgba(0,0,0,90); border: 1px solid rgba(255,255,255,60); border-radius: 10px;}"
+            f"QProgressBar::chunk{{background: {THEME_COLOR}; border-radius: 10px;}}"
+        )
+        layout.addWidget(self.progress_bar)
+
+        self.percent_label = QLabel("0%")
+        self.percent_label.setAlignment(Qt.AlignCenter)
+        self.percent_label.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
+        layout.addWidget(self.percent_label)
+
+        self.status_label = QLabel(self._status)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: rgba(255,255,255,210); font-size: 14px;")
+        layout.addWidget(self.status_label)
+
+        # Smaller default splash, with responsive logo scaling.
+        self.setMinimumSize(520, 360)
+        self.resize(620, 420)
+
+        self._update_logo_pixmap()
+
+    def resizeEvent(self, event):
+        try:
+            self._update_logo_pixmap()
+        except Exception:
+            pass
+        return super().resizeEvent(event)
+
+    def _update_logo_pixmap(self):
+        pm = getattr(self, '_logo_pm', None)
+        if pm is None or pm.isNull():
+            self.logo.clear()
+            return
+
+        # Keep the logo comfortably inside the splash.
+        avail_w = max(1, int(self.width() * 0.82))
+        avail_h = max(1, int(self.height() * 0.33))
+        scaled = pm.scaled(avail_w, avail_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.logo.setPixmap(scaled)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        grad = QLinearGradient(0, 0, 0, self.height())
+        top = QColor(THEME_COLOR)
+        bottom = QColor(_darker_hex(THEME_COLOR, 0.5))
+        grad.setColorAt(0, top)
+        grad.setColorAt(1, bottom)
+        painter.fillRect(self.rect(), grad)
+
+    @Slot(int, str)
+    def set_progress(self, percent: int, status: str):
+        try:
+            p = int(percent)
+        except Exception:
+            p = 0
+        p = max(0, min(100, p))
+        self._progress = p
+        self._status = str(status or "")
+        self.progress_bar.setValue(p)
+        self.percent_label.setText(f"{p}%")
+        self.status_label.setText(self._status)
+
 
 
 def get_local_bumps_scripts_dir():
@@ -2640,12 +2756,12 @@ class MainWindow(QMainWindow):
         # Sleep timer countdown is paused unless a show is actively playing.
         self.sleep_remaining_ms = 0
         self._sleep_last_tick = None
-        self.sleep_countdown_timer = QTimer()
+        self.sleep_countdown_timer = QTimer(self)
         self.sleep_countdown_timer.setInterval(1000)
         self.sleep_countdown_timer.timeout.connect(self._on_sleep_countdown_tick)
         
         # Mouse Hover Timer
-        self.hover_timer = QTimer()
+        self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(2500) # 2.5s hide
         self.hover_timer.setSingleShot(True)
         self.hover_timer.timeout.connect(self.hide_controls)
@@ -2653,7 +2769,7 @@ class MainWindow(QMainWindow):
 
         # Fullscreen reliability: poll cursor movement so controls can appear even when
         # MPV/Qt doesn't deliver mouse move events (common with native windows on Windows).
-        self._fs_cursor_poll_timer = QTimer()
+        self._fs_cursor_poll_timer = QTimer(self)
         self._fs_cursor_poll_timer.setInterval(100)
         self._fs_cursor_poll_timer.timeout.connect(self._poll_fullscreen_cursor)
         self._fs_last_cursor_pos = None
@@ -2663,7 +2779,7 @@ class MainWindow(QMainWindow):
         self._space_shortcut.setContext(Qt.ApplicationShortcut)
         self._space_shortcut.activated.connect(self._on_spacebar)
 
-        self.bump_timer = QTimer()
+        self.bump_timer = QTimer(self)
         self.bump_timer.setSingleShot(True)
         self.bump_timer.timeout.connect(self.advance_bump_card)
         self.current_bump_script = None
@@ -2677,7 +2793,6 @@ class MainWindow(QMainWindow):
         self.is_seeking = False
         self.total_duration = 0
         self._last_time_pos = None
-        self._handled_eof_for_index = None
         self._play_start_monotonic = None
         self._played_since_start = False
         self.was_maximized = False # Track window state for fullscreen toggle
@@ -2685,13 +2800,13 @@ class MainWindow(QMainWindow):
 
         # Playback watchdog: some MPV setups do not reliably deliver end-file events.
         # This ensures we still auto-advance when a file reaches EOF.
-        self.playback_watchdog = QTimer()
+        self.playback_watchdog = QTimer(self)
         self.playback_watchdog.setInterval(500)
         self.playback_watchdog.timeout.connect(self._check_playback_end)
         self.playback_watchdog.start()
         
         # Failsafe timer for fullscreen
-        self.failsafe_timer = QTimer()
+        self.failsafe_timer = QTimer(self)
         self.failsafe_timer.setInterval(2000) # Check every 2s
         self.failsafe_timer.timeout.connect(self.check_fullscreen_inactivity)
 
@@ -2710,7 +2825,7 @@ class MainWindow(QMainWindow):
 
         # Audio-only MPV instance used for bump sound effects.
         self.fx_player = MpvAudioPlayer()
-        self._bump_fx_stop_timer = QTimer()
+        self._bump_fx_stop_timer = QTimer(self)
         self._bump_fx_stop_timer.setSingleShot(True)
         self._bump_fx_stop_timer.timeout.connect(self._stop_bump_fx)
         self._bump_fx_active = False
@@ -2718,11 +2833,35 @@ class MainWindow(QMainWindow):
         self._bump_fx_interrupt_prev_mute = None
 
         # Bump music cut: when True, bump music is muted for the remainder of the bump.
-        self._bump_music_cut_active = False
-        self._bump_music_cut_prev_mute = None
 
         # Outro audio exclusivity: when True, block other bump FX so outro audio is the only sound.
         self._bump_outro_audio_exclusive = False
+
+
+        # Cached list of available outro sounds (paths). Filled lazily.
+        self._outro_sounds_cache = None
+        self._outro_sound_queue = []  # list[int] indices into _outro_sounds_cache
+        self._recent_outro_sound_basenames = []  # list[str]
+        self._outro_recent_n = 8
+
+        # Prefetch/staging for bumps (true double-buffer).
+        #
+        # Active buffer:
+        # - Used by the currently playing bump for the entire bump duration.
+        # - Cleared when bump playback stops.
+        #
+        # Next buffer:
+        # - Populated in the background while the current bump plays.
+        # - Swapped into the active buffer when the next bump begins.
+        self._active_bump_index = None
+        self._bump_prefetch_images = {}  # active: {original_path: QImage}
+        self._bump_staged_audio_map = {}  # active: {original_path: staged_path}
+        self._bump_prefetch_files = set()  # active: set[str] staged paths we created
+
+        self._next_prefetched_for_bump_index = None
+        self._next_bump_prefetch_images = {}  # next: {original_path: QImage}
+        self._next_bump_staged_audio_map = {}  # next: {original_path: staged_path}
+        self._next_bump_prefetch_files = set()  # next: set[str] staged paths we created
 
         # Optional outro audio (<outro ... audio>): pick a random sound from this folder.
         self._outro_sounds_dir = os.path.join('/media', 'tyler', 'T7', 'Sleepy Shows Data', 'TV Vibe', 'outro sounds')
@@ -2752,15 +2891,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self.player.positionChanged.connect(self.update_seeker)
-        self.player.durationChanged.connect(self.update_duration)
-        self.player.playbackFinished.connect(self.on_playback_finished)
-        self.player.errorOccurred.connect(self.on_player_error)
-        self.player.playbackPaused.connect(self.on_player_paused)
-        self.player.mouseMoved.connect(self.on_mouse_move)
+        # mpv callbacks can occur off the GUI thread; always queue into Qt's main loop.
+        self.player.positionChanged.connect(self.update_seeker, Qt.QueuedConnection)
+        self.player.durationChanged.connect(self.update_duration, Qt.QueuedConnection)
+        self.player.playbackFinished.connect(self.on_playback_finished, Qt.QueuedConnection)
+        self.player.errorOccurred.connect(self.on_player_error, Qt.QueuedConnection)
+        self.player.playbackPaused.connect(self.on_player_paused, Qt.QueuedConnection)
+        self.player.mouseMoved.connect(self.on_mouse_move, Qt.QueuedConnection)
         # Handle fullscreen requests from MPV
-        self.player.fullscreenRequested.connect(self.toggle_fullscreen)
-        self.player.escapePressed.connect(self.on_escape_pressed)
+        self.player.fullscreenRequested.connect(self.toggle_fullscreen, Qt.QueuedConnection)
+        self.player.escapePressed.connect(self.on_escape_pressed, Qt.QueuedConnection)
         
         # Create Bump View
         self.bump_widget = QWidget()
@@ -2808,9 +2948,6 @@ class MainWindow(QMainWindow):
         
         # Install event filter to track mouse move across application
         self.installEventFilter(self)
-
-        # Start ambient audio after the event loop begins.
-        QTimer.singleShot(0, self._start_startup_ambient)
 
         # Best-effort: auto-populate library from an external drive (e.g. "T7").
         # If nothing is found, the user can still add a folder manually.
@@ -4183,7 +4320,7 @@ class MainWindow(QMainWindow):
                 if is_episode:
                     bump_item = None
                     try:
-                        bump_item = pm.bump_manager.get_random_bump()
+                        bump_item = pm.bump_manager.get_next_bump()
                     except Exception:
                         bump_item = None
 
@@ -4235,6 +4372,10 @@ class MainWindow(QMainWindow):
                     self._resume_sleep_countdown_if_needed()
                     QTimer.singleShot(200, self._resume_sleep_countdown_if_needed)
                 elif itype == 'bump':
+                    try:
+                        self._activate_prefetched_bump_assets(int(index))
+                    except Exception:
+                        pass
                     self.play_bump(item)
             else:
                  # Legacy
@@ -4251,6 +4392,18 @@ class MainWindow(QMainWindow):
         script = bump_item.get('script')
         audio = bump_item.get('audio')
 
+        # Ensure bump manager has a fresh list of outro sounds (for future bump creation).
+        try:
+            self._ensure_outro_sounds_loaded()
+        except Exception:
+            pass
+
+        # Track the chosen outro sound for this bump (if any).
+        try:
+            self._current_bump_outro_audio_path = bump_item.get('outro_audio_path')
+        except Exception:
+            self._current_bump_outro_audio_path = None
+
         # Treat bumps as non-episode playback for sleep timer purposes.
         self._pause_sleep_countdown()
         
@@ -4266,12 +4419,406 @@ class MainWindow(QMainWindow):
         self._bump_outro_audio_exclusive = False
         
         if audio:
-            self.player.play(audio)
+            self.player.play(self._maybe_staged_path(audio))
             
         if script:
             self.current_bump_script = script.get('cards', [])
             self.current_card_index = 0
             self.advance_bump_card()
+
+        # While this bump is playing, prefetch/stage assets for the next bump.
+        try:
+            QTimer.singleShot(0, self._schedule_prefetch_next_bump_assets)
+        except Exception:
+            pass
+
+    def _app_cache_dir(self):
+        """Prefer an app-local cache dir, with a safe fallback."""
+        try:
+            # Running as a script or a frozen executable.
+            base = None
+            try:
+                base = os.path.dirname(os.path.abspath(sys.argv[0]))
+            except Exception:
+                base = None
+            if not base:
+                base = os.getcwd()
+            p = os.path.join(base, '_cache')
+            os.makedirs(p, exist_ok=True)
+            return p
+        except Exception:
+            try:
+                p = os.path.join(tempfile.gettempdir(), 'sleepyshows_cache')
+                os.makedirs(p, exist_ok=True)
+                return p
+            except Exception:
+                return None
+
+    def _maybe_staged_path(self, path: str):
+        try:
+            p = str(path or '').strip()
+        except Exception:
+            p = ''
+        if not p:
+            return p
+        try:
+            with self._bump_prefetch_lock:
+                return str(self._bump_staged_audio_map.get(p, p))
+        except Exception:
+            return p
+
+    def _clear_active_bump_assets(self):
+        # Volatile-memory purge only. Do not delete cache files; they are re-used.
+        try:
+            with self._bump_prefetch_lock:
+                self._active_bump_index = None
+                self._bump_staged_audio_map = {}
+                self._bump_prefetch_images = {}
+                self._bump_prefetch_files = set()
+        except Exception:
+            pass
+
+    def _clear_next_bump_prefetch(self):
+        # Volatile-memory purge only. Do not delete cache files; they are re-used.
+        try:
+            with self._bump_prefetch_lock:
+                self._next_prefetched_for_bump_index = None
+                self._next_bump_staged_audio_map = {}
+                self._next_bump_prefetch_images = {}
+                self._next_bump_prefetch_files = set()
+        except Exception:
+            pass
+
+    def _activate_prefetched_bump_assets(self, bump_index: int):
+        try:
+            bidx = int(bump_index)
+        except Exception:
+            return
+
+        with self._bump_prefetch_lock:
+            if self._next_prefetched_for_bump_index != bidx:
+                return
+
+            # Swap next -> active.
+            self._active_bump_index = bidx
+            self._bump_staged_audio_map = dict(self._next_bump_staged_audio_map or {})
+            self._bump_prefetch_images = dict(self._next_bump_prefetch_images or {})
+            self._bump_prefetch_files = set(self._next_bump_prefetch_files or set())
+
+            # Clear next.
+            self._next_prefetched_for_bump_index = None
+            self._next_bump_staged_audio_map = {}
+            self._next_bump_prefetch_images = {}
+            self._next_bump_prefetch_files = set()
+
+    def _clear_bump_prefetch(self):
+        # Backward-compatible alias: this clears the NEXT prefetch buffer.
+        self._clear_next_bump_prefetch()
+
+    def _find_next_bump_index(self, start_index: int):
+        pm = self.playlist_manager
+        try:
+            start = int(start_index)
+        except Exception:
+            start = -1
+        if start < 0:
+            start = 0
+        try:
+            items = pm.current_playlist or []
+        except Exception:
+            items = []
+
+        for i in range(start, len(items)):
+            it = items[i]
+            if isinstance(it, dict) and it.get('type') == 'bump':
+                return i
+        return None
+
+    def _ensure_outro_sounds_loaded(self):
+        """Populate bump_manager.outro_sounds from the filesystem (cached)."""
+        pm = self.playlist_manager
+        bump_mgr = getattr(pm, 'bump_manager', None)
+        if not bump_mgr:
+            return
+
+        try:
+            already = bool(getattr(bump_mgr, 'outro_sounds', []) or [])
+        except Exception:
+            already = False
+        if already:
+            return
+
+        files = self._list_outro_sounds_cached()
+        if files:
+            try:
+                bump_mgr.set_outro_sounds(files)
+            except Exception:
+                pass
+
+    def _list_outro_sounds_cached(self):
+        try:
+            cached = self._outro_sounds_cache
+        except Exception:
+            cached = None
+        if isinstance(cached, list) and cached:
+            return cached
+
+        files = self._list_outro_sounds()
+        try:
+            self._outro_sounds_cache = list(files or [])
+        except Exception:
+            self._outro_sounds_cache = None
+        return self._outro_sounds_cache or []
+
+    def _list_outro_sounds(self):
+        # Prefer an explicitly configured folder, then probe common external-drive layouts.
+        folders = []
+        try:
+            p = str(getattr(self, '_outro_sounds_dir', '') or '').strip()
+            if p and os.path.isdir(p):
+                folders.append(p)
+        except Exception:
+            pass
+
+        def _probe_mount(mount_root: str):
+            if not mount_root or not os.path.isdir(mount_root):
+                return
+
+            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+            roots_to_probe = []
+            if os.path.isdir(data_root):
+                roots_to_probe.append(data_root)
+            roots_to_probe.append(mount_root)
+
+            for root in roots_to_probe:
+                direct = os.path.join(root, 'TV Vibe', 'outro sounds')
+                if os.path.isdir(direct):
+                    folders.append(direct)
+                    continue
+
+                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+                if not tv_vibe_dir:
+                    continue
+                outro_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'outro sounds')
+                if outro_dir and os.path.isdir(outro_dir):
+                    folders.append(outro_dir)
+
+        try:
+            label = str(getattr(self, 'auto_config_volume_label', '') or '').strip()
+        except Exception:
+            label = ''
+
+        for mount_root in _iter_mount_roots_for_label(label) or []:
+            _probe_mount(mount_root)
+        for mount_root in _iter_mount_roots_fallback() or []:
+            _probe_mount(mount_root)
+
+        audio_exts = {'.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac', '.opus', '.webm', '.mp4'}
+
+        out = []
+        for folder in folders:
+            try:
+                for name in os.listdir(folder):
+                    full = os.path.join(folder, name)
+                    if not os.path.isfile(full):
+                        continue
+                    if os.path.splitext(name)[1].lower() in audio_exts:
+                        out.append(full)
+            except Exception:
+                continue
+
+        # De-dupe while preserving order.
+        seen = set()
+        uniq = []
+        for p in out:
+            try:
+                key = os.path.normpath(str(p))
+            except Exception:
+                key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(p)
+
+        return uniq
+
+    def _pick_random_outro_sound(self):
+        files = self._list_outro_sounds_cached()
+        if not files:
+            return None
+
+        # Rebuild queue if empty or stale.
+        try:
+            if not isinstance(self._outro_sound_queue, list):
+                self._outro_sound_queue = []
+            if not self._outro_sound_queue:
+                q = list(range(len(files)))
+                random.shuffle(q)
+
+                # Best-effort: keep recently used outros out of the first N picks.
+                recent_set = set((self._recent_outro_sound_basenames or [])[-int(self._outro_recent_n):])
+                if recent_set:
+                    non_recent = []
+                    recent = []
+                    for idx in q:
+                        try:
+                            name = os.path.basename(str(files[int(idx)] or '')).lower()
+                        except Exception:
+                            name = ''
+                        if name in recent_set:
+                            recent.append(idx)
+                        else:
+                            non_recent.append(idx)
+                    q = non_recent + recent
+
+                self._outro_sound_queue = q
+        except Exception:
+            self._outro_sound_queue = []
+
+        # Pop next.
+        try:
+            idx = self._outro_sound_queue.pop(0)
+            p = str(files[int(idx)] or '')
+            if p:
+                try:
+                    name = os.path.basename(p).lower()
+                    if name:
+                        self._recent_outro_sound_basenames.append(name)
+                        self._recent_outro_sound_basenames = self._recent_outro_sound_basenames[-int(self._outro_recent_n):]
+                except Exception:
+                    pass
+                return p
+        except Exception:
+            return None
+
+        return None
+
+    def _stage_small_file(self, src_path: str):
+        """Copy a small file into the app-local cache dir and return the staged path."""
+        try:
+            src = str(src_path or '').strip()
+        except Exception:
+            src = ''
+        if not src or not os.path.exists(src):
+            return None
+
+        cache_dir = self._app_cache_dir()
+        if not cache_dir:
+            return None
+
+        try:
+            base = os.path.basename(src)
+            root, ext = os.path.splitext(base)
+            h = hashlib.md5(src.encode('utf-8', errors='ignore')).hexdigest()[:10]
+            dst = os.path.join(cache_dir, f"{root}__{h}{ext}")
+            if not os.path.exists(dst):
+                shutil.copy2(src, dst)
+            return dst
+        except Exception:
+            return None
+
+    def _schedule_prefetch_next_bump_assets(self):
+        """Prefetch next bump's images and stage its audio files."""
+        pm = self.playlist_manager
+
+        # Determine where playback will resume after this bump.
+        pending = getattr(self, '_pending_next_index', None)
+        if pending is not None:
+            start = int(pending) + 1
+        else:
+            start = int(getattr(pm, 'current_index', -1) or -1) + 1
+
+        bump_idx = self._find_next_bump_index(start)
+        if bump_idx is None:
+            return
+
+        # Avoid re-prefetching the same bump.
+        try:
+            with self._bump_prefetch_lock:
+                if self._next_prefetched_for_bump_index == int(bump_idx):
+                    return
+        except Exception:
+            pass
+
+        # Clear previous NEXT-buffer prefetch to keep memory bounded.
+        self._clear_next_bump_prefetch()
+
+        try:
+            bump_item = pm.current_playlist[int(bump_idx)]
+        except Exception:
+            bump_item = None
+        if not isinstance(bump_item, dict) or bump_item.get('type') != 'bump':
+            return
+
+        t = threading.Thread(
+            target=self._prefetch_next_bump_assets_worker,
+            args=(int(bump_idx), bump_item),
+            daemon=True,
+        )
+        t.start()
+
+    def _prefetch_next_bump_assets_worker(self, bump_idx: int, bump_item: dict):
+        try:
+            script = bump_item.get('script') if isinstance(bump_item, dict) else None
+            cards = (script.get('cards') if isinstance(script, dict) else None) or []
+
+            # --- Stage audio ---
+            staged_map = {}
+            staged_files = set()
+
+            def _stage(path: str):
+                if not path:
+                    return
+                dst = self._stage_small_file(path)
+                if dst:
+                    staged_map[str(path)] = str(dst)
+                    staged_files.add(str(dst))
+
+            try:
+                _stage(str(bump_item.get('audio') or ''))
+            except Exception:
+                pass
+
+            try:
+                _stage(str(bump_item.get('outro_audio_path') or ''))
+            except Exception:
+                pass
+
+            for c in list(cards):
+                if not isinstance(c, dict):
+                    continue
+                sound = c.get('sound')
+                if isinstance(sound, dict):
+                    try:
+                        _stage(str(sound.get('path') or ''))
+                    except Exception:
+                        pass
+
+            # --- Prefetch images (decoded) ---
+            images = {}
+            for c in list(cards):
+                if not isinstance(c, dict):
+                    continue
+                img_info = c.get('image') if isinstance(c.get('image'), dict) else None
+                if not img_info:
+                    continue
+                img_path = str(img_info.get('path') or '').strip()
+                if not img_path or img_path in images:
+                    continue
+                try:
+                    qimg = QImage(img_path)
+                    if not qimg.isNull():
+                        images[img_path] = qimg
+                except Exception:
+                    continue
+
+            with self._bump_prefetch_lock:
+                self._next_prefetched_for_bump_index = int(bump_idx)
+                self._next_bump_staged_audio_map = staged_map
+                self._next_bump_prefetch_files = staged_files
+                self._next_bump_prefetch_images = images
+        except Exception:
+            return
 
     def _remaining_bump_ms(self):
         try:
@@ -4318,69 +4865,16 @@ class MainWindow(QMainWindow):
         self._bump_fx_active = False
         self._bump_fx_policy = None
 
-    def _pick_random_outro_sound(self):
-        # Prefer an explicitly configured folder, then probe common external-drive layouts.
-        folders = []
-        try:
-            p = str(getattr(self, '_outro_sounds_dir', '') or '').strip()
-            if p and os.path.isdir(p):
-                folders.append(p)
-        except Exception:
-            pass
-
-        def _probe_mount(mount_root: str):
-            if not mount_root or not os.path.isdir(mount_root):
-                return
-
-            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
-            roots_to_probe = []
-            if os.path.isdir(data_root):
-                roots_to_probe.append(data_root)
-            roots_to_probe.append(mount_root)
-
-            for root in roots_to_probe:
-                direct = os.path.join(root, 'TV Vibe', 'outro sounds')
-                if os.path.isdir(direct):
-                    folders.append(direct)
-                    continue
-
-                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
-                if not tv_vibe_dir:
-                    continue
-                outro_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'outro sounds')
-                if outro_dir and os.path.isdir(outro_dir):
-                    folders.append(outro_dir)
-
-        try:
-            label = str(getattr(self, 'auto_config_volume_label', '') or '').strip()
-        except Exception:
-            label = ''
-
-        for mount_root in _iter_mount_roots_for_label(label) or []:
-            _probe_mount(mount_root)
-        for mount_root in _iter_mount_roots_fallback() or []:
-            _probe_mount(mount_root)
-
-        audio_exts = {'.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac', '.opus', '.webm', '.mp4'}
-
-        for folder in folders:
-            try:
-                files = []
-                for name in os.listdir(folder):
-                    full = os.path.join(folder, name)
-                    if not os.path.isfile(full):
-                        continue
-                    if os.path.splitext(name)[1].lower() in audio_exts:
-                        files.append(full)
-                if files:
-                    return random.choice(files)
-            except Exception:
-                continue
-
-        return None
-
     def _play_outro_audio(self):
-        path = self._pick_random_outro_sound()
+        path = None
+        try:
+            path = str(getattr(self, '_current_bump_outro_audio_path', None) or '').strip()
+        except Exception:
+            path = None
+        if not path:
+            path = self._pick_random_outro_sound()
+
+        path = self._maybe_staged_path(path)
         if not path or not os.path.exists(path):
             return
 
@@ -4429,6 +4923,7 @@ class MainWindow(QMainWindow):
                 return
 
             path = str(sound.get('path') or '').strip()
+            path = self._maybe_staged_path(path)
             if not path or not os.path.exists(path):
                 return
 
@@ -4561,7 +5056,17 @@ class MainWindow(QMainWindow):
              _hide_all_bump_widgets()
              img_info = card.get('image') if isinstance(card.get('image'), dict) else {}
              img_path = str(img_info.get('path') or '')
-             pm = QPixmap(img_path) if img_path else QPixmap()
+             pm = QPixmap()
+             if img_path:
+                 try:
+                     with self._bump_prefetch_lock:
+                         qimg = self._bump_prefetch_images.get(img_path)
+                     if qimg is not None:
+                         pm = QPixmap.fromImage(qimg)
+                     else:
+                         pm = QPixmap(img_path)
+                 except Exception:
+                     pm = QPixmap(img_path)
              if pm.isNull():
                  try:
                      print(f"DEBUG: Bump image failed to load (img_char): {img_path} exists={os.path.exists(img_path) if img_path else False}")
@@ -4589,7 +5094,17 @@ class MainWindow(QMainWindow):
              _hide_all_bump_widgets()
              img_info = card.get('image') if isinstance(card.get('image'), dict) else {}
              img_path = str(img_info.get('path') or '')
-             pm = QPixmap(img_path) if img_path else QPixmap()
+             pm = QPixmap()
+             if img_path:
+                 try:
+                     with self._bump_prefetch_lock:
+                         qimg = self._bump_prefetch_images.get(img_path)
+                     if qimg is not None:
+                         pm = QPixmap.fromImage(qimg)
+                     else:
+                         pm = QPixmap(img_path)
+                 except Exception:
+                     pm = QPixmap(img_path)
              if pm.isNull():
                  try:
                      print(f"DEBUG: Bump image failed to load (img): {img_path} exists={os.path.exists(img_path) if img_path else False} mode={img_info.get('mode')}")
@@ -4679,6 +5194,7 @@ class MainWindow(QMainWindow):
         self._bump_music_cut_active = False
         self._bump_music_cut_prev_mute = None
         self._bump_outro_audio_exclusive = False
+        self._current_bump_outro_audio_path = None
 
         self.current_bump_script = None
         try:
@@ -4690,6 +5206,12 @@ class MainWindow(QMainWindow):
                 self.lbl_bump_text_bottom.setText("")
             if hasattr(self, 'bump_image_view'):
                 self.bump_image_view.clear()
+        except Exception:
+            pass
+
+        # Purge active bump assets after bump playback ends.
+        try:
+            self._clear_active_bump_assets()
         except Exception:
             pass
 
@@ -5001,11 +5523,40 @@ class MainWindow(QMainWindow):
         # Ensure internal state + UI reflects Off after timer fires.
         self.cancel_sleep_timer()
 
+
 if __name__ == "__main__":
     import locale
     locale.setlocale(locale.LC_NUMERIC, 'C')
-    
+
     app = QApplication(sys.argv)
+
+    loading = StartupLoadingScreen()
+    loading.set_progress(0, "Starting...")
+    loading.show()
+
+    # Let the splash paint before constructing the main window.
+    try:
+        app.processEvents()
+    except Exception:
+        pass
+
+    # Keep references alive.
+    # Restore the previously-working behavior: create the main window normally.
+    # The welcome screen already shows "pending" overlays while auto-config scans.
+    # The splash is now just a brief visual while the window constructs.
     window = MainWindow()
+
+    # Show the main window, then close the splash immediately.
     window.show()
+
+    try:
+        loading.close()
+    except Exception:
+        pass
+
+    # Start ambient only after the splash is gone.
+    try:
+        QTimer.singleShot(0, window._start_startup_ambient)
+    except Exception:
+        pass
     sys.exit(app.exec())

@@ -478,7 +478,7 @@ class PlaylistManager:
                         inte = random.choice(self.interstitials)
                         final_list.append({'type': 'interstitial', 'path': inte})
                     elif choice == 'bump':
-                        bump_obj = self.bump_manager.get_random_bump()
+                        bump_obj = self.bump_manager.get_next_bump()
                         if bump_obj:
                             final_list.append(bump_obj)
                             
