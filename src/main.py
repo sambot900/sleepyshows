@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider,
                                QLineEdit)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor
 
 from player_backend import MpvPlayer, MpvAudioPlayer
 from playlist_manager import PlaylistManager, VIDEO_EXTENSIONS, natural_sort_key
@@ -2651,6 +2651,18 @@ class MainWindow(QMainWindow):
         self.hover_timer.timeout.connect(self.hide_controls)
         self.setMouseTracking(True) # Track mouse without buttons
 
+        # Fullscreen reliability: poll cursor movement so controls can appear even when
+        # MPV/Qt doesn't deliver mouse move events (common with native windows on Windows).
+        self._fs_cursor_poll_timer = QTimer()
+        self._fs_cursor_poll_timer.setInterval(100)
+        self._fs_cursor_poll_timer.timeout.connect(self._poll_fullscreen_cursor)
+        self._fs_last_cursor_pos = None
+
+        # Spacebar play/pause (works in fullscreen too).
+        self._space_shortcut = QShortcut(QKeySequence('Space'), self)
+        self._space_shortcut.setContext(Qt.ApplicationShortcut)
+        self._space_shortcut.activated.connect(self._on_spacebar)
+
         self.bump_timer = QTimer()
         self.bump_timer.setSingleShot(True)
         self.bump_timer.timeout.connect(self.advance_bump_card)
@@ -2730,6 +2742,15 @@ class MainWindow(QMainWindow):
         
         # We need to manually position this because it's an overlay
         self.video_container.installEventFilter(self)
+
+        # Also install an application-wide event filter so fullscreen controls can respond
+        # to key/mouse events even when focus is not on the video container.
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+        except Exception:
+            pass
 
         self.player.positionChanged.connect(self.update_seeker)
         self.player.durationChanged.connect(self.update_duration)
@@ -2952,70 +2973,87 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            # Auto-detect bumps scripts/music on the same external drive.
+            # Auto-detect bumps scripts/music/assets on the same external drive.
+            # Important: images/audio FX can be used even if scripts are local, so don't gate
+            # them behind finding a TV Vibe scripts folder.
             tv_vibe_scripts_dir = (result or {}).get('tv_vibe_scripts_dir', None)
             tv_vibe_music_dir = (result or {}).get('tv_vibe_music_dir', None)
             tv_vibe_images_dir = (result or {}).get('tv_vibe_images_dir', None)
             tv_vibe_audio_fx_dir = (result or {}).get('tv_vibe_audio_fx_dir', None)
+
+            try:
+                default_scripts_dir = get_local_bumps_scripts_dir()
+            except Exception:
+                default_scripts_dir = None
+
+            bump_mgr = getattr(self.playlist_manager, 'bump_manager', None)
+
+            # Scripts/music only override if we're still on defaults / nothing is loaded.
+            try:
+                scripts_loaded = bool(getattr(bump_mgr, 'bump_scripts', []) or []) if bump_mgr else False
+            except Exception:
+                scripts_loaded = False
+            try:
+                music_loaded = bool(getattr(bump_mgr, 'music_files', []) or []) if bump_mgr else False
+            except Exception:
+                music_loaded = False
+
             if tv_vibe_scripts_dir and os.path.isdir(tv_vibe_scripts_dir):
                 try:
-                    default_scripts_dir = get_local_bumps_scripts_dir()
-                    bump_mgr = getattr(self.playlist_manager, 'bump_manager', None)
-
-                    # Only override if we're still on the default local folder and nothing is loaded yet.
-                    scripts_loaded = bool(getattr(bump_mgr, 'bump_scripts', []) or []) if bump_mgr else False
-                    music_loaded = bool(getattr(bump_mgr, 'music_files', []) or []) if bump_mgr else False
-
                     if getattr(self, 'bump_scripts_dir', None) in (None, '', default_scripts_dir) and not scripts_loaded:
                         self.bump_scripts_dir = tv_vibe_scripts_dir
                         try:
-                            bump_mgr.load_bumps(tv_vibe_scripts_dir)
+                            if bump_mgr:
+                                bump_mgr.load_bumps(tv_vibe_scripts_dir)
                         except Exception:
                             pass
+                except Exception:
+                    pass
 
-                    if tv_vibe_music_dir and os.path.isdir(tv_vibe_music_dir) and not music_loaded:
-                        try:
-                            self.bump_music_dir = tv_vibe_music_dir
-                        except Exception:
-                            pass
-                        try:
-                            bump_mgr.scan_music(tv_vibe_music_dir)
-                        except Exception:
-                            pass
+            if tv_vibe_music_dir and os.path.isdir(tv_vibe_music_dir) and not music_loaded:
+                try:
+                    self.bump_music_dir = tv_vibe_music_dir
+                except Exception:
+                    pass
+                try:
+                    if bump_mgr:
+                        bump_mgr.scan_music(tv_vibe_music_dir)
+                except Exception:
+                    pass
 
-                    if tv_vibe_images_dir and os.path.isdir(tv_vibe_images_dir):
-                        # Only override if the user hasn't configured one yet.
-                        if not getattr(self, 'bump_images_dir', None):
-                            self.bump_images_dir = tv_vibe_images_dir
-                            try:
-                                self._settings['bump_images_dir'] = tv_vibe_images_dir
-                                self._save_user_settings()
-                            except Exception:
-                                pass
-                        try:
-                            bump_mgr.bump_images_dir = self.bump_images_dir
-                        except Exception:
-                            pass
+            if tv_vibe_images_dir and os.path.isdir(tv_vibe_images_dir):
+                # Only override if the user hasn't configured one yet.
+                if not getattr(self, 'bump_images_dir', None):
+                    self.bump_images_dir = tv_vibe_images_dir
+                    try:
+                        self._settings['bump_images_dir'] = tv_vibe_images_dir
+                        self._save_user_settings()
+                    except Exception:
+                        pass
+                try:
+                    if bump_mgr:
+                        bump_mgr.bump_images_dir = self.bump_images_dir
+                except Exception:
+                    pass
 
-                    if tv_vibe_audio_fx_dir and os.path.isdir(tv_vibe_audio_fx_dir):
-                        # Only override if the user hasn't configured one yet.
-                        if not getattr(self, 'bump_audio_fx_dir', None):
-                            self.bump_audio_fx_dir = tv_vibe_audio_fx_dir
-                            try:
-                                self._settings['bump_audio_fx_dir'] = tv_vibe_audio_fx_dir
-                                self._save_user_settings()
-                            except Exception:
-                                pass
-                        try:
-                            bump_mgr.bump_audio_fx_dir = self.bump_audio_fx_dir
-                        except Exception:
-                            pass
+            if tv_vibe_audio_fx_dir and os.path.isdir(tv_vibe_audio_fx_dir):
+                # Only override if the user hasn't configured one yet.
+                if not getattr(self, 'bump_audio_fx_dir', None):
+                    self.bump_audio_fx_dir = tv_vibe_audio_fx_dir
+                    try:
+                        self._settings['bump_audio_fx_dir'] = tv_vibe_audio_fx_dir
+                        self._save_user_settings()
+                    except Exception:
+                        pass
+                try:
+                    if bump_mgr:
+                        bump_mgr.bump_audio_fx_dir = self.bump_audio_fx_dir
+                except Exception:
+                    pass
 
-                    if hasattr(self, 'bumps_mode_widget'):
-                        try:
-                            self.bumps_mode_widget.refresh_status()
-                        except Exception:
-                            pass
+            if hasattr(self, 'bumps_mode_widget'):
+                try:
+                    self.bumps_mode_widget.refresh_status()
                 except Exception:
                     pass
 
@@ -3066,13 +3104,41 @@ class MainWindow(QMainWindow):
                 pass
         
         if event.type() == QEvent.MouseMove:
+            # Best-effort: treat any mouse movement as activity.
             self.on_mouse_move()
         elif event.type() == QEvent.KeyPress:
-             if event.key() == Qt.Key_Escape and self.isFullScreen():
-                 self.toggle_fullscreen()
-             elif event.key() == Qt.Key_F:
-                 self.toggle_fullscreen()
+            # Don't steal keys while the user is typing into inputs.
+            try:
+                fw = QApplication.focusWidget()
+                if isinstance(fw, QLineEdit):
+                    return super().eventFilter(obj, event)
+            except Exception:
+                pass
+
+            if event.key() == Qt.Key_Escape and self.isFullScreen():
+                self.toggle_fullscreen()
+            elif event.key() == Qt.Key_F:
+                self.toggle_fullscreen()
         return super().eventFilter(obj, event)
+
+    def _on_spacebar(self):
+        try:
+            fw = QApplication.focusWidget()
+            if isinstance(fw, QLineEdit):
+                return
+        except Exception:
+            pass
+        # Only act in Play Mode.
+        try:
+            if self.mode_stack.currentIndex() != 2:
+                return
+        except Exception:
+            return
+
+        try:
+            self.toggle_play()
+        except Exception:
+            pass
 
     def on_escape_pressed(self):
         if self.isFullScreen():
@@ -3085,6 +3151,27 @@ class MainWindow(QMainWindow):
         # If in Play Mode
         if self.mode_stack.currentIndex() == 2:
             self.show_controls()
+
+    def _poll_fullscreen_cursor(self):
+        # Only needed in fullscreen play mode.
+        try:
+            if not self.isFullScreen():
+                self._fs_cursor_poll_timer.stop()
+                self._fs_last_cursor_pos = None
+                return
+            if self.mode_stack.currentIndex() != 2:
+                return
+        except Exception:
+            return
+
+        try:
+            pos = QCursor.pos()
+        except Exception:
+            return
+
+        if self._fs_last_cursor_pos is None or pos != self._fs_last_cursor_pos:
+            self._fs_last_cursor_pos = pos
+            self.on_mouse_move()
 
     def show_controls(self):
         # In windowed mode, controls should always stay visible.
@@ -3172,6 +3259,11 @@ class MainWindow(QMainWindow):
                 self.showNormal()
             
             self.failsafe_timer.stop()
+            try:
+                self._fs_cursor_poll_timer.stop()
+                self._fs_last_cursor_pos = None
+            except Exception:
+                pass
             
             # Delay UI restoration to avoid "zoom in" effect during OS animation
             QTimer.singleShot(200, self.restore_ui_after_fullscreen)
@@ -3194,6 +3286,11 @@ class MainWindow(QMainWindow):
             self.statusBar().setVisible(False)
             
             self.failsafe_timer.start()
+            try:
+                self._fs_last_cursor_pos = QCursor.pos()
+                self._fs_cursor_poll_timer.start()
+            except Exception:
+                pass
             
             # Trigger resize to position controls
             self.video_container.resizeEvent(QResizeEvent(self.video_container.size(), self.video_container.size()))
@@ -4222,7 +4319,7 @@ class MainWindow(QMainWindow):
         self._bump_fx_policy = None
 
     def _pick_random_outro_sound(self):
-        # Prefer the default T7 location; fall back to any mounted drive under /media/tyler.
+        # Prefer an explicitly configured folder, then probe common external-drive layouts.
         folders = []
         try:
             p = str(getattr(self, '_outro_sounds_dir', '') or '').strip()
@@ -4231,13 +4328,38 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        def _probe_mount(mount_root: str):
+            if not mount_root or not os.path.isdir(mount_root):
+                return
+
+            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+            roots_to_probe = []
+            if os.path.isdir(data_root):
+                roots_to_probe.append(data_root)
+            roots_to_probe.append(mount_root)
+
+            for root in roots_to_probe:
+                direct = os.path.join(root, 'TV Vibe', 'outro sounds')
+                if os.path.isdir(direct):
+                    folders.append(direct)
+                    continue
+
+                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+                if not tv_vibe_dir:
+                    continue
+                outro_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'outro sounds')
+                if outro_dir and os.path.isdir(outro_dir):
+                    folders.append(outro_dir)
+
         try:
-            pattern = os.path.join('/media', 'tyler', '*', 'Sleepy Shows Data', 'TV Vibe', 'outro sounds')
-            for p in glob.glob(pattern):
-                if os.path.isdir(p):
-                    folders.append(p)
+            label = str(getattr(self, 'auto_config_volume_label', '') or '').strip()
         except Exception:
-            pass
+            label = ''
+
+        for mount_root in _iter_mount_roots_for_label(label) or []:
+            _probe_mount(mount_root)
+        for mount_root in _iter_mount_roots_fallback() or []:
+            _probe_mount(mount_root)
 
         audio_exts = {'.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac', '.opus', '.webm', '.mp4'}
 
