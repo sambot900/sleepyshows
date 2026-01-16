@@ -1438,15 +1438,56 @@ class BumpManager:
         
         tokens = re.split(r'(<(?:card\b[^>]*|outro\b[^>]*|pause\b[^>]*)>)', content, flags=re.IGNORECASE)
         
+        # Store card body as a list of (line_text, is_explicit_blank).
+        # is_explicit_blank is True when the line was authored using explicit
+        # whitespace tags (<\t>, <\s>, <\n>) so it should be preserved even if
+        # it is otherwise whitespace-only.
         current_card_text = []
         current_card_duration_spec = None
         in_outro = False
+
+        def append_card_text_fragment(fragment: str):
+            try:
+                raw = '' if fragment is None else str(fragment)
+            except Exception:
+                raw = ''
+            if raw == '':
+                return
+
+            # Normalize newlines, but preserve trailing empty lines.
+            raw = raw.replace('\r\n', '\n').replace('\r', '\n')
+            for ln in raw.split('\n'):
+                try:
+                    explicit_blank = ('<\\t>' in ln) or ('<\\s>' in ln) or ('<\\n>' in ln)
+                except Exception:
+                    explicit_blank = False
+
+                try:
+                    expanded = self._expand_whitespace_tags(ln)
+                except Exception:
+                    expanded = str(ln)
+
+                # If the line is whitespace-only, treat it as a blank line.
+                if str(expanded).strip() == '':
+                    current_card_text.append(('', bool(explicit_blank)))
+                else:
+                    # Keep the user's spacing, but drop trailing whitespace.
+                    current_card_text.append((str(expanded).rstrip(), False))
         
         def finalize_card():
             if current_card_text:
-                text = "\n".join(current_card_text).strip()
-                if text:
-                    text = self._expand_whitespace_tags(text)
+                # Trim incidental leading/trailing blank lines that come from
+                # formatting around tags, but preserve explicit blank lines.
+                lines = list(current_card_text)
+
+                while lines and lines[0][0] == '' and not bool(lines[0][1]):
+                    lines.pop(0)
+                while lines and lines[-1][0] == '' and not bool(lines[-1][1]):
+                    lines.pop()
+
+                raw_text = "\n".join([t for (t, _explicit) in lines])
+                if raw_text.strip():
+                    text = str(raw_text)
                     # Duration is based on character count (comprehension score).
                     # Do not include <img ...> or <sound ...> markup in the timing model.
                     timing_text = re.sub(r'<\s*(?:img|sound)\b[^>]*>', '', text, flags=re.IGNORECASE)
@@ -1546,7 +1587,12 @@ class BumpManager:
                             current_card_text.clear()
                             return
 
-                    display_text = _strip_sound_markup(text).strip()
+                    # Preserve blank lines visually by converting whitespace-only
+                    # lines into NBSP so QLabel renders the line height.
+                    display_raw = _strip_sound_markup(text)
+                    display_lines = str(display_raw).replace('\r\n', '\n').replace('\r', '\n').split('\n')
+                    display_lines = [('\u00A0' if ln.strip() == '' else ln.rstrip()) for ln in display_lines]
+                    display_text = "\n".join(display_lines)
 
                     card_obj = {
                         'type': 'text',
@@ -1608,8 +1654,8 @@ class BumpManager:
                 # Just text.
                 # Append strictly if not just empty space.
                 # NOTE: card bodies may legitimately begin with markup like <img ...> or <sound ...>.
-                if token.strip():
-                    current_card_text.append(token.strip())
+                if token:
+                    append_card_text_fragment(token)
         
         finalize_card()
 
