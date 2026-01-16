@@ -1486,7 +1486,15 @@ class BumpManager:
                     lines.pop()
 
                 raw_text = "\n".join([t for (t, _explicit) in lines])
-                if raw_text.strip():
+
+                # Important: allow intentionally blank cards.
+                # If the user authored explicit whitespace tags (<\t>/<\s>/<\n>) or provided
+                # an explicit duration (<card 4500ms>), we should keep the card even if the
+                # resulting text is whitespace-only.
+                has_explicit_blank = any(bool(explicit) for (_t, explicit) in lines)
+                has_duration_spec = current_card_duration_spec is not None
+
+                if raw_text.strip() or has_explicit_blank or has_duration_spec:
                     text = str(raw_text)
                     # Duration is based on character count (comprehension score).
                     # Do not include <img ...> or <sound ...> markup in the timing model.
