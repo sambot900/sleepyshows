@@ -2905,7 +2905,7 @@ class MainWindow(QMainWindow):
         
         # Create Bump View
         self.bump_widget = QWidget()
-        self.bump_widget.setStyleSheet("background-color: black;")
+        self.bump_widget.setStyleSheet("background-color: #0c0c0c;")
         bump_layout = QVBoxLayout(self.bump_widget)
         self._bump_layout = bump_layout
         self._bump_safe_vpad_ratio = 0.15
