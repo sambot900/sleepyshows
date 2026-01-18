@@ -1,6 +1,8 @@
 import os
 import random
 import re
+import json
+import time
 
 VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'}
 
@@ -46,12 +48,547 @@ class PlaylistManager:
         # Special-case sequencing overrides (e.g., multipart episodes).
         self._forced_next_episode_index = None
 
+        # Exposure score tracking
+        # - Episodes: {normalized_path: float}
+        # - Session counters affect how much score is applied per play.
+        self.episode_exposure_scores = {}
+
+        # Per-playlist exposure controls (loaded from the playlist JSON).
+        # Offsets are additive: effective exposure score is base + offsets.
+        # Factors multiply per-play deltas and also influence queue selection via projected delta.
+        self.episode_exposure_offsets = {}      # {norm_path: float}
+        self.season_exposure_offsets = {}       # {season_bucket_key: float}
+        self.episode_exposure_factors = {}      # {norm_path: float}
+        self.season_exposure_factors = {}       # {season_bucket_key: float}
+
+        # Raw settings snapshot used for saving back to playlist JSON.
+        self._playlist_frequency_settings = {}
+
+        # Session exposure counters (separate for episodes vs bumps).
+        # First 3 plays => +100, next 3 => +50, next 3 => +25, ... per kind.
+        self._session_episode_plays = 0
+        self._session_bump_plays = 0
+
+        # Exposure scaling rule depends on whether the sleep timer is enabled.
+        # - Sleep timer ON: episode deltas diminish every 3 episode plays.
+        # - Sleep timer OFF: episodes always get +100 base points per play.
+        self._sleep_timer_active_for_exposure = False
+
+        # Persistence (global across playlists).
+        self._exposure_scores_path = os.path.join(os.getcwd(), 'playlists', 'exposure_scores.json')
+        self._exposure_last_save_monotonic = 0.0
+        self._exposure_dirty = False
+        self._load_exposure_scores()
+
     def reset_playback_state(self):
         self.play_queue = []
         self.episode_history = []
         self.playback_history = []
         self.playback_history_pos = -1
         self._forced_next_episode_index = None
+
+        # New viewing session: reset exposure scaling counters.
+        self._session_episode_plays = 0
+        self._session_bump_plays = 0
+
+    def set_sleep_timer_active_for_exposure(self, active: bool):
+        """Update whether episode exposure deltas should diminish this session."""
+        try:
+            new_val = bool(active)
+        except Exception:
+            new_val = False
+
+        prev = bool(getattr(self, '_sleep_timer_active_for_exposure', False))
+        self._sleep_timer_active_for_exposure = new_val
+
+        # If the behavior toggles, restart the episode-delta tiering so
+        # "first 3 plays" semantics apply only while sleep-timer mode is active.
+        if new_val != prev:
+            self._session_episode_plays = 0
+
+    def _norm_path_key(self, path: str) -> str:
+        try:
+            p = str(path or '')
+        except Exception:
+            p = ''
+        if not p:
+            return ''
+        try:
+            return os.path.normcase(os.path.normpath(p))
+        except Exception:
+            return p
+
+    def _ensure_exposure_store_dir(self):
+        try:
+            folder = os.path.dirname(str(self._exposure_scores_path or ''))
+        except Exception:
+            folder = ''
+        if folder:
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except Exception:
+                pass
+
+    def _load_exposure_scores(self):
+        """Load persisted exposure scores (best-effort)."""
+        path = str(getattr(self, '_exposure_scores_path', '') or '')
+        if not path:
+            return
+        try:
+            if not os.path.exists(path):
+                return
+        except Exception:
+            return
+
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            return
+
+        eps = data.get('episodes', None)
+        if isinstance(eps, dict):
+            cleaned = {}
+            for k, v in eps.items():
+                try:
+                    kk = self._norm_path_key(str(k))
+                    vv = float(v)
+                except Exception:
+                    continue
+                if kk:
+                    cleaned[kk] = vv
+            self.episode_exposure_scores = cleaned
+
+        # Frequency settings (offsets/factors) are now persisted with playlist JSON only.
+
+        bump_state = data.get('bump_components', None)
+        if isinstance(bump_state, dict):
+            try:
+                self.bump_manager.set_exposure_state(bump_state)
+            except Exception:
+                # Backward-compatible fallback.
+                try:
+                    self.bump_manager.script_exposure_scores = dict(bump_state.get('scripts') or {})
+                    self.bump_manager.music_exposure_scores = dict(bump_state.get('music') or {})
+                    self.bump_manager.outro_exposure_scores = dict(bump_state.get('outro') or {})
+                except Exception:
+                    pass
+
+    def _save_exposure_scores(self, *, force: bool = False):
+        """Persist exposure scores to disk (best-effort, throttled)."""
+        if not getattr(self, '_exposure_dirty', False) and not force:
+            return
+
+        now = time.monotonic()
+        try:
+            last = float(getattr(self, '_exposure_last_save_monotonic', 0.0) or 0.0)
+        except Exception:
+            last = 0.0
+
+        # Avoid spamming disk writes during rapid bump cards.
+        if not force and (now - last) < 1.5:
+            return
+
+        path = str(getattr(self, '_exposure_scores_path', '') or '')
+        if not path:
+            return
+        self._ensure_exposure_store_dir()
+
+        try:
+            bump_state = self.bump_manager.get_exposure_state()
+        except Exception:
+            bump_state = {
+                'scripts': dict(getattr(self.bump_manager, 'script_exposure_scores', {}) or {}),
+                'music': dict(getattr(self.bump_manager, 'music_exposure_scores', {}) or {}),
+                'outro': dict(getattr(self.bump_manager, 'outro_exposure_scores', {}) or {}),
+            }
+
+        payload = {
+            'episodes': dict(self.episode_exposure_scores or {}),
+            'bump_components': dict(bump_state or {}),
+        }
+
+        tmp = path + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp, path)
+            self._exposure_last_save_monotonic = float(now)
+            self._exposure_dirty = False
+        except Exception:
+            # Best-effort cleanup.
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+
+    def _exposure_delta_for_next_play(self, kind: str) -> float:
+        """Return the score increment for the next play of a given kind.
+
+        First 3 plays of that kind => +100.
+        Plays 4-6 => +50.
+        Plays 7-9 => +25, etc.
+        """
+        kind_l = str(kind or '').strip().lower()
+        if kind_l == 'bump':
+            try:
+                n = int(self._session_bump_plays)
+            except Exception:
+                n = 0
+        else:
+            # Sleep timer OFF: keep episode deltas constant during the session.
+            try:
+                if not bool(getattr(self, '_sleep_timer_active_for_exposure', False)):
+                    return 100.0
+            except Exception:
+                return 100.0
+            try:
+                n = int(self._session_episode_plays)
+            except Exception:
+                n = 0
+
+        tier = max(0, int(n) // 3)
+        try:
+            delta = 100.0 / (2.0 ** float(tier))
+        except Exception:
+            delta = 100.0
+        if delta < 1.0:
+            delta = 1.0
+        return float(delta)
+
+    def apply_episode_skip_penalty(self, index, points: float = 1.0):
+        """Apply a small negative adjustment for skipped/cut-off episodes.
+
+        The deduction is applied to the *base* points, before user factors.
+        That means we subtract (points * factor) from the stored exposure score.
+        """
+        try:
+            idx = int(index)
+        except Exception:
+            return 0.0
+
+        if idx < 0 or idx >= len(self.current_playlist):
+            return 0.0
+        if not self.is_episode_item(self.current_playlist[idx]):
+            return 0.0
+
+        try:
+            p = self._episode_path_for_index(idx)
+        except Exception:
+            p = ''
+        key = self._norm_path_key(p)
+        if not key:
+            return 0.0
+
+        try:
+            pts = float(points)
+        except Exception:
+            pts = 1.0
+        pts = abs(pts)
+        if pts <= 0:
+            return 0.0
+
+        try:
+            factor = float(self._effective_episode_factor(p))
+        except Exception:
+            factor = 1.0
+
+        delta = -float(pts) * float(factor)
+        try:
+            self.episode_exposure_scores[key] = float(self.episode_exposure_scores.get(key, 0.0) or 0.0) + float(delta)
+        except Exception:
+            self.episode_exposure_scores[key] = float(delta)
+
+        self._exposure_dirty = True
+        self._save_exposure_scores()
+        return float(delta)
+
+    def _season_bucket_key_from_path(self, path: str) -> str:
+        """Return a stable-ish season bucket key for season-level overrides."""
+        try:
+            p = str(path or '')
+        except Exception:
+            p = ''
+        if not p:
+            return ''
+
+        parts = [x for x in re.split(r'[\\/]+', p) if x]
+        season_num = self._season_key_from_path(p)
+
+        show_name = ''
+        try:
+            # Heuristic: use the folder right before the season folder if present.
+            season_re = re.compile(r'(?:season|s)[ _-]?\d{1,2}', flags=re.IGNORECASE)
+            season_idx = None
+            for i, part in enumerate(parts):
+                if season_re.search(str(part)):
+                    season_idx = i
+                    break
+            if season_idx is not None and season_idx > 0:
+                show_name = str(parts[season_idx - 1])
+            elif len(parts) >= 2:
+                show_name = str(parts[-2])
+        except Exception:
+            show_name = ''
+
+        show_name = show_name.strip()
+        if show_name:
+            return f"{show_name}|season:{int(season_num)}"
+        return f"season:{int(season_num)}"
+
+    def _season_bucket_keys_from_path(self, path: str) -> list[str]:
+        """Return candidate season keys (for backward/forward compatibility)."""
+        keys = []
+        try:
+            k = self._season_bucket_key_from_path(path)
+            if k:
+                keys.append(str(k))
+        except Exception:
+            pass
+        try:
+            n = int(self._season_key_from_path(path) or 0)
+        except Exception:
+            n = 0
+        if n:
+            k2 = f"season:{n}"
+            if k2 not in keys:
+                keys.append(k2)
+        return keys
+
+    def _effective_episode_offset(self, path: str) -> float:
+        key = self._norm_path_key(path)
+        off = 0.0
+        for season_key in self._season_bucket_keys_from_path(path):
+            try:
+                off = float(off) + float(self.season_exposure_offsets.get(season_key, 0.0) or 0.0)
+            except Exception:
+                pass
+        try:
+            off = float(off) + float(self.episode_exposure_offsets.get(key, 0.0) or 0.0)
+        except Exception:
+            pass
+        if off < 0.0:
+            off = 0.0
+        return float(off)
+
+    def _effective_episode_factor(self, path: str) -> float:
+        key = self._norm_path_key(path)
+        factor = None
+        try:
+            if key in self.episode_exposure_factors:
+                factor = float(self.episode_exposure_factors.get(key, 1.0) or 1.0)
+        except Exception:
+            factor = None
+        if factor is None:
+            for season_key in self._season_bucket_keys_from_path(path):
+                try:
+                    if season_key in self.season_exposure_factors:
+                        factor = float(self.season_exposure_factors.get(season_key, 1.0) or 1.0)
+                        break
+                except Exception:
+                    factor = None
+        if factor is None:
+            factor = 1.0
+        if factor <= 0.0:
+            factor = 1.0
+        return float(factor)
+
+    def set_episode_exposure_offset(self, path: str, value: float):
+        key = self._norm_path_key(path)
+        if not key:
+            return
+        try:
+            v = float(value)
+        except Exception:
+            v = 0.0
+        v = float(max(0.0, v))
+        if v > 0.0:
+            self.episode_exposure_offsets[key] = v
+        else:
+            self.episode_exposure_offsets.pop(key, None)
+        self._exposure_dirty = True
+        self._save_exposure_scores()
+
+    def set_episode_exposure_factor(self, path: str, value: float):
+        key = self._norm_path_key(path)
+        if not key:
+            return
+        try:
+            v = float(value)
+        except Exception:
+            v = 1.0
+        if v <= 0.0:
+            v = 1.0
+        self.episode_exposure_factors[key] = float(v)
+        self._exposure_dirty = True
+        self._save_exposure_scores()
+
+    def set_season_exposure_offset(self, season_key: str, value: float):
+        k = str(season_key or '').strip()
+        if not k:
+            return
+        try:
+            v = float(value)
+        except Exception:
+            v = 0.0
+        v = float(max(0.0, v))
+        if v > 0.0:
+            self.season_exposure_offsets[k] = v
+        else:
+            self.season_exposure_offsets.pop(k, None)
+        self._exposure_dirty = True
+        self._save_exposure_scores()
+
+    def set_season_exposure_factor(self, season_key: str, value: float):
+        k = str(season_key or '').strip()
+        if not k:
+            return
+        try:
+            v = float(value)
+        except Exception:
+            v = 1.0
+        if v <= 0.0:
+            v = 1.0
+        self.season_exposure_factors[k] = float(v)
+        self._exposure_dirty = True
+        self._save_exposure_scores()
+
+    def apply_frequency_settings(self, *,
+                                episode_offsets: dict | None = None,
+                                season_offsets: dict | None = None,
+                                episode_factors: dict | None = None,
+                                season_factors: dict | None = None):
+        """Replace per-playlist frequency settings in bulk (offsets + factors)."""
+        if isinstance(episode_offsets, dict):
+            cleaned = {}
+            for k, v in episode_offsets.items():
+                try:
+                    kk = self._norm_path_key(str(k))
+                    vv = float(v)
+                except Exception:
+                    continue
+                if kk and vv > 0.0:
+                    cleaned[kk] = float(vv)
+            self.episode_exposure_offsets = cleaned
+
+        if isinstance(season_offsets, dict):
+            cleaned = {}
+            for k, v in season_offsets.items():
+                try:
+                    kk = str(k).strip()
+                    vv = float(v)
+                except Exception:
+                    continue
+                if kk and vv > 0.0:
+                    cleaned[kk] = float(vv)
+            self.season_exposure_offsets = cleaned
+
+        if isinstance(episode_factors, dict):
+            cleaned = {}
+            for k, v in episode_factors.items():
+                try:
+                    kk = self._norm_path_key(str(k))
+                    vv = float(v)
+                except Exception:
+                    continue
+                if kk and vv > 0.0 and abs(vv - 1.0) > 1e-9:
+                    cleaned[kk] = float(vv)
+            self.episode_exposure_factors = cleaned
+
+        if isinstance(season_factors, dict):
+            cleaned = {}
+            for k, v in season_factors.items():
+                try:
+                    kk = str(k).strip()
+                    vv = float(v)
+                except Exception:
+                    continue
+                if kk and vv > 0.0 and abs(vv - 1.0) > 1e-9:
+                    cleaned[kk] = float(vv)
+            self.season_exposure_factors = cleaned
+
+        self._playlist_frequency_settings = self.get_frequency_settings_for_save()
+
+    def set_frequency_settings_from_playlist_data(self, data: dict | None):
+        """Load per-playlist frequency settings from playlist JSON data."""
+        if not isinstance(data, dict):
+            data = {}
+
+        # New preferred field.
+        fs = data.get('frequency_settings', None)
+        if not isinstance(fs, dict):
+            fs = {}
+
+        # Backward-compat: accept older spellings.
+        if not fs:
+            legacy = data.get('exposure_overrides', None)
+            if isinstance(legacy, dict):
+                fs = dict(legacy)
+
+        episode_offsets = fs.get('episode_offsets', fs.get('episode_min_exposure', None))
+        season_offsets = fs.get('season_offsets', fs.get('season_min_exposure', None))
+        episode_factors = fs.get('episode_factors', fs.get('episode_exposure_factors', None))
+        season_factors = fs.get('season_factors', fs.get('season_exposure_factors', None))
+
+        self.apply_frequency_settings(
+            episode_offsets=episode_offsets if isinstance(episode_offsets, dict) else {},
+            season_offsets=season_offsets if isinstance(season_offsets, dict) else {},
+            episode_factors=episode_factors if isinstance(episode_factors, dict) else {},
+            season_factors=season_factors if isinstance(season_factors, dict) else {},
+        )
+
+    def get_frequency_settings_for_save(self) -> dict:
+        return {
+            'episode_offsets': dict(self.episode_exposure_offsets or {}),
+            'season_offsets': dict(self.season_exposure_offsets or {}),
+            'episode_factors': dict(self.episode_exposure_factors or {}),
+            'season_factors': dict(self.season_exposure_factors or {}),
+        }
+
+    def clear_frequency_settings(self):
+        self.episode_exposure_offsets = {}
+        self.season_exposure_offsets = {}
+        self.episode_exposure_factors = {}
+        self.season_exposure_factors = {}
+        self._playlist_frequency_settings = {}
+
+    def clear_episode_exposure_scores_for_paths(self, paths):
+        removed = 0
+        for p in list(paths or []):
+            key = self._norm_path_key(p)
+            if not key:
+                continue
+            if key in self.episode_exposure_scores:
+                try:
+                    del self.episode_exposure_scores[key]
+                    removed += 1
+                except Exception:
+                    pass
+        if removed:
+            self._exposure_dirty = True
+            self._save_exposure_scores(force=True)
+        return int(removed)
+
+    def clear_episode_exposure_scores_all(self):
+        try:
+            self.episode_exposure_scores = {}
+        except Exception:
+            pass
+        self._exposure_dirty = True
+        self._save_exposure_scores(force=True)
+
+    def note_bump_played(self, bump_item: dict):
+        """Apply exposure to bump components based on session visibility."""
+        delta = self._exposure_delta_for_next_play('bump')
+        self._session_bump_plays += 1
+        try:
+            self.bump_manager.apply_bump_exposure(bump_item, delta=delta)
+        except Exception:
+            pass
+
+        self._exposure_dirty = True
+        self._save_exposure_scores()
 
     def is_episode_item(self, item):
         if isinstance(item, dict):
@@ -116,7 +653,7 @@ class PlaylistManager:
             return -1
         return ordered[pos + 1]
 
-    def mark_episode_started(self, index):
+    def mark_episode_started(self, index, *, sleep_timer_on: bool | None = None):
         # Track episode history for avoidance rules.
         if index is None or index < 0:
             return
@@ -124,6 +661,43 @@ class PlaylistManager:
             return
         if not self.is_episode_item(self.current_playlist[index]):
             return
+
+        # Keep exposure behavior in sync with the UI sleep timer.
+        if sleep_timer_on is not None:
+            try:
+                self.set_sleep_timer_active_for_exposure(bool(sleep_timer_on))
+            except Exception:
+                pass
+
+        # Exposure scoring: apply per-session visibility weight to the episode.
+        try:
+            p = self._episode_path_for_index(index)
+        except Exception:
+            p = ''
+        key = self._norm_path_key(p)
+        if key:
+            delta = self._exposure_delta_for_next_play('episode')
+
+            # Only advance diminishing tiers while sleep-timer exposure mode is active.
+            try:
+                if bool(getattr(self, '_sleep_timer_active_for_exposure', False)):
+                    self._session_episode_plays += 1
+            except Exception:
+                pass
+
+            # Apply user factor per episode/season.
+            try:
+                delta = float(delta) * float(self._effective_episode_factor(p))
+            except Exception:
+                pass
+
+            try:
+                self.episode_exposure_scores[key] = float(self.episode_exposure_scores.get(key, 0.0) or 0.0) + float(delta)
+            except Exception:
+                self.episode_exposure_scores[key] = float(delta)
+
+            self._exposure_dirty = True
+            self._save_exposure_scores()
 
         self.episode_history.append(index)
         # Keep history bounded.
@@ -206,6 +780,53 @@ class PlaylistManager:
             self.play_queue = []
             return
 
+        def _ep_score(i: int) -> float:
+            try:
+                path = self._episode_path_for_index(i)
+                key = self._norm_path_key(path)
+            except Exception:
+                path = ''
+                key = ''
+            try:
+                base = float(self.episode_exposure_scores.get(key, 0.0) or 0.0)
+            except Exception:
+                base = 0.0
+
+            # Additive offsets (episode + season).
+            try:
+                off = float(self._effective_episode_offset(path))
+            except Exception:
+                off = 0.0
+
+            # Factor should influence queue selection by considering the imminent score change
+            # that would be applied if this item is played next.
+            try:
+                factor = float(self._effective_episode_factor(path))
+            except Exception:
+                factor = 1.0
+            try:
+                projected = float(self._exposure_delta_for_next_play('episode')) * float(factor)
+            except Exception:
+                projected = 0.0
+
+            return float(base + off + projected)
+
+        def _order_by_exposure(indices):
+            # Stable-ish: group by score, shuffle within same-score buckets.
+            buckets = {}
+            for i in list(indices or []):
+                try:
+                    s = round(float(_ep_score(int(i))), 6)
+                except Exception:
+                    s = 0.0
+                buckets.setdefault(s, []).append(int(i))
+            out = []
+            for s in sorted(buckets.keys()):
+                b = buckets[s]
+                random.shuffle(b)
+                out.extend(b)
+            return out
+
         # Build a full cycle order (excluding the current episode from the upcoming queue).
         if self.shuffle_mode == 'season':
             season_map = {}
@@ -213,18 +834,37 @@ class PlaylistManager:
                 season = self._season_key_from_path(self._episode_path_for_index(idx))
                 season_map.setdefault(season, []).append(idx)
 
-            seasons = list(season_map.keys())
-            random.shuffle(seasons)
+            # Order seasons by their least-exposed episode (ties randomized).
+            season_keys = list(season_map.keys())
+            season_scores = []
+            for s in season_keys:
+                eps = season_map.get(s) or []
+                try:
+                    sc = min([_ep_score(i) for i in eps]) if eps else 0.0
+                except Exception:
+                    sc = 0.0
+                season_scores.append((round(float(sc), 6), s))
+
+            # Sort by exposure, randomize ties.
+            season_scores.sort(key=lambda t: t[0])
+            ordered_seasons = []
+            j = 0
+            while j < len(season_scores):
+                k = j
+                while k < len(season_scores) and season_scores[k][0] == season_scores[j][0]:
+                    k += 1
+                chunk = [s for (_sc, s) in season_scores[j:k]]
+                random.shuffle(chunk)
+                ordered_seasons.extend(chunk)
+                j = k
 
             order = []
-            for season in seasons:
+            for season in ordered_seasons:
                 eps = season_map[season][:]
-                random.shuffle(eps)
-                order.extend(eps)
+                order.extend(_order_by_exposure(eps))
 
         elif self.shuffle_mode == 'standard':
-            order = episode_idxs[:]
-            random.shuffle(order)
+            order = _order_by_exposure(episode_idxs)
 
         else:
             # off
@@ -240,7 +880,8 @@ class PlaylistManager:
         if current_index is not None and current_index in order:
             order = [i for i in order if i != current_index]
 
-        self.play_queue = self._apply_avoid_recent_rule(order, current_index=current_index)
+        # Exposure-based queueing makes recent-avoidance unnecessary; keep the queue deterministic.
+        self.play_queue = list(order)
 
     def set_shuffle_mode(self, mode, current_index=None, rebuild=True):
         # Backward-compat: bool True means standard shuffle, False means off.

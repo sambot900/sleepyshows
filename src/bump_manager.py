@@ -71,6 +71,15 @@ class BumpManager:
         self._bump_queue = []  # list[dict]
         self._bump_queue_size = 24
 
+        # Exposure score tracking for bump components.
+        # Complete bumps are transient; persistent scores live on components.
+        # - scripts: {script_key: float}
+        # - music:   {normalized_path: float}
+        # - outro:   {normalized_path: float}
+        self.script_exposure_scores = {}
+        self.music_exposure_scores = {}
+        self.outro_exposure_scores = {}
+
         # Recent history to reduce near-repeats when queues are rebuilt.
         # Rule: the 8 most recently used items cannot appear in the first 8 slots
         # of a newly rebuilt queue (best-effort).
@@ -116,7 +125,108 @@ class BumpManager:
             if s:
                 out.append(s)
         self.outro_sounds = out
-        self._rebuild_outro_queue()
+        # Clear transient queue so the next bump queue rebuild reselects.
+        self._outro_queue = []
+        self._bump_queue = []
+
+    def _norm_path_key(self, path: str) -> str:
+        try:
+            p = str(path or '')
+        except Exception:
+            p = ''
+        if not p:
+            return ''
+        try:
+            return os.path.normcase(os.path.normpath(p))
+        except Exception:
+            return p
+
+    def _script_key(self, script: dict) -> str:
+        if not isinstance(script, dict):
+            return ''
+        try:
+            k = script.get('_script_key', None)
+        except Exception:
+            k = None
+        if k:
+            return str(k)
+        # Fallback: stable-ish key for in-memory scripts.
+        return f"mem:{id(script)}"
+
+    def apply_bump_exposure(self, bump_item: dict, *, delta: float = 100.0):
+        """Apply exposure score to the bump components used by this bump."""
+        if not isinstance(bump_item, dict):
+            return
+        try:
+            d = float(delta)
+        except Exception:
+            d = 100.0
+
+        script = bump_item.get('script')
+        if isinstance(script, dict):
+            k = self._script_key(script)
+            if k:
+                try:
+                    self.script_exposure_scores[k] = float(self.script_exposure_scores.get(k, 0.0) or 0.0) + float(d)
+                except Exception:
+                    self.script_exposure_scores[k] = float(d)
+
+        audio = bump_item.get('audio')
+        if audio:
+            mk = self._norm_path_key(str(audio))
+            if mk:
+                try:
+                    self.music_exposure_scores[mk] = float(self.music_exposure_scores.get(mk, 0.0) or 0.0) + float(d)
+                except Exception:
+                    self.music_exposure_scores[mk] = float(d)
+
+        outro = bump_item.get('outro_audio_path')
+        if outro:
+            ok = self._norm_path_key(str(outro))
+            if ok:
+                try:
+                    self.outro_exposure_scores[ok] = float(self.outro_exposure_scores.get(ok, 0.0) or 0.0) + float(d)
+                except Exception:
+                    self.outro_exposure_scores[ok] = float(d)
+
+    def get_exposure_state(self) -> dict:
+        """Return a JSON-serializable snapshot of bump component exposure scores."""
+        try:
+            return {
+                'scripts': dict(self.script_exposure_scores or {}),
+                'music': dict(self.music_exposure_scores or {}),
+                'outro': dict(self.outro_exposure_scores or {}),
+            }
+        except Exception:
+            return {'scripts': {}, 'music': {}, 'outro': {}}
+
+    def set_exposure_state(self, state: dict):
+        """Restore exposure scores from a persisted snapshot (best-effort)."""
+        if not isinstance(state, dict):
+            return
+
+        def _clean_map(m, norm_paths: bool = False):
+            if not isinstance(m, dict):
+                return {}
+            out = {}
+            for k, v in m.items():
+                try:
+                    kk = str(k)
+                except Exception:
+                    continue
+                if norm_paths:
+                    kk = self._norm_path_key(kk)
+                try:
+                    vv = float(v)
+                except Exception:
+                    continue
+                if kk:
+                    out[kk] = vv
+            return out
+
+        self.script_exposure_scores = _clean_map(state.get('scripts', {}), norm_paths=False)
+        self.music_exposure_scores = _clean_map(state.get('music', {}), norm_paths=True)
+        self.outro_exposure_scores = _clean_map(state.get('outro', {}), norm_paths=True)
 
     def _rebuild_outro_queue(self):
         self._outro_queue = self._build_queue_with_recent_exclusion(
@@ -607,112 +717,223 @@ class BumpManager:
         )
 
     def _rebuild_bump_queue(self):
-        """Build a queue of complete bump items (script + selected music + outro path)."""
+        """Build a queue of complete bump items (script + selected music + outro).
+
+        New strategy:
+        - Complete bumps are transient and assembled during queue generation.
+        - Queue size is capped by the bottleneck component count.
+        - Selection favors the least-exposed components (random among ties).
+        """
         self._bump_queue = []
 
-        # Ensure the underlying queues are spaced.
-        if not self._script_queue:
-            self._rebuild_script_queue()
-        if not self._music_queue:
-            self._rebuild_music_queue()
-        if self.outro_sounds and not self._outro_queue:
-            self._rebuild_outro_queue()
+        if not self.bump_scripts or not self.music_files:
+            return
 
-        # Build up to N bumps. If selection fails for some scripts (e.g. strict music)
-        # we fall back to best-effort music/silence.
-        try:
-            target_n = int(self._bump_queue_size)
-        except Exception:
-            target_n = 24
-        if target_n <= 0:
-            target_n = 24
+        # Bottleneck-based cap.
+        max_n = min(int(len(self.bump_scripts)), int(len(self.music_files)))
+        if max_n <= 0:
+            return
 
-        guard = max(1, len(self.bump_scripts)) * 3
-        while len(self._bump_queue) < target_n and guard > 0:
+        # Update the public-ish size field so debugging/UI can reflect the true cap.
+        self._bump_queue_size = int(max_n)
+
+        script_pool = list(range(len(self.bump_scripts)))
+        music_pool = list(range(len(self.music_files)))
+
+        def _script_score(idx: int) -> float:
+            try:
+                s = self.bump_scripts[int(idx)]
+            except Exception:
+                return 0.0
+            k = self._script_key(s if isinstance(s, dict) else {})
+            try:
+                return float(self.script_exposure_scores.get(k, 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        def _music_score(idx: int) -> float:
+            try:
+                entry0 = self.music_files[int(idx)]
+            except Exception:
+                return 0.0
+            entry = entry0 if isinstance(entry0, dict) else {'path': str(entry0)}
+            p = str(entry.get('path') or '')
+            k = self._norm_path_key(p)
+            try:
+                return float(self.music_exposure_scores.get(k, 0.0) or 0.0)
+            except Exception:
+                return 0.0
+
+        def _pick_min_exposure(indices, score_fn):
+            if not indices:
+                return None
+            best_score = None
+            ties = []
+            for x in list(indices):
+                try:
+                    sc = float(score_fn(int(x)))
+                except Exception:
+                    sc = 0.0
+                if best_score is None or sc < best_score:
+                    best_score = sc
+                    ties = [int(x)]
+                elif abs(sc - float(best_score)) < 1e-9:
+                    ties.append(int(x))
+            if not ties:
+                return None
+            return random.choice(ties)
+
+        def _music_duration_ms(entry: dict):
+            dur_ms = entry.get('duration_ms', None)
+            if dur_ms is None and entry.get('duration_s', None) is not None:
+                try:
+                    dur_ms = int(round(float(entry.get('duration_s')) * 1000.0))
+                except Exception:
+                    dur_ms = None
+            return dur_ms
+
+        def _select_music_index_for_script(script: dict, pool_indices):
+            if not isinstance(script, dict) or not pool_indices:
+                return None
+
+            timing = script.get('_timing')
+            if not isinstance(timing, dict):
+                timing = self._analyze_script_timing(script)
+                script['_timing'] = dict(timing)
+
+            music_pref = str(script.get('music') or 'any').strip()
+
+            # Prefer <=15s tracks for short scripts.
+            prefer_short = False
+            try:
+                prefer_short = float(timing.get('estimated_ms', 0) or 0) <= float(self._short_bump_s) * 1000.0
+            except Exception:
+                prefer_short = False
+
+            # Explicit track request.
+            if music_pref and music_pref.lower() != 'any':
+                want = music_pref.lower()
+                for idx in list(pool_indices):
+                    entry0 = self.music_files[int(idx)]
+                    entry = entry0 if isinstance(entry0, dict) else {'path': str(entry0)}
+                    p = str(entry.get('path') or '')
+                    if not p:
+                        continue
+                    if os.path.basename(p).lower() != want:
+                        continue
+                    dur_ms = _music_duration_ms(entry)
+                    if dur_ms is not None and not self._is_music_eligible_for_script(timing, music_duration_ms=int(dur_ms)):
+                        return None
+                    return int(idx)
+                return None
+
+            eligible = []
+            eligible_short = []
+            for idx in list(pool_indices):
+                entry0 = self.music_files[int(idx)]
+                entry = entry0 if isinstance(entry0, dict) else {'path': str(entry0)}
+                p = str(entry.get('path') or '')
+                if not p:
+                    continue
+
+                try:
+                    name = os.path.basename(p).lower()
+                    if name.startswith('xmas') or name.startswith('special'):
+                        continue
+                except Exception:
+                    continue
+
+                dur_ms = _music_duration_ms(entry)
+                if dur_ms is None:
+                    continue
+                if not self._is_music_eligible_for_script(timing, music_duration_ms=int(dur_ms)):
+                    continue
+
+                eligible.append(int(idx))
+                if int(dur_ms) <= int(round(float(self._short_bump_s) * 1000.0)):
+                    eligible_short.append(int(idx))
+
+            if prefer_short and eligible_short:
+                return _pick_min_exposure(eligible_short, _music_score)
+            if eligible:
+                return _pick_min_exposure(eligible, _music_score)
+            return None
+
+        def _pick_outro_by_exposure():
+            if not self.outro_sounds:
+                return None
+            best_score = None
+            ties = []
+            for p in list(self.outro_sounds or []):
+                pk = self._norm_path_key(p)
+                try:
+                    sc = float(self.outro_exposure_scores.get(pk, 0.0) or 0.0)
+                except Exception:
+                    sc = 0.0
+                if best_score is None or sc < best_score:
+                    best_score = sc
+                    ties = [str(p)]
+                elif abs(sc - float(best_score)) < 1e-9:
+                    ties.append(str(p))
+            if not ties:
+                return None
+            return random.choice(ties)
+
+        guard = max_n * 4
+        while len(self._bump_queue) < max_n and script_pool and music_pool and guard > 0:
             guard -= 1
-            bump_item = self._make_next_bump_item()
-            if bump_item:
-                self._bump_queue.append(bump_item)
 
-    def _make_next_bump_item(self):
-        """Create one complete bump item and consume spacing state.
-
-        Returns a bump dict (same shape as get_random_bump) or None.
-        """
-        if not self.bump_scripts:
-            return None
-
-        if not self._script_queue:
-            self._rebuild_script_queue()
-        if not self._script_queue:
-            return None
-
-        attempts = len(self._script_queue)
-        for _ in range(attempts):
-            script_idx = self._script_queue.pop(0)
+            script_idx = _pick_min_exposure(script_pool, _script_score)
+            if script_idx is None:
+                break
             try:
                 script = self.bump_scripts[int(script_idx)]
             except Exception:
+                script_pool = [i for i in script_pool if int(i) != int(script_idx)]
+                continue
+            if not isinstance(script, dict):
+                script_pool = [i for i in script_pool if int(i) != int(script_idx)]
                 continue
 
-            # Pick a suitable music track and fit the script's card durations to it.
-            music_entry = None
-            if self.music_files:
-                try:
-                    music_entry = self._pick_music_entry_for_script(script)
-                except Exception:
-                    music_entry = None
+            music_idx = _select_music_index_for_script(script, music_pool)
+            if music_idx is None:
+                # This script can't find any eligible music right now; drop it.
+                script_pool = [i for i in script_pool if int(i) != int(script_idx)]
+                continue
 
-            materialized_script = None
-            audio_path = None
-            if music_entry and music_entry.get('path'):
-                audio_path = str(music_entry.get('path'))
-                try:
-                    dur_ms = music_entry.get('duration_ms', None)
-                    if dur_ms is None:
-                        try:
-                            dur_s = music_entry.get('duration_s', None)
-                            if dur_s is not None:
-                                dur_ms = int(round(float(dur_s) * 1000.0))
-                        except Exception:
-                            dur_ms = None
+            entry0 = self.music_files[int(music_idx)]
+            entry = entry0 if isinstance(entry0, dict) else {'path': str(entry0)}
+            audio_path = str(entry.get('path') or '')
+            if not audio_path:
+                music_pool = [i for i in music_pool if int(i) != int(music_idx)]
+                continue
 
-                    if dur_ms is None:
-                        materialized_script = self._materialize_script_without_music(script)
-                    else:
-                        materialized_script = self._materialize_script_for_music(script, int(dur_ms))
-                except Exception:
-                    materialized_script = None
+            dur_ms = _music_duration_ms(entry)
+            if dur_ms is None:
+                materialized_script = self._materialize_script_without_music(script)
             else:
-                # If there's no music library, bumps can still run silently using their
-                # estimated (pre-scaling) durations.
-                if not self.music_files:
-                    materialized_script = self._materialize_script_without_music(script)
-
+                materialized_script = self._materialize_script_for_music(script, int(dur_ms))
             if not materialized_script:
-                # Could not find a suitable track for this script; rotate the script for later.
-                self._script_queue.append(script_idx)
+                # If fitting fails, drop this music and retry later.
+                music_pool = [i for i in music_pool if int(i) != int(music_idx)]
                 continue
-
-            outro_path = None
-            if self._script_needs_outro_audio(script):
-                try:
-                    outro_path = self._pick_outro_sound_from_queue()
-                except Exception:
-                    outro_path = None
-
-            # Consume this script (do not re-append) to maximize spacing.
-            self._note_recent_script(script_idx)
 
             item = {
                 'type': 'bump',
                 'script': materialized_script,
-                'audio': (str(audio_path) if audio_path else None),
+                'audio': str(audio_path),
             }
-            if outro_path:
-                item['outro_audio_path'] = str(outro_path)
-            return item
+            if self._script_needs_outro_audio(script):
+                outro_path = _pick_outro_by_exposure()
+                if outro_path:
+                    item['outro_audio_path'] = str(outro_path)
 
+            self._bump_queue.append(item)
+            script_pool = [i for i in script_pool if int(i) != int(script_idx)]
+            music_pool = [i for i in music_pool if int(i) != int(music_idx)]
+
+    def _make_next_bump_item(self):
+        # Legacy helper no longer used by the exposure-based queue builder.
         return None
 
     def _music_queue_key(self, idx):
@@ -909,9 +1130,7 @@ class BumpManager:
                         dirs[:] = []
                         break
 
-        self._rebuild_script_queue()
-
-        # Scripts inventory changed; rebuild complete-bump queue too.
+        # Scripts inventory changed; rebuild complete-bump queue lazily.
         self._bump_queue = []
                     
     def _parse_bump_file(self, filepath):
@@ -940,7 +1159,12 @@ class BumpManager:
                     base_dir = os.path.dirname(str(filepath))
                 except Exception:
                     base_dir = None
-                self._parse_single_bump(body, header, base_dir=base_dir)
+                # Stable-ish script identity for exposure scoring.
+                try:
+                    source_key = f"{os.path.normpath(str(filepath))}#bump{int(i)}"
+                except Exception:
+                    source_key = None
+                self._parse_single_bump(body, header, base_dir=base_dir, source_key=source_key)
         except Exception as e:
             print(f"Error parsing {filepath}: {e}")
 
@@ -1421,11 +1645,12 @@ class BumpManager:
 
         return info
 
-    def _parse_single_bump(self, content, bump_header=None, base_dir=None):
+    def _parse_single_bump(self, content, bump_header=None, base_dir=None, source_key=None):
         script = {
             'cards': [],
             'duration': 0,
-            'music': self._parse_bump_music_pref(bump_header)
+            'music': self._parse_bump_music_pref(bump_header),
+            '_script_key': (str(source_key) if source_key else None),
         }
         
         # Split by tags but keep delimiters to process order
@@ -1776,8 +2001,7 @@ class BumpManager:
                     if os.path.splitext(f)[1].lower() in audio_exts:
                         _add_file(os.path.join(root, f))
 
-        self._rebuild_music_queue()
-        # Music inventory changed; rebuild complete-bump queue too.
+        # Music inventory changed; rebuild complete-bump queue lazily.
         self._bump_queue = []
 
     def _iter_music_entries(self):

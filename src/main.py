@@ -16,9 +16,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QListWidget, QListWidgetItem, QInputDialog, QMessageBox, QMenu, QStackedWidget,
                                QDockWidget, QFrame, QSizePolicy, QToolButton, QStyle, QGridLayout,
                                QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider,
-                               QLineEdit, QProgressBar)
-from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor
+                               QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
+from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor, QGuiApplication
 
 from player_backend import MpvPlayer, MpvAudioPlayer
 from playlist_manager import PlaylistManager, VIDEO_EXTENSIONS, natural_sort_key
@@ -653,6 +653,10 @@ class BumpsModeWidget(QWidget):
         title.setStyleSheet("font-size: 28px; font-weight: bold; color: white;")
         layout.addWidget(title)
 
+        self.btn_clear_history = QPushButton("Clear Viewing History…")
+        self.btn_clear_history.clicked.connect(self.main_window.show_clear_viewing_history_dialog)
+        layout.addWidget(self.btn_clear_history)
+
         # --- Sound settings ---
         self._check_on_icon = QIcon(get_asset_path("check.png"))
         self._check_off_icon = QIcon(get_asset_path("checkbox.png"))
@@ -881,6 +885,9 @@ class StartupLoadingScreen(QWidget):
         self._progress = 0
         self._status = "Starting..."
 
+        self._tick_timer = None
+        self._run_loop = None
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(40, 40, 40, 40)
         layout.setSpacing(12)
@@ -890,7 +897,7 @@ class StartupLoadingScreen(QWidget):
         self.logo.setAlignment(Qt.AlignCenter)
         self.logo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._logo_pm = QPixmap(get_asset_path("sleepy-shows-logo.png"))
-        layout.addWidget(self.logo)
+        layout.addWidget(self.logo, 0, Qt.AlignHCenter)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -898,22 +905,23 @@ class StartupLoadingScreen(QWidget):
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(22)
         self.progress_bar.setMaximumWidth(420)
+        self.progress_bar.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.progress_bar.setStyleSheet(
             "QProgressBar{background: rgba(0,0,0,90); border: 1px solid rgba(255,255,255,60); border-radius: 10px;}"
             f"QProgressBar::chunk{{background: {THEME_COLOR}; border-radius: 10px;}}"
         )
-        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.progress_bar, 0, Qt.AlignHCenter)
 
         self.percent_label = QLabel("0%")
         self.percent_label.setAlignment(Qt.AlignCenter)
         self.percent_label.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
-        layout.addWidget(self.percent_label)
+        layout.addWidget(self.percent_label, 0, Qt.AlignHCenter)
 
         self.status_label = QLabel(self._status)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("color: rgba(255,255,255,210); font-size: 14px;")
-        layout.addWidget(self.status_label)
+        layout.addWidget(self.status_label, 0, Qt.AlignHCenter)
 
         # Smaller default splash, with responsive logo scaling.
         self.setMinimumSize(520, 360)
@@ -961,6 +969,71 @@ class StartupLoadingScreen(QWidget):
         self.progress_bar.setValue(p)
         self.percent_label.setText(f"{p}%")
         self.status_label.setText(self._status)
+
+    def run_blocking_fake_load(self, app=None, *, min_seconds: float = 2.0, max_seconds: float = 4.0):
+        """Block until a fake progress bar completes.
+
+        This keeps the UI responsive by running a nested Qt event loop.
+        """
+        if min_seconds < 0.2:
+            min_seconds = 0.2
+        if max_seconds < min_seconds:
+            max_seconds = min_seconds
+
+        total = float(random.uniform(float(min_seconds), float(max_seconds)))
+        hang_percent = float(random.uniform(83.0, 88.0))
+        hang_seconds = float(min(0.55, max(0.18, total * 0.12)))
+        active = max(0.05, total - hang_seconds)
+        pre = active * (hang_percent / 100.0)
+        post = max(0.01, active - pre)
+
+        start = time.monotonic()
+        self.set_progress(0, "Loading...")
+
+        loop = QEventLoop()
+        self._run_loop = loop
+
+        # Smooth but not too fast.
+        timer = QTimer(self)
+        timer.setInterval(16)
+        self._tick_timer = timer
+
+        def _tick():
+            elapsed = max(0.0, time.monotonic() - start)
+            if elapsed < pre:
+                p = (elapsed / pre) * hang_percent if pre > 0 else hang_percent
+            elif elapsed < (pre + hang_seconds):
+                p = hang_percent
+            else:
+                tail = elapsed - pre - hang_seconds
+                p = hang_percent + (tail / post) * (100.0 - hang_percent) if post > 0 else 100.0
+
+            p_i = int(round(max(0.0, min(100.0, p))))
+
+            # Keep the "hang" feeling: freeze the numeric readout too.
+            self.set_progress(p_i, "Loading...")
+
+            if p_i >= 100:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+                self.set_progress(100, "Loaded")
+                try:
+                    loop.quit()
+                except Exception:
+                    pass
+
+        timer.timeout.connect(_tick)
+        timer.start()
+
+        try:
+            if app is not None:
+                app.processEvents()
+        except Exception:
+            pass
+
+        loop.exec()
 
 
 
@@ -1534,10 +1607,102 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
             except Exception:
                 existing = None
 
-        # If the existing playlist still points at a valid folder, don't touch it.
+        def _season_from_path(p: str) -> int:
+            try:
+                parts = re.split(r'[\\/]+', str(p or ''))
+                for part in parts:
+                    m = re.search(r'(?:season|s)[ _-]?(\d{1,2})', part, flags=re.IGNORECASE)
+                    if m:
+                        try:
+                            return int(m.group(1))
+                        except Exception:
+                            return 0
+            except Exception:
+                return 0
+            return 0
+
+        def _default_frequency_settings_for(playlist_filename: str, episode_paths: list[str]) -> dict:
+            name = str(playlist_filename or '').lower()
+            episode_paths = [str(p) for p in (episode_paths or []) if p]
+            out = {
+                'episode_offsets': {},
+                'season_offsets': {},
+                'episode_factors': {},
+                'season_factors': {},
+            }
+
+            if 'king of the hill' in name or 'koth' in name:
+                out['season_offsets']['season:1'] = 101.0
+                out['season_factors']['season:1'] = 3.0
+                out['season_offsets']['season:2'] = 1.0
+                out['season_factors']['season:2'] = 2.0
+                out['season_offsets']['season:3'] = 1.0
+                out['season_factors']['season:3'] = 1.5
+                return out
+
+            if "bob's burgers" in name or 'bobs burgers' in name or 'bob' in name:
+                # Season 1 episode 1/2 offsets by natural file ordering within season 1.
+                s1 = [p for p in episode_paths if _season_from_path(p) == 1]
+                s1.sort(key=lambda p: natural_sort_key(os.path.basename(p)) + natural_sort_key(p))
+                if len(s1) >= 1:
+                    out['episode_offsets'][s1[0]] = 101.0
+                if len(s1) >= 2:
+                    out['episode_offsets'][s1[1]] = 1.0
+
+                # Seasons 11+ have an offset and factor.
+                seasons = set()
+                for p in episode_paths:
+                    n = _season_from_path(p)
+                    if n >= 11:
+                        seasons.add(int(n))
+                for n in sorted(seasons):
+                    out['season_offsets'][f'season:{n}'] = 50.0
+                    out['season_factors'][f'season:{n}'] = 1.5
+                return out
+
+            return out
+
+        def _has_any_frequency_settings(fs: dict | None) -> bool:
+            if not isinstance(fs, dict):
+                return False
+            for k in ('episode_offsets', 'season_offsets', 'episode_factors', 'season_factors'):
+                v = fs.get(k, None)
+                if isinstance(v, dict) and v:
+                    return True
+            return False
+
+        # If the existing playlist still points at a valid folder, don't touch it,
+        # except to backfill frequency settings if missing.
         try:
             existing_source = (existing or {}).get('source_folder', '')
             if existing_source and os.path.isdir(existing_source):
+                try:
+                    existing_fs = (existing or {}).get('frequency_settings', None)
+                except Exception:
+                    existing_fs = None
+
+                if _has_any_frequency_settings(existing_fs):
+                    return False
+
+                # Compute defaults from the existing playlist entries (no rescan).
+                episode_paths = []
+                try:
+                    for it in list((existing or {}).get('playlist', []) or []):
+                        if isinstance(it, dict) and it.get('type', 'video') == 'video':
+                            p = it.get('path')
+                            if p:
+                                episode_paths.append(str(p))
+                except Exception:
+                    episode_paths = []
+
+                defaults = _default_frequency_settings_for(playlist_filename, episode_paths)
+                if _has_any_frequency_settings(defaults):
+                    existing = dict(existing or {})
+                    existing['frequency_settings'] = defaults
+                    with open(playlist_path, 'w') as f:
+                        json.dump(existing, f, indent=2)
+                    return True
+
                 return False
         except Exception:
             pass
@@ -1549,10 +1714,12 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
         # Preserve user settings if the file already existed.
         shuffle_mode = None
         interstitial_folder = ''
+        frequency_settings = None
         try:
             if isinstance(existing, dict):
                 interstitial_folder = existing.get('interstitial_folder', '') or ''
                 shuffle_mode = existing.get('shuffle_mode', None)
+                frequency_settings = existing.get('frequency_settings', None)
                 if shuffle_mode is None:
                     shuffle_default = bool(existing.get('shuffle_default', False))
                     shuffle_mode = 'standard' if shuffle_default else 'off'
@@ -1562,6 +1729,9 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
         if shuffle_mode not in ('off', 'standard', 'season'):
             shuffle_mode = default_shuffle_mode
 
+        if not _has_any_frequency_settings(frequency_settings):
+            frequency_settings = _default_frequency_settings_for(playlist_filename, eps)
+
         data = {
             'playlist': [{'type': 'video', 'path': p} for p in eps],
             'interstitial_folder': interstitial_folder,
@@ -1569,6 +1739,7 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
             'shuffle_mode': shuffle_mode,
             'auto_generated': True,
             'source_folder': episode_folder,
+            'frequency_settings': frequency_settings,
         }
         with open(playlist_path, 'w') as f:
             json.dump(data, f, indent=2)
@@ -2058,30 +2229,60 @@ class EditModeWidget(QWidget):
         # --- 1. Library Column ---
         library_widget = QWidget()
         lib_layout = QVBoxLayout(library_widget)
-        lib_layout.addWidget(QLabel("Library"))
-        
+
+        self.left_tabs = QTabWidget()
+        lib_layout.addWidget(self.left_tabs)
+
+        # --- Library tab ---
+        library_tab = QWidget()
+        library_tab_layout = QVBoxLayout(library_tab)
+        library_tab_layout.addWidget(QLabel("Library"))
+
         self.library_tree = QTreeWidget()
         self.library_tree.setHeaderLabel("Episodes")
         self.library_tree.setDragEnabled(True)
         self.library_tree.setSelectionMode(QTreeWidget.ExtendedSelection)
         self.library_tree.itemDoubleClicked.connect(self.main_window.play_from_library)
-        
-        lib_layout.addWidget(self.library_tree)
-        
-        # Library Controls
+        library_tab_layout.addWidget(self.library_tree)
+
         lib_controls = QHBoxLayout()
         self.btn_add_source = QPushButton("Add Folder")
         self.btn_add_source.clicked.connect(self.main_window.add_source_folder)
         lib_controls.addWidget(self.btn_add_source)
-        
+
         self.btn_clear_library = QPushButton("Clear")
         self.btn_clear_library.clicked.connect(self.main_window.clear_library)
         lib_controls.addWidget(self.btn_clear_library)
-        
+
         self.btn_add_to_playlist = QPushButton("Add Selection")
         self.btn_add_to_playlist.clicked.connect(self.add_selected_to_playlist)
         lib_controls.addWidget(self.btn_add_to_playlist)
-        lib_layout.addLayout(lib_controls)
+        library_tab_layout.addLayout(lib_controls)
+
+        self.left_tabs.addTab(library_tab, "Library")
+
+        # --- Playlists tab ---
+        playlists_tab = QWidget()
+        playlists_tab_layout = QVBoxLayout(playlists_tab)
+        playlists_tab_layout.addWidget(QLabel("Saved Playlists"))
+
+        self.saved_playlists_list = QListWidget()
+        self.saved_playlists_list.setSelectionMode(QListWidget.SingleSelection)
+        self.saved_playlists_list.itemDoubleClicked.connect(self.load_selected_saved_playlist_into_editor)
+        playlists_tab_layout.addWidget(self.saved_playlists_list)
+
+        playlists_controls = QHBoxLayout()
+        self.btn_refresh_saved_playlists = QPushButton("Refresh")
+        self.btn_refresh_saved_playlists.clicked.connect(self.refresh_saved_playlists_list)
+        playlists_controls.addWidget(self.btn_refresh_saved_playlists)
+
+        self.btn_load_saved_playlist = QPushButton("Load into Editor")
+        self.btn_load_saved_playlist.clicked.connect(self.load_selected_saved_playlist_into_editor)
+        playlists_controls.addWidget(self.btn_load_saved_playlist)
+        playlists_controls.addStretch(1)
+        playlists_tab_layout.addLayout(playlists_controls)
+
+        self.left_tabs.addTab(playlists_tab, "Playlists")
         
         splitter.addWidget(library_widget)
         
@@ -2124,6 +2325,10 @@ class EditModeWidget(QWidget):
         self.btn_set_interstitial = QPushButton("Set Interstitial Folder")
         self.btn_set_interstitial.clicked.connect(self.main_window.choose_interstitial_folder)
         gen_controls.addWidget(self.btn_set_interstitial)
+
+        self.btn_frequency_settings = QPushButton("Frequency Settings…")
+        self.btn_frequency_settings.clicked.connect(self.open_frequency_settings_dialog)
+        gen_controls.addWidget(self.btn_frequency_settings)
         
         self.btn_generate_playlist = QPushButton("Generate Playlist from Library")
         self.btn_generate_playlist.clicked.connect(self.generate_playlist)
@@ -2149,6 +2354,282 @@ class EditModeWidget(QWidget):
         
         # Expose widgets to MainWindow via properties or direct access
         # but cleaner if we handle logic here or call main window
+
+        self.refresh_saved_playlists_list()
+
+    def refresh_saved_playlists_list(self):
+        try:
+            self.saved_playlists_list.clear()
+        except Exception:
+            return
+
+        files = []
+        try:
+            files = list(self.main_window.playlist_manager.list_saved_playlists() or [])
+        except Exception:
+            files = []
+
+        files = sorted([f for f in files if isinstance(f, str)], key=natural_sort_key)
+        for f in files:
+            item = QListWidgetItem(f)
+            item.setData(Qt.UserRole, os.path.join('playlists', f))
+            self.saved_playlists_list.addItem(item)
+
+    def load_selected_saved_playlist_into_editor(self, item=None):
+        if not isinstance(item, QListWidgetItem):
+            try:
+                item = self.saved_playlists_list.currentItem()
+            except Exception:
+                item = None
+        if item is None:
+            return
+        filename = None
+        try:
+            filename = item.data(Qt.UserRole)
+        except Exception:
+            filename = None
+        if not filename:
+            filename = item.text()
+            if isinstance(filename, str) and not filename.lower().endswith('.json'):
+                filename = filename + '.json'
+            filename = os.path.join('playlists', filename)
+        self.main_window.load_playlist_into_editor(filename)
+
+    def open_frequency_settings_dialog(self):
+        pm = self.main_window.playlist_manager
+
+        episode_paths = []
+        for it in list(getattr(pm, 'current_playlist', []) or []):
+            try:
+                if pm.is_episode_item(it):
+                    p = it.get('path') if isinstance(it, dict) else None
+                    if p:
+                        episode_paths.append(p)
+            except Exception:
+                continue
+
+        if not episode_paths:
+            QMessageBox.information(self, "Frequency Settings", "This playlist has no episodes.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Frequency Settings")
+        dlg.setModal(True)
+        dlg.resize(900, 520)
+
+        root = QVBoxLayout(dlg)
+        tabs = QTabWidget()
+        root.addWidget(tabs)
+
+        # Seasons tab
+        seasons_widget = QWidget()
+        seasons_layout = QVBoxLayout(seasons_widget)
+        seasons_table = QTableWidget()
+        seasons_table.setColumnCount(3)
+        seasons_table.setHorizontalHeaderLabels(["Season", "Exposure Offset", "Exposure Factor"])
+        seasons_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        seasons_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        seasons_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        seasons_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        seasons_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.SelectedClicked)
+        seasons_layout.addWidget(seasons_table)
+        tabs.addTab(seasons_widget, "Seasons")
+
+        season_nums = {}
+        for p in episode_paths:
+            try:
+                n = int(pm._season_key_from_path(p) or 0)
+            except Exception:
+                n = 0
+            if n > 0:
+                season_nums[int(n)] = True
+        season_nums = sorted(list(season_nums.keys()))
+
+        season_keys = [f"season:{n}" for n in season_nums]
+
+        seasons_table.setRowCount(len(season_keys))
+        for r, sk in enumerate(season_keys):
+            # Display as "Season N" but store canonical key in UserRole.
+            try:
+                n = int(str(sk).split(':', 1)[1])
+            except Exception:
+                n = 0
+            it0 = QTableWidgetItem(f"Season {n}" if n else str(sk))
+            it0.setFlags(it0.flags() & ~Qt.ItemIsEditable)
+            it0.setData(Qt.UserRole, str(sk))
+            seasons_table.setItem(r, 0, it0)
+
+            try:
+                off = float(getattr(pm, 'season_exposure_offsets', {}).get(sk, 0.0) or 0.0)
+            except Exception:
+                off = 0.0
+            it1 = QTableWidgetItem(f"{off:.0f}" if off else "0")
+            seasons_table.setItem(r, 1, it1)
+
+            try:
+                fac = float(getattr(pm, 'season_exposure_factors', {}).get(sk, 1.0) or 1.0)
+            except Exception:
+                fac = 1.0
+            it2 = QTableWidgetItem(f"{fac:.3f}" if fac else "1.000")
+            seasons_table.setItem(r, 2, it2)
+
+        # Episodes tab
+        episodes_widget = QWidget()
+        episodes_layout = QVBoxLayout(episodes_widget)
+        episodes_table = QTableWidget()
+        episodes_table.setColumnCount(4)
+        episodes_table.setHorizontalHeaderLabels(["Episode", "Season", "Exposure Offset", "Exposure Factor"])
+        episodes_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        episodes_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        episodes_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        episodes_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        episodes_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        episodes_table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.SelectedClicked)
+        episodes_layout.addWidget(episodes_table)
+        tabs.addTab(episodes_widget, "Episodes")
+
+        # Stable ordering by basename then full path.
+        rows = []
+        for p in episode_paths:
+            rows.append((os.path.basename(str(p)), str(p)))
+        rows.sort(key=lambda t: natural_sort_key(t[0]) + natural_sort_key(t[1]))
+
+        episodes_table.setRowCount(len(rows))
+        for r, (bn, p) in enumerate(rows):
+            ep_item = QTableWidgetItem(str(bn))
+            ep_item.setFlags(ep_item.flags() & ~Qt.ItemIsEditable)
+            ep_item.setData(Qt.UserRole, str(p))
+            episodes_table.setItem(r, 0, ep_item)
+
+            try:
+                n = int(pm._season_key_from_path(p) or 0)
+            except Exception:
+                n = 0
+            sk = f"season:{n}" if n else ''
+            sk_item = QTableWidgetItem(f"Season {n}" if n else "")
+            sk_item.setFlags(sk_item.flags() & ~Qt.ItemIsEditable)
+            sk_item.setData(Qt.UserRole, str(sk))
+            episodes_table.setItem(r, 1, sk_item)
+
+            key = None
+            try:
+                key = pm._norm_path_key(p)
+            except Exception:
+                key = None
+            try:
+                off = float(getattr(pm, 'episode_exposure_offsets', {}).get(key, 0.0) or 0.0)
+            except Exception:
+                off = 0.0
+            it1 = QTableWidgetItem(f"{off:.0f}" if off else "0")
+            episodes_table.setItem(r, 2, it1)
+
+            try:
+                fac = float(getattr(pm, 'episode_exposure_factors', {}).get(key, 1.0) or 1.0)
+            except Exception:
+                fac = 1.0
+            it2 = QTableWidgetItem(f"{fac:.3f}" if fac else "1.000")
+            episodes_table.setItem(r, 3, it2)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_cancel = QPushButton("Cancel")
+        btn_ok = QPushButton("Save")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_ok.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        root.addLayout(btn_row)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        # Merge changes for the visible playlist items only.
+        ep_off = dict(getattr(pm, 'episode_exposure_offsets', {}) or {})
+        s_off = dict(getattr(pm, 'season_exposure_offsets', {}) or {})
+        ep_fac = dict(getattr(pm, 'episode_exposure_factors', {}) or {})
+        s_fac = dict(getattr(pm, 'season_exposure_factors', {}) or {})
+
+        def _parse_float(item, default):
+            try:
+                if item is None:
+                    return float(default)
+                txt = str(item.text()).strip()
+                if txt == '':
+                    return float(default)
+                return float(txt)
+            except Exception:
+                return float(default)
+
+        for r in range(seasons_table.rowCount()):
+            sk_item = seasons_table.item(r, 0)
+            if sk_item is None:
+                continue
+            try:
+                sk = str(sk_item.data(Qt.UserRole) or '').strip()
+            except Exception:
+                sk = ''
+            if not sk:
+                continue
+            off = max(0.0, _parse_float(seasons_table.item(r, 1), 0.0))
+            fac = _parse_float(seasons_table.item(r, 2), 1.0)
+            if fac <= 0.0:
+                fac = 1.0
+
+            if off > 0.0:
+                s_off[sk] = float(off)
+            else:
+                s_off.pop(sk, None)
+
+            if abs(fac - 1.0) > 1e-9:
+                s_fac[sk] = float(fac)
+            else:
+                s_fac.pop(sk, None)
+
+        for r in range(episodes_table.rowCount()):
+            ep_item = episodes_table.item(r, 0)
+            if ep_item is None:
+                continue
+            try:
+                p = ep_item.data(Qt.UserRole)
+            except Exception:
+                p = None
+            if not p:
+                continue
+            try:
+                key = pm._norm_path_key(p)
+            except Exception:
+                key = None
+            if not key:
+                continue
+
+            off = max(0.0, _parse_float(episodes_table.item(r, 2), 0.0))
+            fac = _parse_float(episodes_table.item(r, 3), 1.0)
+            if fac <= 0.0:
+                fac = 1.0
+
+            if off > 0.0:
+                ep_off[key] = float(off)
+            else:
+                ep_off.pop(key, None)
+
+            if abs(fac - 1.0) > 1e-9:
+                ep_fac[key] = float(fac)
+            else:
+                ep_fac.pop(key, None)
+
+        pm.apply_frequency_settings(
+            episode_offsets=ep_off,
+            season_offsets=s_off,
+            episode_factors=ep_fac,
+            season_factors=s_fac,
+        )
+
+        try:
+            self.main_window.persist_current_playlist_frequency_settings()
+        except Exception:
+            pass
+
+        QMessageBox.information(self, "Frequency Settings", "Saved exposure frequency settings.")
     
     def add_dropped_items(self, items):
         self.main_window.add_dropped_items(items)
@@ -2704,10 +3185,46 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sleepy Shows Player")
-        self.resize(1200, 800)
+
+        # Clamp initial window size to fit on smaller laptop screens.
+        # Use available geometry (excludes taskbar/docks) and cap at 75%.
+        try:
+            screen = None
+            try:
+                screen = QGuiApplication.screenAt(QCursor.pos())
+            except Exception:
+                screen = None
+            if screen is None:
+                try:
+                    screen = QGuiApplication.primaryScreen()
+                except Exception:
+                    screen = None
+
+            if screen is not None:
+                geo = screen.availableGeometry()
+                max_w = int(max(640, geo.width() * 0.75))
+                max_h = int(max(480, geo.height() * 0.75))
+                w = min(1200, max_w)
+                h = min(800, max_h)
+                self.resize(w, h)
+
+                # Center on that screen.
+                try:
+                    fr = self.frameGeometry()
+                    fr.moveCenter(geo.center())
+                    self.move(fr.topLeft())
+                except Exception:
+                    pass
+            else:
+                self.resize(1200, 800)
+        except Exception:
+            self.resize(1200, 800)
         
         # Data
         self.playlist_manager = PlaylistManager()
+
+        # Tracks the current playlist file on disk (if loaded/saved).
+        self.current_playlist_filename = None
 
         # Local bumps scripts folder (like `playlists/`).
         self.bump_scripts_dir = get_local_bumps_scripts_dir()
@@ -2795,6 +3312,14 @@ class MainWindow(QMainWindow):
         self._last_time_pos = None
         self._play_start_monotonic = None
         self._played_since_start = False
+        self._advancing_from_eof = False
+        self._skip_penalty_applied_for_start = None
+
+        # Fullscreen transition/state helpers (Windows reliability).
+        self._pre_fullscreen_geometry = None
+        self._pre_fullscreen_was_maximized = False
+        self._fullscreen_transitioning = False
+        self._fullscreen_cursor_hidden = False
         self.was_maximized = False # Track window state for fullscreen toggle
         self.last_activity_time = time.time()
 
@@ -2879,6 +3404,11 @@ class MainWindow(QMainWindow):
         self.overlay_label.setStyleSheet("background-color: rgba(0, 0, 0, 150); color: white; padding: 10px; font-size: 18px; font-weight: bold;")
         self.overlay_label.setVisible(False)
         self.overlay_label.setAttribute(Qt.WA_TransparentForMouseEvents) # Let clicks pass through
+
+        # Windowed-mode rule: show briefly at episode start, then hide.
+        self._episode_overlay_hide_timer = QTimer(self)
+        self._episode_overlay_hide_timer.setSingleShot(True)
+        self._episode_overlay_hide_timer.timeout.connect(self._on_episode_overlay_hide_timeout)
         
         # We need to manually position this because it's an overlay
         self.video_container.installEventFilter(self)
@@ -3189,6 +3719,14 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+            # Auto-config implies storage topology may have changed (drive mounted / letter changed).
+            # Refresh outro sounds so the UI doesn't get stuck with a stale cached list.
+            try:
+                self._invalidate_outro_sounds_cache()
+                self._ensure_outro_sounds_loaded_force(force=True)
+            except Exception:
+                pass
+
             if hasattr(self, 'bumps_mode_widget'):
                 try:
                     self.bumps_mode_widget.refresh_status()
@@ -3219,12 +3757,10 @@ class MainWindow(QMainWindow):
                  
              # Positioning Controls in Fullscreen Overlay Mode
              if self.isFullScreen() and hasattr(self, 'play_mode_widget'):
-                 ctrls = self.play_mode_widget.controls_widget
-                 # If controls are reparented to video_container (happens in toggle_fullscreen)
-                 if ctrls.parent() == self.video_container:
-                     cw = w
-                     ch = 180 # Fixed height
-                     ctrls.setGeometry(0, h - ch, cw, ch)
+                 try:
+                     self._reposition_fullscreen_controls()
+                 except Exception:
+                     pass
 
         if obj == getattr(self, 'bump_widget', None) and event.type() == QEvent.Resize:
             try:
@@ -3290,6 +3826,92 @@ class MainWindow(QMainWindow):
         if self.mode_stack.currentIndex() == 2:
             self.show_controls()
 
+    def _current_episode_title_for_overlay(self):
+        try:
+            pm = self.playlist_manager
+            playlist = getattr(pm, 'current_playlist', None) or []
+            if not playlist:
+                return None
+
+            idx = int(getattr(pm, 'current_index', -1))
+            if idx < 0 or idx >= len(playlist):
+                return None
+
+            item = playlist[idx]
+            if isinstance(item, dict):
+                itype = item.get('type', 'video')
+                if itype not in ('video', 'interstitial'):
+                    return None
+                path = item.get('path') or ''
+            else:
+                path = str(item or '')
+
+            if not path:
+                return None
+            return os.path.splitext(os.path.basename(path))[0]
+        except Exception:
+            return None
+
+    def _hide_episode_overlay(self):
+        try:
+            self._episode_overlay_hide_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'overlay_label'):
+                self.overlay_label.setVisible(False)
+        except Exception:
+            pass
+
+    def _on_episode_overlay_hide_timeout(self):
+        # Only auto-hide in windowed mode.
+        try:
+            if self.isFullScreen():
+                return
+        except Exception:
+            pass
+        self._hide_episode_overlay()
+
+    def _show_episode_overlay(self, auto_hide_seconds=None):
+        title = self._current_episode_title_for_overlay()
+        if not title:
+            self._hide_episode_overlay()
+            return
+
+        try:
+            self.overlay_label.setText(title)
+            self.overlay_label.setVisible(True)
+            self.overlay_label.raise_()
+        except Exception:
+            return
+
+        try:
+            self._episode_overlay_hide_timer.stop()
+            if auto_hide_seconds is not None:
+                secs = float(auto_hide_seconds)
+                if secs > 0:
+                    self._episode_overlay_hide_timer.start(int(secs * 1000))
+        except Exception:
+            pass
+
+    def _sync_episode_overlay_visibility(self):
+        # Fullscreen rule: show overlay only while player controls are visible.
+        try:
+            if not self.isFullScreen():
+                return
+        except Exception:
+            return
+
+        try:
+            ctrls_visible = bool(self.play_mode_widget.controls_widget.isVisible())
+        except Exception:
+            ctrls_visible = False
+
+        if ctrls_visible:
+            self._show_episode_overlay(auto_hide_seconds=None)
+        else:
+            self._hide_episode_overlay()
+
     def _poll_fullscreen_cursor(self):
         # Only needed in fullscreen play mode.
         try:
@@ -3326,6 +3948,23 @@ class MainWindow(QMainWindow):
                  start_timer = True
         
         self.play_mode_widget.controls_widget.setVisible(True)
+
+        # Fullscreen: show cursor while controls are visible.
+        try:
+            self._set_fullscreen_cursor_hidden(False)
+        except Exception:
+            pass
+
+        # Ensure controls are correctly pinned to bottom.
+        try:
+            self._reposition_fullscreen_controls()
+        except Exception:
+            pass
+
+        try:
+            self._sync_episode_overlay_visibility()
+        except Exception:
+            pass
         
         if start_timer:
             self.hover_timer.start()
@@ -3347,6 +3986,17 @@ class MainWindow(QMainWindow):
                  # map to global
                  # simple check: just hide, moving mouse brings back
                  self.play_mode_widget.controls_widget.setVisible(False)
+
+                 # Fullscreen: hide cursor with the controls.
+                 try:
+                     self._set_fullscreen_cursor_hidden(True)
+                 except Exception:
+                     pass
+
+                 try:
+                     self._sync_episode_overlay_visibility()
+                 except Exception:
+                     pass
 
     def check_fullscreen_inactivity(self):
         # Failsafe: if we are in fullscreen, playing, and controls are visible
@@ -3391,50 +4041,193 @@ class MainWindow(QMainWindow):
     def toggle_fullscreen(self):
         if self.isFullScreen():
             # Exiting Fullscreen
-            if self.was_maximized:
-                self.showMaximized()
-            else:
-                self.showNormal()
-            
             self.failsafe_timer.stop()
             try:
                 self._fs_cursor_poll_timer.stop()
                 self._fs_last_cursor_pos = None
             except Exception:
                 pass
-            
-            # Delay UI restoration to avoid "zoom in" effect during OS animation
-            QTimer.singleShot(200, self.restore_ui_after_fullscreen)
-            
-        else:
-            # Entering Fullscreen
-            self.was_maximized = self.isMaximized()
-            self.showFullScreen()
-            
-            # Hide sidebar
-            self.play_mode_widget.sidebar_container.setVisible(False)
-            
-            self.play_mode_widget.btn_fullscreen.setChecked(True)
-            self._update_fullscreen_button_icon()
-            self.play_mode_widget.set_controls_overlay(True)
-            # Hide both native and custom menu bars while fullscreen.
-            self.menuBar().setVisible(False)
-            if hasattr(self, 'menu_bar_widget') and self.menu_bar_widget is not None:
-                self.menu_bar_widget.setVisible(False)
-            self.statusBar().setVisible(False)
-            
-            self.failsafe_timer.start()
+
             try:
-                self._fs_last_cursor_pos = QCursor.pos()
-                self._fs_cursor_poll_timer.start()
+                self._set_fullscreen_cursor_hidden(False)
             except Exception:
                 pass
-            
-            # Trigger resize to position controls
-            self.video_container.resizeEvent(QResizeEvent(self.video_container.size(), self.video_container.size()))
+
+            # showNormal() first to exit fullscreen, then restore UI+geometry.
+            self.showNormal()
+
+            # Delay UI restoration to avoid "zoom in" effect during OS animation.
+            QTimer.singleShot(200, self.restore_ui_after_fullscreen)
+        else:
+            # Entering Fullscreen (Windows reliability): if not maximized, maximize first.
+            if getattr(self, '_fullscreen_transitioning', False):
+                return
+            self._fullscreen_transitioning = True
+
+            try:
+                self._pre_fullscreen_geometry = self.geometry()
+            except Exception:
+                self._pre_fullscreen_geometry = None
+
+            try:
+                self._pre_fullscreen_was_maximized = bool(self.isMaximized())
+            except Exception:
+                self._pre_fullscreen_was_maximized = False
+
+            # Preserve existing flag used elsewhere.
+            self.was_maximized = bool(self._pre_fullscreen_was_maximized)
+
+            if not self._pre_fullscreen_was_maximized:
+                try:
+                    self.showMaximized()
+                except Exception:
+                    pass
+
+                # Let the window manager settle before requesting fullscreen.
+                QTimer.singleShot(80, self._finish_enter_fullscreen)
+            else:
+                self._finish_enter_fullscreen()
+
+    def _finish_enter_fullscreen(self):
+        try:
+            self.showFullScreen()
+        except Exception:
+            try:
+                self._fullscreen_transitioning = False
+            except Exception:
+                pass
+            return
+
+        # Hide sidebar
+        try:
+            self.play_mode_widget.sidebar_container.setVisible(False)
+        except Exception:
+            pass
+
+        try:
+            self.play_mode_widget.btn_fullscreen.setChecked(True)
+        except Exception:
+            pass
+        self._update_fullscreen_button_icon()
+
+        try:
+            self.play_mode_widget.set_controls_overlay(True)
+        except Exception:
+            pass
+
+        # Hide both native and custom menu bars while fullscreen.
+        try:
+            self.menuBar().setVisible(False)
+        except Exception:
+            pass
+        if hasattr(self, 'menu_bar_widget') and self.menu_bar_widget is not None:
+            try:
+                self.menu_bar_widget.setVisible(False)
+            except Exception:
+                pass
+        try:
+            self.statusBar().setVisible(False)
+        except Exception:
+            pass
+
+        self.failsafe_timer.start()
+        try:
+            self._fs_last_cursor_pos = QCursor.pos()
+            self._fs_cursor_poll_timer.start()
+        except Exception:
+            pass
+
+        # Ensure controls (and episode overlay, if any) are visible initially.
+        self.show_controls()
+
+        # Reposition controls after the fullscreen resize completes.
+        QTimer.singleShot(0, self._reposition_fullscreen_controls)
+        QTimer.singleShot(120, self._reposition_fullscreen_controls)
+
+        try:
+            self._fullscreen_transitioning = False
+        except Exception:
+            pass
+
+    def _reposition_fullscreen_controls(self):
+        """Pin the controls overlay to the bottom of the video container."""
+        try:
+            if not self.isFullScreen():
+                return
+            if not hasattr(self, 'play_mode_widget') or self.play_mode_widget is None:
+                return
+            if not hasattr(self, 'video_container') or self.video_container is None:
+                return
+
+            ctrls = self.play_mode_widget.controls_widget
+            if ctrls is None:
+                return
+            if ctrls.parent() != self.video_container:
+                return
+
+            w = int(self.video_container.width())
+            h = int(self.video_container.height())
+            try:
+                ch = int(ctrls.height())
+            except Exception:
+                ch = 0
+            if ch <= 0:
+                try:
+                    ch = int(ctrls.sizeHint().height())
+                except Exception:
+                    ch = 180
+
+            ch = max(1, min(ch, max(1, h)))
+            ctrls.setGeometry(0, h - ch, w, ch)
+            ctrls.raise_()
+        except Exception:
+            return
+
+    def _set_fullscreen_cursor_hidden(self, hidden: bool):
+        """Hide the cursor in fullscreen when controls are hidden."""
+        try:
+            want_hidden = bool(hidden)
+        except Exception:
+            want_hidden = False
+
+        if not self.isFullScreen():
+            want_hidden = False
+
+        already = bool(getattr(self, '_fullscreen_cursor_hidden', False))
+        if want_hidden == already:
+            return
+
+        if want_hidden:
+            try:
+                QApplication.setOverrideCursor(Qt.BlankCursor)
+                self._fullscreen_cursor_hidden = True
+            except Exception:
+                self._fullscreen_cursor_hidden = False
+        else:
+            # Restore any overrides we created.
+            try:
+                while QApplication.overrideCursor() is not None:
+                    QApplication.restoreOverrideCursor()
+            except Exception:
+                pass
+            self._fullscreen_cursor_hidden = False
 
     def restore_ui_after_fullscreen(self):
         if not self.isFullScreen():
+            # Restore cursor immediately on exit.
+            try:
+                self._set_fullscreen_cursor_hidden(False)
+            except Exception:
+                pass
+
+            # Restore pre-fullscreen window geometry if we forced maximization.
+            try:
+                if not bool(getattr(self, '_pre_fullscreen_was_maximized', False)):
+                    if getattr(self, '_pre_fullscreen_geometry', None) is not None:
+                        self.setGeometry(self._pre_fullscreen_geometry)
+            except Exception:
+                pass
+
             self.play_mode_widget.sidebar_container.setVisible(self.play_mode_widget.sidebar_visible)
             self.play_mode_widget.btn_fullscreen.setChecked(False)
             self._update_fullscreen_button_icon()
@@ -3446,6 +4239,9 @@ class MainWindow(QMainWindow):
             self.statusBar().setVisible(True)
             # Ensure controls remain visible after leaving fullscreen.
             self.show_controls()
+
+            # Leaving fullscreen: don't keep the episode title overlay hanging around.
+            self._hide_episode_overlay()
 
     def setup_ui(self):
         self.create_menu()
@@ -3916,6 +4712,12 @@ class MainWindow(QMainWindow):
 
             self.current_sleep_minutes = minutes
             self.sleep_timer_active = True
+
+            # Exposure scoring: sleep timer ON enables diminishing episode deltas.
+            try:
+                self.playlist_manager.set_sleep_timer_active_for_exposure(True)
+            except Exception:
+                pass
             self.sleep_remaining_ms = int(minutes * 60 * 1000)
             self._sleep_last_tick = None
             
@@ -3941,6 +4743,12 @@ class MainWindow(QMainWindow):
     def cancel_sleep_timer(self):
         try:
             self.sleep_timer_active = False
+
+            # Exposure scoring: sleep timer OFF => constant episode deltas.
+            try:
+                self.playlist_manager.set_sleep_timer_active_for_exposure(False)
+            except Exception:
+                pass
             self.sleep_remaining_ms = 0
             self._pause_sleep_countdown()
             self._update_sleep_timer_ui()
@@ -3961,6 +4769,13 @@ class MainWindow(QMainWindow):
     def set_mode(self, index):
         self.mode_stack.setCurrentIndex(index)
         self.update_menu_mode_state()
+
+        # Ensure native playback surfaces (mpv video container) and bump cards never
+        # bleed through non-player screens.
+        try:
+            self._sync_playback_surface_visibility_for_mode()
+        except Exception:
+            pass
         
         # If switching to Play mode (Index 2), refresh list
         if index == 2:
@@ -3968,6 +4783,57 @@ class MainWindow(QMainWindow):
             # If no playlist is loaded, ensure menu is open so user can pick one
             if not self.playlist_manager.current_playlist and not self.play_mode_widget.sidebar_visible:
                  self.play_mode_widget.toggle_sidebar()
+
+    def _sync_playback_surface_visibility_for_mode(self):
+        """Prevent mpv/bump widgets from overlaying non-player modes."""
+        try:
+            on_player = int(self.mode_stack.currentIndex()) == 2
+        except Exception:
+            on_player = False
+
+        if not on_player:
+            # Hide all playback surfaces explicitly. This is important on Windows where
+            # native child windows can draw above other Qt widgets.
+            try:
+                if hasattr(self, 'overlay_label'):
+                    self.overlay_label.setVisible(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'play_mode_widget') and self.play_mode_widget is not None:
+                    self.play_mode_widget.controls_widget.setVisible(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'video_container') and self.video_container is not None:
+                    self.video_container.setVisible(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'bump_widget') and self.bump_widget is not None:
+                    self.bump_widget.setVisible(False)
+            except Exception:
+                pass
+            return
+
+        # On player: allow the stack to decide what is visible, but ensure both
+        # stack pages are eligible to paint.
+        try:
+            if hasattr(self, 'video_container') and self.video_container is not None:
+                self.video_container.setVisible(True)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'bump_widget') and self.bump_widget is not None:
+                self.bump_widget.setVisible(True)
+        except Exception:
+            pass
+
+        # Controls visibility is managed by show_controls/hide_controls.
+        try:
+            self.show_controls()
+        except Exception:
+            pass
 
     def go_to_welcome(self):
         self.set_mode(0)
@@ -4151,15 +5017,13 @@ class MainWindow(QMainWindow):
         menu.addAction(rem)
         menu.exec(self.edit_mode_widget.playlist_list.mapToGlobal(pos))
 
-    def generate_playlist_logic(self, shuffle, interstitials, bumps):
-        # We don't shuffle physically anymore, but we record the preference.
-        # But wait, this method updates the CURRENT play session in memory.
-        # The user just clicked "Generate".
-        # We should set the runtime shuffle mode immediately if they checked "Default: ON".
-        
-        pass
-
     def generate_playlist_logic(self, shuffle_mode, interstitials, bumps):
+        self.current_playlist_filename = None
+        try:
+            self.playlist_manager.clear_frequency_settings()
+        except Exception:
+            pass
+
         # Generate playlist contents (injections are decided here).
         self.playlist_manager.generate_playlist(None, False, interstitials, bumps)
         self.playlist_manager.reset_playback_state()
@@ -4205,12 +5069,18 @@ class MainWindow(QMainWindow):
                 # Backward-compatible boolean (standard shuffle == True)
                 'shuffle_default': (self.playlist_manager.shuffle_mode != 'off'),
                 # Preferred persisted value
-                'shuffle_mode': self.playlist_manager.shuffle_mode
+                'shuffle_mode': self.playlist_manager.shuffle_mode,
+                'frequency_settings': self.playlist_manager.get_frequency_settings_for_save(),
             }
             with open(filename, 'w') as f:
                 json.dump(data, f, indent=2)
+            self.current_playlist_filename = filename
             QMessageBox.information(self, "Success", "Playlist saved!")
             self.play_mode_widget.refresh_playlists()
+            try:
+                self.edit_mode_widget.refresh_saved_playlists_list()
+            except Exception:
+                pass
 
             # Clear the working playlist after save so the user can build a new one.
             # If media is currently loaded in the player, don't clear to avoid breaking playback.
@@ -4231,6 +5101,13 @@ class MainWindow(QMainWindow):
             try:
                 with open(filename, 'r') as f:
                     data = json.load(f)
+
+                self.current_playlist_filename = filename
+
+                try:
+                    self.playlist_manager.set_frequency_settings_from_playlist_data(data)
+                except Exception:
+                    pass
                 
                 if 'interstitial_folder' in data:
                     self.playlist_manager.scan_interstitials(data['interstitial_folder'])
@@ -4269,9 +5146,146 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load: {e}")
 
+    def load_playlist_into_editor(self, filename=False):
+        if not filename:
+            files_dir = os.path.join(os.getcwd(), "playlists")
+            os.makedirs(files_dir, exist_ok=True)
+            filename, _ = QFileDialog.getOpenFileName(self, "Load Playlist", files_dir, "Sleepy Playlist (*.json)")
+
+        if filename and os.path.exists(filename):
+            try:
+                with open(filename, 'r') as f:
+                    data = json.load(f)
+
+                self.current_playlist_filename = filename
+
+                try:
+                    self.playlist_manager.set_frequency_settings_from_playlist_data(data)
+                except Exception:
+                    pass
+
+                if 'interstitial_folder' in data:
+                    self.playlist_manager.scan_interstitials(data['interstitial_folder'])
+
+                self.playlist_manager.current_playlist = data.get('playlist', [])
+                self.playlist_manager.reset_playback_state()
+
+                mode = data.get('shuffle_mode', None)
+                if mode is None:
+                    shuffle_default = data.get('shuffle_default', False)
+                    mode = 'standard' if shuffle_default else 'off'
+                self.set_shuffle_mode(mode, update_ui=True)
+
+                self.playlist_manager.current_index = -1
+                self.playlist_manager.rebuild_queue(current_index=self.playlist_manager.current_index)
+
+                self.edit_mode_widget.refresh_playlist_list()
+                try:
+                    self.edit_mode_widget.refresh_saved_playlists_list()
+                except Exception:
+                    pass
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load: {e}")
+
+    def persist_current_playlist_frequency_settings(self):
+        """Persist frequency settings into the playlist file if we have one."""
+        filename = getattr(self, 'current_playlist_filename', None)
+        if not filename:
+            return
+        if not os.path.exists(filename):
+            return
+
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+
+        try:
+            data['frequency_settings'] = self.playlist_manager.get_frequency_settings_for_save()
+        except Exception:
+            return
+
+        # Keep file consistent with current editor state.
+        try:
+            data['playlist'] = [
+                item for item in self.playlist_manager.current_playlist
+                if not (isinstance(item, dict) and item.get('type') == 'bump')
+            ]
+            data['interstitial_folder'] = self.playlist_manager.interstitial_folder
+            data['shuffle_default'] = (self.playlist_manager.shuffle_mode != 'off')
+            data['shuffle_mode'] = self.playlist_manager.shuffle_mode
+        except Exception:
+            pass
+
+        try:
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def show_clear_viewing_history_dialog(self):
+        playlists = []
+        try:
+            playlists = list(self.playlist_manager.list_saved_playlists() or [])
+        except Exception:
+            playlists = []
+
+        choices = ["Clear All"] + sorted([p for p in playlists if isinstance(p, str)], key=natural_sort_key)
+        choice, ok = QInputDialog.getItem(self, "Clear Viewing History", "Choose what to clear:", choices, 0, False)
+        if not ok or not choice:
+            return
+
+        if choice == "Clear All":
+            resp = QMessageBox.question(self, "Confirm", "Clear viewing history for ALL episodes?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if resp != QMessageBox.Yes:
+                return
+            self.playlist_manager.clear_episode_exposure_scores_all()
+            QMessageBox.information(self, "History Cleared", "Cleared episode viewing history.")
+            return
+
+        playlist_path = os.path.join('playlists', choice)
+        if not os.path.exists(playlist_path):
+            QMessageBox.warning(self, "Not Found", f"Playlist not found: {choice}")
+            return
+
+        try:
+            with open(playlist_path, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to read playlist: {e}")
+            return
+
+        paths = []
+        for it in list(data.get('playlist', []) or []):
+            if isinstance(it, dict):
+                if it.get('type', 'video') == 'video':
+                    p = it.get('path')
+                    if p:
+                        paths.append(p)
+            elif isinstance(it, str):
+                paths.append(it)
+
+        if not paths:
+            QMessageBox.information(self, "Nothing To Clear", "That playlist has no episodes.")
+            return
+
+        resp = QMessageBox.question(self, "Confirm", f"Clear viewing history for episodes in '{choice}'?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if resp != QMessageBox.Yes:
+            return
+
+        removed = self.playlist_manager.clear_episode_exposure_scores_for_paths(paths)
+        QMessageBox.information(self, "History Cleared", f"Cleared history for {removed} episode(s).")
+
     def clear_playlist(self):
         self.playlist_manager.current_playlist = []
         self.playlist_manager.reset_playback_state()
+        try:
+            self.playlist_manager.clear_frequency_settings()
+        except Exception:
+            pass
+        self.current_playlist_filename = None
         self.edit_mode_widget.refresh_playlist_list()
         if hasattr(self, 'play_mode_widget'):
             try:
@@ -4285,6 +5299,11 @@ class MainWindow(QMainWindow):
         path = item.data(0, Qt.UserRole)
         if path:
             self.stop_playback()
+            self.current_playlist_filename = None
+            try:
+                self.playlist_manager.clear_frequency_settings()
+            except Exception:
+                pass
             self.playlist_manager.current_playlist = [{'type': 'video', 'path': path}]
             self.playlist_manager.current_index = 0
             self.edit_mode_widget.refresh_playlist_list()
@@ -4297,6 +5316,14 @@ class MainWindow(QMainWindow):
 
     def play_index(self, index, record_history=True, bypass_bump_gate=False):
         pm = self.playlist_manager
+        try:
+            if index is not None and int(index) != int(getattr(pm, 'current_index', -1)):
+                self._maybe_apply_episode_skip_penalty()
+        except Exception:
+            pass
+
+        # New track start: clear per-start penalty bookkeeping.
+        self._skip_penalty_applied_for_start = None
         if 0 <= index < len(pm.current_playlist):
             # Cut off startup ambient audio as soon as playback begins.
             self._stop_startup_ambient()
@@ -4351,7 +5378,7 @@ class MainWindow(QMainWindow):
 
             # Record episode start for shuffle avoidance.
             try:
-                pm.mark_episode_started(index)
+                pm.mark_episode_started(index, sleep_timer_on=bool(getattr(self, 'sleep_timer_active', False)))
             except Exception:
                 pass
             
@@ -4366,6 +5393,11 @@ class MainWindow(QMainWindow):
                 if itype == 'video' or itype == 'interstitial':
                     path = item['path']
                     self.video_stack.setCurrentIndex(0)
+                    try:
+                        if not self.isFullScreen():
+                            self._show_episode_overlay(auto_hide_seconds=4.0)
+                    except Exception:
+                        pass
                     self.player.play(path)
                     self._played_since_start = True
                     prefix = "[INT]" if itype == 'interstitial' else ""
@@ -4381,6 +5413,11 @@ class MainWindow(QMainWindow):
             else:
                  # Legacy
                  self.video_stack.setCurrentIndex(0)
+                 try:
+                     if not self.isFullScreen():
+                         self._show_episode_overlay(auto_hide_seconds=4.0)
+                 except Exception:
+                     pass
                  self.player.play(item)
                  self._played_since_start = True
                  self.setWindowTitle(f"Sleepy Shows - {os.path.basename(item)}")
@@ -4390,8 +5427,16 @@ class MainWindow(QMainWindow):
         self.show_controls()
 
     def play_bump(self, bump_item):
+        # Bumps are not episodes; always hide the episode title overlay.
+        self._hide_episode_overlay()
         script = bump_item.get('script')
         audio = bump_item.get('audio')
+
+        # Exposure scoring: bumps are transient, but their components accrue exposure.
+        try:
+            self.playlist_manager.note_bump_played(bump_item)
+        except Exception:
+            pass
 
         # Ensure bump manager has a fresh list of outro sounds (for future bump creation).
         try:
@@ -4537,6 +5582,13 @@ class MainWindow(QMainWindow):
 
     def _ensure_outro_sounds_loaded(self):
         """Populate bump_manager.outro_sounds from the filesystem (cached)."""
+        return self._ensure_outro_sounds_loaded_force(force=False)
+
+    def _ensure_outro_sounds_loaded_force(self, *, force: bool = False):
+        """Populate bump_manager.outro_sounds from the filesystem.
+
+        If force=True, refresh even if bump_manager already has an outro list.
+        """
         pm = self.playlist_manager
         bump_mgr = getattr(pm, 'bump_manager', None)
         if not bump_mgr:
@@ -4546,7 +5598,7 @@ class MainWindow(QMainWindow):
             already = bool(getattr(bump_mgr, 'outro_sounds', []) or [])
         except Exception:
             already = False
-        if already:
+        if already and not force:
             return
 
         files = self._list_outro_sounds_cached()
@@ -4556,11 +5608,34 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _invalidate_outro_sounds_cache(self):
+        try:
+            self._outro_sounds_cache = None
+        except Exception:
+            pass
+        try:
+            self._outro_sound_queue = []
+        except Exception:
+            pass
+        try:
+            self._recent_outro_sound_basenames = []
+        except Exception:
+            pass
+
     def _list_outro_sounds_cached(self):
         try:
             cached = self._outro_sounds_cache
         except Exception:
             cached = None
+        if isinstance(cached, list) and cached:
+            # If cached paths are no longer valid (e.g. drive remounted), re-scan.
+            try:
+                for p in cached:
+                    if p and not os.path.exists(str(p)):
+                        cached = None
+                        break
+            except Exception:
+                cached = None
         if isinstance(cached, list) and cached:
             return cached
 
@@ -4688,7 +5763,7 @@ class MainWindow(QMainWindow):
                         self._recent_outro_sound_basenames = self._recent_outro_sound_basenames[-int(self._outro_recent_n):]
                 except Exception:
                     pass
-                return p
+            return p
         except Exception:
             return None
 
@@ -5263,13 +6338,103 @@ class MainWindow(QMainWindow):
         else:
             self.player.toggle_pause()
 
+    def _maybe_apply_episode_skip_penalty(self):
+        """Apply a small penalty when an episode is skipped/cut off."""
+        try:
+            if bool(getattr(self, '_advancing_from_eof', False)):
+                return False
+        except Exception:
+            pass
+
+        pm = getattr(self, 'playlist_manager', None)
+        if pm is None:
+            return False
+
+        try:
+            idx = int(getattr(pm, 'current_index', -1))
+        except Exception:
+            idx = -1
+        if idx < 0:
+            return False
+
+        try:
+            item = pm.current_playlist[idx]
+        except Exception:
+            return False
+
+        try:
+            if not pm.is_episode_item(item):
+                return False
+        except Exception:
+            return False
+
+        # If the player is idle (no active file), don't apply a penalty.
+        try:
+            if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                if bool(getattr(self.player.mpv, 'core_idle', True)):
+                    return False
+        except Exception:
+            pass
+
+        # Only apply when we're in the normal video view (not bump view).
+        try:
+            if hasattr(self, 'video_stack') and self.video_stack.currentIndex() != 0:
+                return False
+        except Exception:
+            return False
+
+        # Avoid double-applying for the same playback start.
+        try:
+            start_key = (idx, getattr(self, '_play_start_monotonic', None))
+            if getattr(self, '_skip_penalty_applied_for_start', None) == start_key:
+                return False
+        except Exception:
+            start_key = None
+
+        # If we're at the end (or extremely close), don't treat it as a skip.
+        # If duration is unknown, we still treat manual navigation/stop as a cut-off.
+        try:
+            pos = self._last_time_pos
+            if pos is None and hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                pos = getattr(self.player.mpv, 'time_pos', None)
+            dur = self.total_duration
+            if (dur is None or float(dur) <= 0) and hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                dur = getattr(self.player.mpv, 'duration', None)
+
+            if pos is not None and dur is not None and float(dur) > 0:
+                if float(pos) >= (float(dur) - 0.15):
+                    return False
+        except Exception:
+            pass
+
+        try:
+            delta = pm.apply_episode_skip_penalty(idx, points=1.0)
+        except Exception:
+            return False
+
+        try:
+            self._skip_penalty_applied_for_start = start_key
+        except Exception:
+            pass
+        return bool(delta)
+
     def stop_playback(self):
+        try:
+            self._maybe_apply_episode_skip_penalty()
+        except Exception:
+            pass
         self.player.stop()
         self.show_controls()
         self._pause_sleep_countdown()
 
     def play_next(self):
         pm = self.playlist_manager
+
+        # Manual forward navigation mid-episode counts as a skip/cut-off.
+        try:
+            self._maybe_apply_episode_skip_penalty()
+        except Exception:
+            pass
 
         # If a bump-gated next is pending and the user hits Next again, skip the bump.
         if getattr(self, '_pending_next_index', None) is not None and self.video_stack.currentIndex() == 1:
@@ -5342,6 +6507,10 @@ class MainWindow(QMainWindow):
             pass
 
         # 2) Otherwise, step back through actual playback history.
+        try:
+            self._maybe_apply_episode_skip_penalty()
+        except Exception:
+            pass
         pm = self.playlist_manager
         idx = -1
         try:
@@ -5363,7 +6532,11 @@ class MainWindow(QMainWindow):
             pass
 
         # Auto advance
-        self.play_next()
+        self._advancing_from_eof = True
+        try:
+            self.play_next()
+        finally:
+            self._advancing_from_eof = False
 
     def on_player_error(self, msg):
         print(f"Player Error: {msg}")
@@ -5379,24 +6552,10 @@ class MainWindow(QMainWindow):
             self._pause_sleep_countdown()
         else:
             self._resume_sleep_countdown_if_needed()
-        
-        if paused and self.playlist_manager.current_playlist:
-             # Show Overlay
-             idx = self.playlist_manager.current_index
-             if idx >= 0 and idx < len(self.playlist_manager.current_playlist):
-                 item = self.playlist_manager.current_playlist[idx]
-                 name = ""
-                 if isinstance(item, dict):
-                     path = item.get('path', 'Unknown')
-                     name = os.path.splitext(os.path.basename(path))[0]
-                 else:
-                     name = os.path.splitext(os.path.basename(item))[0]
-                     
-                 self.overlay_label.setText(name)
-                 self.overlay_label.setVisible(True)
-                 self.overlay_label.raise_()
-        else:
-             self.overlay_label.setVisible(False)
+
+        # Episode title overlay behavior:
+        # - Windowed: shown briefly on episode start (see play_index)
+        # - Fullscreen: shown only while controls are visible (see show_controls/hide_controls)
 
     # Control Proxies
     def set_volume(self, value):
@@ -5566,10 +6725,13 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    # Keep references alive.
-    # Restore the previously-working behavior: create the main window normally.
-    # The welcome screen already shows "pending" overlays while auto-config scans.
-    # The splash is now just a brief visual while the window constructs.
+    # The splash is intentionally an *artificial* load screen.
+    # Keep the UI responsive but block the app from constructing until it hits 100%.
+    try:
+        loading.run_blocking_fake_load(app, min_seconds=2.0, max_seconds=4.0)
+    except Exception:
+        pass
+
     window = MainWindow()
 
     # Show the main window, then close the splash immediately.

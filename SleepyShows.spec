@@ -2,9 +2,9 @@
 
 
 a = Analysis(
-    ['src/main.py'],
+    ['src\\main.py'],
     pathex=[],
-    binaries=[('libs/libxcb-cursor.so.0', '.')],
+    binaries=[],
     datas=[('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
