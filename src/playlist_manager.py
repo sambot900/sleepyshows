@@ -1,12 +1,53 @@
 import os
+import sys
+import platform
 import random
 import re
 import json
 import time
 
-VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'}
+# Extensions used for:
+# - show folder auto-detection ("does this folder contain videos?")
+# - episode scanning when building auto-playlists
+# Keep this reasonably broad so libraries in common containers (e.g. .m4v/.webm)
+# don't silently fail auto-config.
+VIDEO_EXTENSIONS = {
+    '.mkv', '.mp4', '.m4v', '.avi', '.mov', '.wmv', '.flv',
+    '.webm', '.mpg', '.mpeg', '.ts', '.m2ts',
+}
 
 from bump_manager import BumpManager
+
+
+def get_local_playlists_dir() -> str:
+    """Return the directory where playlists + exposure scores are stored.
+
+    - Source/dev runs: keep using the project-local `playlists/` folder.
+    - Frozen builds: use a writable per-user app data folder.
+    """
+    try:
+        if getattr(sys, 'frozen', False):
+            home = os.path.expanduser('~')
+            if platform.system().lower().startswith('win'):
+                base = os.getenv('APPDATA') or os.path.join(home, 'AppData', 'Roaming')
+                root = os.path.join(base, 'SleepyShows')
+            elif platform.system().lower() == 'darwin':
+                root = os.path.join(home, 'Library', 'Application Support', 'SleepyShows')
+            else:
+                xdg = os.getenv('XDG_CONFIG_HOME')
+                root = os.path.join(xdg if xdg else os.path.join(home, '.config'), 'SleepyShows')
+            folder = os.path.join(root, 'playlists')
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            folder = os.path.join(base_dir, 'playlists')
+
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception:
+            pass
+        return folder
+    except Exception:
+        return os.path.join(os.getcwd(), 'playlists')
 
 def natural_sort_key(s):
     """
@@ -75,7 +116,8 @@ class PlaylistManager:
         self._sleep_timer_active_for_exposure = False
 
         # Persistence (global across playlists).
-        self._exposure_scores_path = os.path.join(os.getcwd(), 'playlists', 'exposure_scores.json')
+        self.playlists_dir = get_local_playlists_dir()
+        self._exposure_scores_path = os.path.join(self.playlists_dir, 'exposure_scores.json')
         self._exposure_last_save_monotonic = 0.0
         self._exposure_dirty = False
         self._load_exposure_scores()
@@ -1144,10 +1186,18 @@ class PlaylistManager:
 
     def list_saved_playlists(self):
         """Returns list of .json files in playlists/ directory"""
-        folder = "playlists"
-        if not os.path.exists(folder):
-            os.makedirs(folder)
-        return [f for f in os.listdir(folder) if f.lower().endswith(".json")]
+        folder = str(getattr(self, 'playlists_dir', '') or '')
+        if not folder:
+            folder = get_local_playlists_dir()
+            self.playlists_dir = folder
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            return [f for f in os.listdir(folder) if str(f).lower().endswith('.json')]
+        except Exception:
+            return []
     
     def has_next(self):
          return self.current_index + 1 < len(self.current_playlist)

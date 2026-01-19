@@ -19,6 +19,10 @@ dist/
 # Local scratch
 temp_dump.txt
 
+# Geometry debug scratch
+_geom_out.txt
+_geom_err.txt
+
 # Script-generated scratch
 scripts/_tmp_bumps/
 

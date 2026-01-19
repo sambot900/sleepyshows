@@ -3,6 +3,7 @@ import os
 import json
 import time
 import platform
+import re
 import html
 import random
 import glob
@@ -459,6 +460,45 @@ def _get_user_settings_path() -> str:
     except Exception:
         pass
     return os.path.join(cfg_dir, "settings.json")
+
+
+def _append_startup_geometry_log(window: QMainWindow):
+    try:
+        settings_path = _get_user_settings_path()
+        cfg_dir = os.path.dirname(settings_path)
+        os.makedirs(cfg_dir, exist_ok=True)
+        log_path = os.path.join(cfg_dir, 'startup_geometry.log')
+
+        try:
+            s = window.screen()
+        except Exception:
+            s = None
+        try:
+            name = s.name() if s is not None else None
+        except Exception:
+            name = None
+        try:
+            geo = s.availableGeometry() if s is not None else None
+        except Exception:
+            geo = None
+
+        avail = getattr(window, '_startup_available_size', None)
+        req = getattr(window, '_startup_requested_size', None)
+        try:
+            actual = (int(window.size().width()), int(window.size().height()))
+        except Exception:
+            actual = None
+
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        line = (
+            f"{stamp} screen={name} avail={avail} requested={req} actual={actual} "
+            f"maximized={bool(getattr(window, 'isMaximized', lambda: False)())} "
+            f"screen_avail_geom={(geo.width(), geo.height()) if geo is not None else None}\n"
+        )
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(line)
+    except Exception:
+        pass
 
 
 class Spinner(QWidget):
@@ -1048,6 +1088,106 @@ def get_local_bumps_scripts_dir():
     return os.path.join(base_dir, 'bumps')
 
 
+def get_local_playlists_dir() -> str:
+    """Return the directory where playlist JSONs should be stored.
+
+    - Source/dev runs: use the repo-local `playlists/` folder.
+    - Frozen builds: use a writable per-user app data folder.
+    """
+    try:
+        if getattr(sys, 'frozen', False):
+            home = os.path.expanduser('~')
+            if platform.system().lower().startswith('win'):
+                base = os.getenv('APPDATA') or os.path.join(home, 'AppData', 'Roaming')
+                root = os.path.join(base, 'SleepyShows')
+            elif platform.system().lower() == 'darwin':
+                root = os.path.join(home, 'Library', 'Application Support', 'SleepyShows')
+            else:
+                xdg = os.getenv('XDG_CONFIG_HOME')
+                root = os.path.join(xdg if xdg else os.path.join(home, '.config'), 'SleepyShows')
+            folder = os.path.join(root, 'playlists')
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            folder = os.path.join(base_dir, 'playlists')
+
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception:
+            pass
+        return folder
+    except Exception:
+        return os.path.join(os.getcwd(), 'playlists')
+
+
+def resolve_playlist_path(filename: str) -> str:
+    """Resolve a playlist filename/relative path to an absolute path in the playlists dir."""
+    try:
+        p = str(filename or '').strip()
+    except Exception:
+        p = ''
+    if not p:
+        return ''
+    try:
+        if os.path.isabs(p):
+            return p
+    except Exception:
+        pass
+
+    # Accept callers passing "playlists/<name>.json".
+    try:
+        base = os.path.basename(p)
+    except Exception:
+        base = p
+    return os.path.join(get_local_playlists_dir(), base)
+
+
+def migrate_legacy_playlist_filenames() -> bool:
+    """Best-effort migration for older playlist filenames.
+
+    Historically some users had playlists named like `koth.json`. The app now uses
+    show-name JSONs (e.g. `King of the Hill.json`). This migrates/copies legacy
+    files into the canonical names without deleting the originals.
+    """
+    try:
+        playlists_dir = get_local_playlists_dir()
+        if not playlists_dir or not os.path.isdir(playlists_dir):
+            return False
+
+        mapping = {
+            'koth.json': 'King of the Hill.json',
+            'king_of_the_hill.json': 'King of the Hill.json',
+            'king of the hill.json': 'King of the Hill.json',
+            'bobs.json': "Bob's Burgers.json",
+            'bob.json': "Bob's Burgers.json",
+            'bobs_burgers.json': "Bob's Burgers.json",
+            "bob's burgers.json": "Bob's Burgers.json",
+        }
+
+        changed = False
+        for src_name, dst_name in mapping.items():
+            src_path = os.path.join(playlists_dir, src_name)
+            dst_path = os.path.join(playlists_dir, dst_name)
+            try:
+                if not os.path.exists(src_path):
+                    continue
+                if os.path.exists(dst_path):
+                    continue
+
+                with open(src_path, 'rb') as rf:
+                    data = rf.read()
+                tmp = dst_path + '.tmp'
+                with open(tmp, 'wb') as wf:
+                    wf.write(data)
+                os.replace(tmp, dst_path)
+                changed = True
+            except Exception:
+                continue
+
+        return changed
+    except Exception:
+        return False
+
+
 def _windows_iter_drive_roots():
     try:
         import ctypes
@@ -1595,7 +1735,7 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
       rewrite it using the newly detected episode_folder and preserve user settings when possible.
     """
     try:
-        files_dir = os.path.join(os.getcwd(), 'playlists')
+        files_dir = get_local_playlists_dir()
         os.makedirs(files_dir, exist_ok=True)
         playlist_path = os.path.join(files_dir, playlist_filename)
 
@@ -1631,13 +1771,14 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
                 'season_factors': {},
             }
 
-            if 'king of the hill' in name or 'koth' in name:
+            if 'king of the hill' in name:
                 out['season_offsets']['season:1'] = 101.0
                 out['season_factors']['season:1'] = 3.0
                 out['season_offsets']['season:2'] = 1.0
                 out['season_factors']['season:2'] = 2.0
                 out['season_offsets']['season:3'] = 1.0
                 out['season_factors']['season:3'] = 1.5
+                out['season_factors']['season:11'] = 1.25
                 return out
 
             if "bob's burgers" in name or 'bobs burgers' in name or 'bob' in name:
@@ -1816,6 +1957,49 @@ class AutoConfigWorker(QObject):
 
 # --- Custom Widgets ---
 
+class ShowCardButton(QPushButton):
+    """A show card that can scale its icon without forcing the window minimum size.
+
+    Qt layouts use widgets' minimumSizeHint() to decide how far a window can be
+    shrunk. If we dynamically set a large iconSize on a QPushButton, the default
+    minimumSizeHint grows and can prevent shrinking on the Welcome screen.
+
+    This button reports a tiny minimumSizeHint, but still scales its icon to the
+    available button size.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._orig_pixmap = None
+
+    def set_original_pixmap(self, pixmap: QPixmap):
+        self._orig_pixmap = pixmap if (pixmap is not None and not pixmap.isNull()) else None
+        self._update_scaled_icon()
+
+    def minimumSizeHint(self):
+        return QSize(1, 1)
+
+    def sizeHint(self):
+        return QSize(220, 320)
+
+    def resizeEvent(self, event):
+        try:
+            self._update_scaled_icon()
+        except Exception:
+            pass
+        return super().resizeEvent(event)
+
+    def _update_scaled_icon(self):
+        pm = self._orig_pixmap
+        if pm is None or pm.isNull():
+            return
+        # Scale to the current button size; keep aspect ratio.
+        w = max(1, int(self.width()))
+        h = max(1, int(self.height()))
+        scaled = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.setIcon(QIcon(scaled))
+        self.setIconSize(scaled.size())
+
 class WelcomeScreen(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -1828,7 +2012,18 @@ class WelcomeScreen(QWidget):
         self.is_vibes_on = True
         self.is_sleep_on = True
         self.show_btns = [] # Track buttons for resizing
+
+        # Footer scaling state (populated in setup_ui)
+        self._footer_widget = None
+        self._footer_layout = None
+        self._footer_icon_items = []
+        self._footer_composites = []
+        self._footer_checkbox_target_size = None
         self.setup_ui()
+
+    def minimumSizeHint(self):
+        # Don't let the Welcome screen's content force a large window minimum.
+        return QSize(1, 1)
         
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1865,17 +2060,20 @@ class WelcomeScreen(QWidget):
         
         # Helper for Show Buttons
         def create_show_btn(icon_name, callback):
-            btn = QPushButton()
+            btn = ShowCardButton()
             
             # Store original pixmap for resizing later
             path = get_asset_path(icon_name)
             pix = QPixmap(path)
             btn.setProperty("original_pixmap", pix)
+            try:
+                btn.set_original_pixmap(pix)
+            except Exception:
+                pass
             
-            # Initial Setup - Icons will be set in resizeEvent
-            # Use Fixed size mode initially, updated in resizeEvent
-            # We set a placeholder size
-            btn.setFixedSize(220, 320)
+            # Keep a reasonable visible minimum, but don't lock the window width.
+            btn.setMinimumSize(160, 240)
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             btn.setFlat(True)
             
             btn.setStyleSheet("""
@@ -1920,6 +2118,9 @@ class WelcomeScreen(QWidget):
         footer_widget.setStyleSheet("background-color: rgba(40, 40, 90, 200);")
         footer_layout = QHBoxLayout(footer_widget)
         footer_layout.setContentsMargins(40, 5, 40, 5)
+
+        self._footer_widget = footer_widget
+        self._footer_layout = footer_layout
         
         # Helper for image buttons
         def create_img_btn(filename, callback):
@@ -1928,11 +2129,10 @@ class WelcomeScreen(QWidget):
             pix = QPixmap(path)
             
             if not pix.isNull():
-                h = 50
-                w = int(pix.width() * (h / pix.height())) if pix.height() > 0 else 50
+                # Sized by _update_footer_graphics_scale() based on available width.
                 btn.setIcon(QIcon(pix))
-                btn.setIconSize(QSize(w, h))
-                btn.setFixedSize(w + 10, h + 10) 
+                btn.setProperty("_footer_pixmap", pix)
+                self._footer_icon_items.append(btn)
             else:
                 # Debugging Fallback
                 print(f"FAILED TO LOAD: {path}")
@@ -1952,46 +2152,51 @@ class WelcomeScreen(QWidget):
             return btn
             
         def create_composite_btn(text_img_name, check_btn_ref_name, toggle_callback):
-             # Container
-             container = QWidget()
-             # Allow styling
-             container.setAttribute(Qt.WA_StyledBackground, True)
-             container.setStyleSheet("""
+            # Container
+            container = QWidget()
+            # Allow styling
+            container.setAttribute(Qt.WA_StyledBackground, True)
+            container.setStyleSheet("""
                 QWidget { background: transparent; border-radius: 5px; }
                 QWidget:hover { background: rgba(255,255,255,0.2); }
-             """)
-             
-             # Layout
-             layout = QHBoxLayout(container)
-             layout.setContentsMargins(5,5,5,5)
-             layout.setSpacing(10)
-             
-             # Checkbox (Custom Button)
-             chk = QPushButton()
-             chk.setFlat(True)
-             chk.setStyleSheet("border: none; background: transparent;")
-             chk.setFixedSize(40, 40)
-             chk.clicked.connect(toggle_callback)
-             setattr(self, check_btn_ref_name, chk) # Save ref
-             layout.addWidget(chk)
-             
-             # Text Label (Image Button)
-             path = get_asset_path(text_img_name)
-             pix = QPixmap(path)
-             
-             txt_btn = QPushButton()
-             if not pix.isNull():
-                h = 50
-                w = int(pix.width() * (h / pix.height())) if pix.height() > 0 else 50
+            """)
+
+            # Layout
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(5, 5, 5, 5)
+            layout.setSpacing(10)
+
+            # Checkbox (Custom Button)
+            chk = QPushButton()
+            chk.setFlat(True)
+            chk.setStyleSheet("border: none; background: transparent;")
+            chk.setFixedSize(40, 40)
+            chk.clicked.connect(toggle_callback)
+            setattr(self, check_btn_ref_name, chk)  # Save ref
+            layout.addWidget(chk)
+
+            # Text Label (Image Button)
+            path = get_asset_path(text_img_name)
+            pix = QPixmap(path)
+
+            txt_btn = QPushButton()
+            if not pix.isNull():
+                # Sized by _update_footer_graphics_scale() based on available width.
                 txt_btn.setIcon(QIcon(pix))
-                txt_btn.setIconSize(QSize(w, h))
-                txt_btn.setFixedSize(w + 10, h + 10)
-             txt_btn.setFlat(True)
-             txt_btn.setStyleSheet("border: none; background: transparent;")
-             txt_btn.clicked.connect(toggle_callback)
-             layout.addWidget(txt_btn)
-             
-             return container
+                txt_btn.setProperty("_footer_pixmap", pix)
+            txt_btn.setFlat(True)
+            txt_btn.setStyleSheet("border: none; background: transparent;")
+            txt_btn.clicked.connect(toggle_callback)
+            layout.addWidget(txt_btn)
+
+            # Track for responsive scaling.
+            container._footer_layout = layout
+            container._footer_check_btn = chk
+            container._footer_text_btn = txt_btn
+            container._footer_text_pixmap = pix
+            self._footer_composites.append(container)
+
+            return container
 
         # MENU
         btn_menu = create_img_btn("menu.png", self.go_to_player_menu)
@@ -2015,19 +2220,27 @@ class WelcomeScreen(QWidget):
         footer_layout.addWidget(sleep_widget)
 
         main_layout.addWidget(footer_widget)
+
+        # Initial sizing pass after the widget is laid out.
+        try:
+            QTimer.singleShot(0, self._update_footer_graphics_scale)
+        except Exception:
+            pass
         
         # 4. Clouds (Absolute Positioned, Top)
         self.lbl_clouds = QLabel(self)
         self.lbl_clouds.setProperty("original_pixmap", QPixmap(get_asset_path("clouds.png")))
         self.lbl_clouds.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.lbl_clouds.setStyleSheet("background: transparent;") # Crucial for gradient visibility
-        self.lbl_clouds.setGeometry(0, 0, 1200, 150)
+        # Don't hard-code a width here; let resizeEvent size it to the window.
+        self.lbl_clouds.setGeometry(0, 0, 0, 0)
         
         # 5. Logo (Absolute Positioned, Top Center)
         self.lbl_logo = QLabel(self)
         self.lbl_logo.setProperty("original_pixmap", QPixmap(get_asset_path("sleepy-shows-logo.png")))
         self.lbl_logo.setStyleSheet("background: transparent;")
         self.lbl_logo.setAlignment(Qt.AlignCenter)
+        self.lbl_logo.setGeometry(0, 0, 0, 0)
         
         # Z-Order
         self.lbl_clouds.raise_()
@@ -2091,42 +2304,38 @@ class WelcomeScreen(QWidget):
         if hasattr(self, 'lbl_logo'):
             orig_logo = self.lbl_logo.property("original_pixmap")
             if orig_logo and not orig_logo.isNull():
-                 # Scale logo much bigger
-                 logo_w = 600 # Was 400
-                 logo_h = 225
+                 # Scale logo based on available width (prevents it from forcing a wide window).
+                 # Keep an upper bound for large monitors, but always allow it to shrink.
+                 logo_w = int(min(600, max(220, w * 0.55)))
+                 logo_h = int(max(120, h * 0.22))
                  scaled_logo = orig_logo.scaled(logo_w, logo_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                  self.lbl_logo.setPixmap(scaled_logo)
                  # Center X, Top Y (e.g. 20px down)
                  x_pos = (w - scaled_logo.width()) // 2
                  self.lbl_logo.setGeometry(x_pos, 20, scaled_logo.width(), scaled_logo.height())
 
-        # 3. Scale Show Buttons
-        # Scale based on window height
-        target_h = int(h * 0.45) 
-        
+        # 3. Keep pending overlays in sync with their buttons.
         for btn in self.show_btns:
-            orig = btn.property("original_pixmap")
-            if orig and not orig.isNull():
-                 scaled_pix = orig.scaledToHeight(target_h, Qt.SmoothTransformation)
-                 btn.setIcon(QIcon(scaled_pix))
-                 btn.setIconSize(scaled_pix.size())
-                 # Explicitly set Fixed Size to match icon so hover area matches image exactly
-                 # BARELY surrounding: If FixedSize == IconSize, it is exact.
-                 # If border-radius cuts off corners, we reduce padding? 
-                 # Actually QIcon fills the rect.
-                 btn.setFixedSize(scaled_pix.size())
+            overlay = getattr(btn, '_pending_overlay', None)
+            if overlay is not None:
+                overlay.setGeometry(btn.rect())
 
-                 overlay = getattr(btn, '_pending_overlay', None)
-                 if overlay is not None:
-                     overlay.setGeometry(btn.rect())
+        # 4. Scale footer graphics so they fit the current width.
+        try:
+            self._update_footer_graphics_scale()
+        except Exception:
+            pass
         
         super().resizeEvent(event)
 
         
-    def update_checkbox(self, btn, checked):
+    def update_checkbox(self, btn, checked, target_size: QSize | None = None):
         base = QPixmap(get_asset_path("checkbox.png"))
         if base.isNull(): return
         
+        if target_size is None:
+            target_size = base.size()
+
         result = QPixmap(base.size())
         result.fill(Qt.transparent)
         
@@ -2143,14 +2352,99 @@ class WelcomeScreen(QWidget):
             painter.drawPixmap(ox, oy, overlay)
             
         painter.end()
-        
-        btn.setIcon(QIcon(result))
-        btn.setIconSize(base.size())
-        btn.setFixedSize(base.size())
+
+        scaled = result.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        btn.setIcon(QIcon(scaled))
+        btn.setIconSize(scaled.size())
+        btn.setFixedSize(scaled.size())
+
+    def _update_footer_graphics_scale(self):
+        if self._footer_widget is None or self._footer_layout is None:
+            return
+
+        fw = int(self._footer_widget.width())
+        fh = int(self._footer_widget.height())
+        if fw <= 0 or fh <= 0:
+            return
+
+        margins = self._footer_layout.contentsMargins()
+        available_w = max(1, fw - int(margins.left()) - int(margins.right()))
+
+        # Base sizes (what the UI was designed around)
+        base_icon_h = 50
+        base_pad = 10
+        base_chk = 40
+        base_comp_spacing = 10
+        comp_lr_margins = 10  # composite layout left+right (5+5)
+
+        def scaled_icon_width(pix: QPixmap, icon_h: int) -> int:
+            if pix is None or pix.isNull() or pix.height() <= 0:
+                return icon_h
+            return int(pix.width() * (icon_h / pix.height()))
+
+        # Compute required width at base size.
+        required_w = 0
+
+        for btn in self._footer_icon_items:
+            pix = btn.property("_footer_pixmap")
+            required_w += scaled_icon_width(pix, base_icon_h) + base_pad
+
+        for comp in self._footer_composites:
+            pix = getattr(comp, '_footer_text_pixmap', None)
+            required_w += comp_lr_margins + base_chk + base_comp_spacing + (scaled_icon_width(pix, base_icon_h) + base_pad)
+
+        # Scale down if needed so everything fits.
+        scale = 1.0
+        if required_w > 0 and required_w > available_w:
+            scale = max(0.35, min(1.0, available_w / required_w))
+
+        icon_h = max(22, int(base_icon_h * scale))
+        pad = max(6, int(base_pad * scale))
+        chk = max(22, int(base_chk * scale))
+        comp_spacing = max(4, int(base_comp_spacing * scale))
+
+        # Also respect vertical space.
+        max_icon_h_by_height = max(18, fh - 20)
+        if icon_h > max_icon_h_by_height:
+            icon_h = max_icon_h_by_height
+
+        for btn in self._footer_icon_items:
+            pix = btn.property("_footer_pixmap")
+            if pix is None or pix.isNull():
+                continue
+            w = max(1, scaled_icon_width(pix, icon_h))
+            btn.setIcon(QIcon(pix))
+            btn.setIconSize(QSize(w, icon_h))
+            btn.setFixedSize(w + pad, icon_h + pad)
+
+        self._footer_checkbox_target_size = QSize(chk, chk)
+
+        for comp in self._footer_composites:
+            layout = getattr(comp, '_footer_layout', None)
+            chk_btn = getattr(comp, '_footer_check_btn', None)
+            txt_btn = getattr(comp, '_footer_text_btn', None)
+            pix = getattr(comp, '_footer_text_pixmap', None)
+            if layout is not None:
+                layout.setSpacing(comp_spacing)
+
+            if chk_btn is not None:
+                # keep check mark rendering crisp at the new size
+                if chk_btn is getattr(self, 'btn_vibes_check', None):
+                    self.update_checkbox(chk_btn, self.is_vibes_on, target_size=self._footer_checkbox_target_size)
+                elif chk_btn is getattr(self, 'btn_sleep_check', None):
+                    self.update_checkbox(chk_btn, self.is_sleep_on, target_size=self._footer_checkbox_target_size)
+                else:
+                    chk_btn.setFixedSize(chk, chk)
+
+            if txt_btn is not None and pix is not None and not pix.isNull():
+                w = max(1, scaled_icon_width(pix, icon_h))
+                txt_btn.setIcon(QIcon(pix))
+                txt_btn.setIconSize(QSize(w, icon_h))
+                txt_btn.setFixedSize(w + pad, icon_h + pad)
 
     def load_show_playlist(self, show_name):
-        filename = os.path.join("playlists", f"{show_name}.json")
-        if os.path.exists(filename):
+        filename = resolve_playlist_path(os.path.join("playlists", f"{show_name}.json"))
+        if filename and os.path.exists(filename):
             self.main_window.load_playlist(filename, auto_play=True)
         else:
             print(f"Playlist not found: {filename}")
@@ -2165,12 +2459,12 @@ class WelcomeScreen(QWidget):
 
     def toggle_vibes(self):
         self.is_vibes_on = not self.is_vibes_on
-        self.update_checkbox(self.btn_vibes_check, self.is_vibes_on)
+        self.update_checkbox(self.btn_vibes_check, self.is_vibes_on, target_size=self._footer_checkbox_target_size)
         self.main_window.set_bumps_enabled(self.is_vibes_on)
 
     def toggle_sleep(self):
         self.is_sleep_on = not self.is_sleep_on
-        self.update_checkbox(self.btn_sleep_check, self.is_sleep_on)
+        self.update_checkbox(self.btn_sleep_check, self.is_sleep_on, target_size=self._footer_checkbox_target_size)
         
         if self.is_sleep_on:
             self.main_window.start_sleep_timer(180) 
@@ -2746,6 +3040,11 @@ class PlayModeWidget(QWidget):
         self.main_window = main_window
         self.setup_ui()
 
+    def minimumSizeHint(self):
+        # Don't let Play Mode's widgets force the entire app window to a huge
+        # minimum width at startup (QStackedWidget may use the max minHint).
+        return QSize(1, 1)
+
     def _tint_pixmap(self, pixmap, color=Qt.white):
         if pixmap is None or pixmap.isNull():
             return pixmap
@@ -3186,42 +3485,94 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Sleepy Shows Player")
 
-        # Clamp initial window size to fit on smaller laptop screens.
-        # Use available geometry (excludes taskbar/docks) and cap at 75%.
+        # Startup sizing: percent of the *screen the window is on*.
+        # Note: do not use cursor position (it can be on another monitor).
+        self._startup_w_ratio = 0.65
+        self._startup_h_ratio = 0.75
+        self._startup_min_w = 360*2
+        self._startup_min_h = 480*2
+
+        # Apply once using primary screen as a safe default, then re-apply on the
+        # actual screen after the window is created/shown.
+        try:
+            self._apply_startup_size_for_screen(QGuiApplication.primaryScreen(), center=True)
+        except Exception:
+            try:
+                self.resize(1200, 800)
+            except Exception:
+                pass
+
+        try:
+            QTimer.singleShot(0, self._apply_startup_size_for_current_screen)
+        except Exception:
+            pass
+
+    def _apply_startup_size_for_current_screen(self):
         try:
             screen = None
             try:
-                screen = QGuiApplication.screenAt(QCursor.pos())
+                # QWidget.screen() returns the screen the widget is on (Qt6).
+                screen = self.screen()
             except Exception:
                 screen = None
+            if screen is None:
+                try:
+                    wh = self.windowHandle()
+                    if wh is not None:
+                        screen = wh.screen()
+                except Exception:
+                    screen = None
             if screen is None:
                 try:
                     screen = QGuiApplication.primaryScreen()
                 except Exception:
                     screen = None
 
-            if screen is not None:
-                geo = screen.availableGeometry()
-                max_w = int(max(640, geo.width() * 0.75))
-                max_h = int(max(480, geo.height() * 0.75))
-                w = min(1200, max_w)
-                h = min(800, max_h)
-                self.resize(w, h)
-
-                # Center on that screen.
-                try:
-                    fr = self.frameGeometry()
-                    fr.moveCenter(geo.center())
-                    self.move(fr.topLeft())
-                except Exception:
-                    pass
-            else:
-                self.resize(1200, 800)
+            self._apply_startup_size_for_screen(screen, center=True)
         except Exception:
-            self.resize(1200, 800)
+            pass
+
+    def _apply_startup_size_for_screen(self, screen, center: bool = True):
+        if screen is None:
+            return
+
+        geo = screen.availableGeometry()
+        avail_w, avail_h = int(geo.width()), int(geo.height())
+        if avail_w <= 0 or avail_h <= 0:
+            return
+
+        w = int(max(int(getattr(self, '_startup_min_w', 360)), avail_w * float(getattr(self, '_startup_w_ratio', 0.65))))
+        h = int(max(int(getattr(self, '_startup_min_h', 480)), avail_h * float(getattr(self, '_startup_h_ratio', 0.75))))
+
+        # Never spill off-screen.
+        w = min(w, avail_w)
+        h = min(h, avail_h)
+
+        try:
+            self._startup_available_size = (avail_w, avail_h)
+            self._startup_requested_size = (int(w), int(h))
+        except Exception:
+            pass
+
+        self.resize(w, h)
+
+        if center:
+            try:
+                fr = self.frameGeometry()
+                fr.moveCenter(geo.center())
+                self.move(fr.topLeft())
+            except Exception:
+                pass
         
         # Data
         self.playlist_manager = PlaylistManager()
+
+        # If the user already has legacy playlist names (e.g. koth.json),
+        # make sure the canonical show-name playlists exist too.
+        try:
+            migrate_legacy_playlist_filenames()
+        except Exception:
+            pass
 
         # Tracks the current playlist file on disk (if loaded/saved).
         self.current_playlist_filename = None
@@ -3560,7 +3911,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Apply immediately to MPV.
         try:
             self.player.set_audio_normalization(self.normalize_audio_enabled)
         except Exception:
@@ -3576,7 +3926,6 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self, '_auto_config_running', False):
                 return
-            self._auto_config_running = True
 
             # Show pending overlay on the show cards while we probe external storage.
             if hasattr(self, 'welcome_screen'):
@@ -3623,12 +3972,16 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            # If user already added sources while we were scanning, don't override.
-            if getattr(self.playlist_manager, 'source_folders', None) and len(self.playlist_manager.source_folders) > 0:
-                return
+            # If user already added sources while we were scanning, don't override their
+            # library state, but still apply other auto-config outputs (playlist refresh,
+            # TV Vibe folder detection, etc.).
+            already_has_sources = bool(
+                getattr(self.playlist_manager, 'source_folders', None)
+                and len(self.playlist_manager.source_folders) > 0
+            )
 
             sources = (result or {}).get('sources', [])
-            if sources:
+            if sources and not already_has_sources:
                 self.playlist_manager.source_folders = (result or {}).get('source_folders', [])
                 self.playlist_manager.library_structure = (result or {}).get('library_structure', {})
                 self.playlist_manager.episodes = (result or {}).get('episodes', [])
@@ -5053,7 +5406,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot Save", "Playlist is empty.")
             return
 
-        files_dir = os.path.join(os.getcwd(), "playlists")
+        files_dir = get_local_playlists_dir()
         os.makedirs(files_dir, exist_ok=True)
         filename, _ = QFileDialog.getSaveFileName(self, "Save Playlist", files_dir, "Sleepy Playlist (*.json)")
         if filename:
@@ -5093,9 +5446,15 @@ class MainWindow(QMainWindow):
 
     def load_playlist(self, filename=False, auto_play=False):
         if not filename:
-            files_dir = os.path.join(os.getcwd(), "playlists")
+            files_dir = get_local_playlists_dir()
             os.makedirs(files_dir, exist_ok=True)
             filename, _ = QFileDialog.getOpenFileName(self, "Load Playlist", files_dir, "Sleepy Playlist (*.json)")
+
+        try:
+            if filename:
+                filename = resolve_playlist_path(filename)
+        except Exception:
+            pass
         
         if filename and os.path.exists(filename):
             try:
@@ -5148,9 +5507,15 @@ class MainWindow(QMainWindow):
 
     def load_playlist_into_editor(self, filename=False):
         if not filename:
-            files_dir = os.path.join(os.getcwd(), "playlists")
+            files_dir = get_local_playlists_dir()
             os.makedirs(files_dir, exist_ok=True)
             filename, _ = QFileDialog.getOpenFileName(self, "Load Playlist", files_dir, "Sleepy Playlist (*.json)")
+
+        try:
+            if filename:
+                filename = resolve_playlist_path(filename)
+        except Exception:
+            pass
 
         if filename and os.path.exists(filename):
             try:
@@ -6713,6 +7078,23 @@ if __name__ == "__main__":
     import locale
     locale.setlocale(locale.LC_NUMERIC, 'C')
 
+    # On Windows, ensure the process is DPI-aware so Qt sees the real screen
+    # geometry and our percent-of-screen sizing matches the user's resolution.
+    try:
+        if platform.system().lower().startswith('win'):
+            import ctypes
+            try:
+                # Per-monitor v2 DPI awareness (best on modern Windows).
+                ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+            except Exception:
+                try:
+                    # Fallback for older Windows.
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
 
     loading = StartupLoadingScreen()
@@ -6736,6 +7118,27 @@ if __name__ == "__main__":
 
     # Show the main window, then close the splash immediately.
     window.show()
+
+    # Log startup sizing to a file (useful for packaged EXE where stdout isn't visible).
+    try:
+        QTimer.singleShot(0, lambda: _append_startup_geometry_log(window))
+    except Exception:
+        pass
+
+    # Optional debug: print startup geometry/sizing to stdout.
+    if os.getenv('SLEEPYSHOWS_DEBUG_GEOMETRY', '').strip() == '1':
+        def _print_startup_geometry():
+            try:
+                avail = getattr(window, '_startup_available_size', None)
+                req = getattr(window, '_startup_requested_size', None)
+                sz = window.size()
+                print(f"DEBUG: startup available={avail} requested={req} actual={(sz.width(), sz.height())} maximized={window.isMaximized()}")
+            except Exception:
+                pass
+        try:
+            QTimer.singleShot(0, _print_startup_geometry)
+        except Exception:
+            pass
 
     try:
         loading.close()
