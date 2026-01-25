@@ -58,6 +58,15 @@ class BumpManager:
         self._duration_normalization_exponent = 1.0
         # ε (epsilon): global overage tolerance for music matching
         self._music_overage_tolerance = 0.20
+
+        # Separate tolerance for the short-bump (15s) compression heuristic.
+        # This controls which scripts are considered eligible to be compressed
+        # into a 15s clip.
+        #
+        # Example: 15s target with 0.533 tolerance => allow estimated up to ~23s
+        # to be treated as short-clip eligible.
+        # 23s max accepted estimate for a 15s target => (23/15)-1
+        self._short_bump_overage_tolerance = (23.0 / 15.0) - 1.0
         # k: soft clamp strength for reduction saturation
         self._duration_soft_clamp_k = 4.0
         # Minimum allowed fraction of original auto-timed duration.
@@ -80,6 +89,20 @@ class BumpManager:
         self.music_exposure_scores = {}
         self.outro_exposure_scores = {}
 
+        # Install-time exposure seeds for certain bump music tracks.
+        # Applied only when a track is first seen AND has no existing score.
+        # Keyed by basename-without-extension, lowercased.
+        self._seed_music_basenames = {
+            'vibe1', 'vibe2', 'vibe3', 'vibe4',
+            'chill1', 'chill2', 'chill3', 'chill4',
+        }
+        self._music_exposure_seeded_last_changed = False
+
+        # Install-time exposure seeds for certain bump scripts.
+        # Rule: scripts that cannot be compressed to fit within a 15s music clip
+        # start with exposure score 1 (only if they have no existing score).
+        self._script_exposure_seeded_last_changed = False
+
         # Recent history to reduce near-repeats when queues are rebuilt.
         # Rule: the 8 most recently used items cannot appear in the first 8 slots
         # of a newly rebuilt queue (best-effort).
@@ -94,6 +117,12 @@ class BumpManager:
         # Short bump rule: if bump duration is <= 15s, prefer music tracks <= 15s
         # (but still long enough for the bump) instead of using longer tracks.
         self._short_bump_s = 15.0
+
+        # Hard UX rule: if there exist scripts that can fit a 15s clip, do not
+        # allow non-15s-fit scripts to appear at the very start of a rebuilt
+        # bump queue.
+        # This is intentionally NOT based on exposure scores.
+        self._early_short_only_slots = 4
 
         # Lazy indices for case-insensitive file resolution in user-selected folders.
         self._images_index_dir = None
@@ -140,6 +169,127 @@ class BumpManager:
             return os.path.normcase(os.path.normpath(p))
         except Exception:
             return p
+
+    def seed_initial_music_exposure_scores(self, *, initial_score: float = 1.0) -> bool:
+        """Seed initial exposure scores for selected bump music tracks.
+
+        This is intentionally idempotent:
+        - It only adds a score if the track is present in `music_files` AND the score key
+          doesn't already exist.
+        - It never overwrites existing values, so scores evolve naturally over time.
+        """
+        try:
+            init = float(initial_score)
+        except Exception:
+            init = 1.0
+        if init <= 0:
+            init = 1.0
+
+        changed = False
+        targets = set(getattr(self, '_seed_music_basenames', set()) or set())
+        if not targets:
+            self._music_exposure_seeded_last_changed = False
+            return False
+
+        for entry in list(getattr(self, 'music_files', []) or []):
+            p = ''
+            try:
+                if isinstance(entry, dict):
+                    p = str(entry.get('path') or '').strip()
+                else:
+                    p = str(entry or '').strip()
+            except Exception:
+                p = ''
+            if not p:
+                continue
+
+            try:
+                base = os.path.splitext(os.path.basename(p))[0].strip().lower()
+            except Exception:
+                base = ''
+            if not base or base not in targets:
+                continue
+
+            k = self._norm_path_key(p)
+            if not k:
+                continue
+
+            if k in self.music_exposure_scores:
+                continue
+
+            try:
+                self.music_exposure_scores[k] = float(init)
+            except Exception:
+                self.music_exposure_scores[k] = 1.0
+            changed = True
+
+        self._music_exposure_seeded_last_changed = bool(changed)
+        return bool(changed)
+
+    def seed_initial_script_exposure_scores(self, *, initial_score: float = 1.0, target_s: float | None = None) -> bool:
+        """Seed initial exposure scores for scripts that cannot fit within a short clip.
+
+        A script is considered a candidate for short-clip compression if it is eligible
+        for a music duration of `target_s` (default: the 15s short bump rule).
+
+        This is intentionally idempotent:
+        - It only adds a score if the script is present in `bump_scripts` AND the score key
+          doesn't already exist.
+        - It never overwrites existing values.
+        """
+        try:
+            init = float(initial_score)
+        except Exception:
+            init = 1.0
+        if init <= 0:
+            init = 1.0
+
+        try:
+            ts = float(target_s) if target_s is not None else float(self._short_bump_s)
+        except Exception:
+            ts = float(self._short_bump_s)
+        if ts <= 0.0:
+            ts = float(self._short_bump_s)
+
+        target_ms = int(round(ts * 1000.0))
+        changed = False
+
+        for script in list(getattr(self, 'bump_scripts', []) or []):
+            if not isinstance(script, dict):
+                continue
+
+            try:
+                timing = script.get('_timing', None)
+            except Exception:
+                timing = None
+            if not isinstance(timing, dict):
+                try:
+                    timing = self._analyze_script_timing(script)
+                    script['_timing'] = timing
+                except Exception:
+                    timing = None
+
+            if isinstance(timing, dict):
+                try:
+                    short_eps = float(getattr(self, '_short_bump_overage_tolerance', 0.533) or 0.533)
+                except Exception:
+                    short_eps = 0.533
+                if self._can_fit_short_clip(timing, target_ms=int(target_ms), overage_tolerance=float(short_eps)):
+                    # Short-clip candidate; do not seed.
+                    continue
+
+            k = self._script_key(script)
+            if not k or k in self.script_exposure_scores:
+                continue
+
+            try:
+                self.script_exposure_scores[k] = float(init)
+            except Exception:
+                self.script_exposure_scores[k] = 1.0
+            changed = True
+
+        self._script_exposure_seeded_last_changed = bool(changed)
+        return bool(changed)
 
     def _script_key(self, script: dict) -> str:
         if not isinstance(script, dict):
@@ -381,7 +531,7 @@ class BumpManager:
         # the script can never fit any track.
         return fixed_ms <= int(self._bump_target_ms) and min_possible_ms <= int(self._bump_target_ms)
 
-    def _is_music_eligible_for_script(self, timing: dict, music_duration_ms: int) -> bool:
+    def _is_music_eligible_for_script(self, timing: dict, music_duration_ms: int, *, overage_tolerance: float | None = None) -> bool:
         try:
             T_music = int(music_duration_ms)
         except Exception:
@@ -395,7 +545,10 @@ class BumpManager:
         except Exception:
             return False
 
-        eps = float(self._music_overage_tolerance)
+        try:
+            eps = float(overage_tolerance) if overage_tolerance is not None else float(self._music_overage_tolerance)
+        except Exception:
+            eps = float(self._music_overage_tolerance)
         if float(T_estimated) > float(T_music) * (1.0 + eps):
             return False
 
@@ -404,6 +557,48 @@ class BumpManager:
             return False
 
         return True
+
+    def _can_fit_short_clip(self, timing: dict, *, target_ms: int, overage_tolerance: float) -> bool:
+        """Return True if a script can be treated as 'short-clip compressible'.
+
+        This is stricter than `_is_music_eligible_for_script`:
+        - It enforces the short overage cap (e.g. <= ~23s estimated for a 15s target).
+        - It requires the fitter to actually succeed at producing a <= target solution.
+        """
+        try:
+            T_target = int(target_ms)
+        except Exception:
+            return False
+        if T_target <= 0:
+            return False
+
+        try:
+            T_estimated = int(timing.get('estimated_ms', 0) or 0)
+            min_possible = int(timing.get('min_possible_ms', 0) or 0)
+        except Exception:
+            return False
+
+        try:
+            eps = float(overage_tolerance)
+        except Exception:
+            eps = float(getattr(self, '_short_bump_overage_tolerance', 0.533) or 0.533)
+
+        # Respect the user's short-compression acceptance window (e.g. up to 23s).
+        try:
+            max_est_ms = int(round(float(T_target) * (1.0 + float(eps))))
+        except Exception:
+            max_est_ms = int(T_target)
+        if int(T_estimated) > int(max_est_ms):
+            return False
+
+        # Must be feasible even at minimum scalable fraction.
+        if int(min_possible) > int(min(int(T_target), int(self._bump_target_ms))):
+            return False
+
+        try:
+            return self._fit_scalable_durations(timing, music_duration_ms=int(T_target)) is not None
+        except Exception:
+            return False
 
     def _fit_scalable_durations(self, timing: dict, music_duration_ms: int):
         """Return {card_index: fitted_base_ms} for scalable cards, or None if impossible."""
@@ -582,7 +777,21 @@ class BumpManager:
         if not isinstance(timing, dict):
             timing = self._analyze_script_timing(script)
 
-        if not self._is_music_eligible_for_script(timing, music_duration_ms=music_duration_ms):
+        # For materialization we care about actual fit feasibility.
+        # The estimated-duration overage check is only a heuristic for selection; if the
+        # solver can compress the scalable cards into the target, allow it.
+        try:
+            T_music = int(music_duration_ms)
+        except Exception:
+            return None
+        if T_music <= 0:
+            return None
+        T_target = min(int(T_music), int(self._bump_target_ms))
+        try:
+            min_possible = int(timing.get('min_possible_ms', 0) or 0)
+        except Exception:
+            min_possible = 0
+        if int(min_possible) > int(T_target):
             return None
 
         fitted = self._fit_scalable_durations(timing, music_duration_ms=music_duration_ms)
@@ -740,16 +949,98 @@ class BumpManager:
         script_pool = list(range(len(self.bump_scripts)))
         music_pool = list(range(len(self.music_files)))
 
+        # Precompute which scripts can actually be compressed to fit within the short-bump duration.
+        short_target_ms = int(round(float(self._short_bump_s) * 1000.0))
+        try:
+            short_eps = float(getattr(self, '_short_bump_overage_tolerance', 0.533) or 0.533)
+        except Exception:
+            short_eps = 0.533
+        short_fit_scripts = set()
+        try:
+            for i, s0 in enumerate(list(self.bump_scripts or [])):
+                if not isinstance(s0, dict):
+                    continue
+                timing0 = s0.get('_timing')
+                if not isinstance(timing0, dict):
+                    timing0 = self._analyze_script_timing(s0)
+                    s0['_timing'] = dict(timing0)
+                if self._can_fit_short_clip(timing0, target_ms=int(short_target_ms), overage_tolerance=float(short_eps)):
+                    short_fit_scripts.add(int(i))
+        except Exception:
+            short_fit_scripts = set()
+
+        # Temporary exposure/penalty maps for queue composition.
+        # These are NOT persisted; they exist only to prevent repeats inside the
+        # queue and across rebuild boundaries.
+        temp_script_scores = dict(self.script_exposure_scores or {})
+        temp_music_scores = dict(self.music_exposure_scores or {})
+        temp_outro_scores = dict(self.outro_exposure_scores or {})
+        temp_music_basename_penalty = {}
+
+        try:
+            recent_basenames = [str(x).lower() for x in list(self._recent_music_basenames or []) if str(x)]
+        except Exception:
+            recent_basenames = []
+        recent_set = set(recent_basenames[-int(self._recent_spread_n):]) if recent_basenames else set()
+
+        # Give recently-used music a strong penalty so it is very unlikely to be
+        # picked early in a newly rebuilt queue.
+        try:
+            base_penalty = (max([float(v) for v in temp_music_scores.values()] + [0.0]) + 1000.0)
+        except Exception:
+            base_penalty = 1000.0
+
+        if recent_set:
+            for entry0 in list(self.music_files or []):
+                entry = entry0 if isinstance(entry0, dict) else {'path': str(entry0)}
+                p = str(entry.get('path') or '')
+                if not p:
+                    continue
+                try:
+                    bn = os.path.basename(p).lower()
+                except Exception:
+                    bn = ''
+                if not bn or bn not in recent_set:
+                    continue
+                k = self._norm_path_key(p)
+                if not k:
+                    continue
+                try:
+                    temp_music_scores[k] = float(temp_music_scores.get(k, 0.0) or 0.0) + float(base_penalty)
+                except Exception:
+                    temp_music_scores[k] = float(base_penalty)
+
         def _script_score(idx: int) -> float:
             try:
                 s = self.bump_scripts[int(idx)]
             except Exception:
                 return 0.0
             k = self._script_key(s if isinstance(s, dict) else {})
+            base = 0.0
             try:
-                return float(self.script_exposure_scores.get(k, 0.0) or 0.0)
+                base = float(temp_script_scores.get(k, 0.0) or 0.0)
             except Exception:
-                return 0.0
+                base = 0.0
+
+            # Prefer scripts that can be compressed to fit the short bump duration.
+            # This prevents long (~20s+) scripts from dominating the early queue.
+            try:
+                timing = s.get('_timing') if isinstance(s, dict) else None
+                if not isinstance(timing, dict):
+                    timing = self._analyze_script_timing(s)
+                    if isinstance(s, dict):
+                        s['_timing'] = dict(timing)
+                can_fit_short = self._can_fit_short_clip(
+                    timing,
+                    target_ms=int(round(float(self._short_bump_s) * 1000.0)),
+                    overage_tolerance=float(short_eps),
+                )
+                if not bool(can_fit_short):
+                    base = float(base) + float(base_penalty)
+            except Exception:
+                pass
+
+            return float(base)
 
         def _music_score(idx: int) -> float:
             try:
@@ -759,10 +1050,20 @@ class BumpManager:
             entry = entry0 if isinstance(entry0, dict) else {'path': str(entry0)}
             p = str(entry.get('path') or '')
             k = self._norm_path_key(p)
+            bn = ''
             try:
-                return float(self.music_exposure_scores.get(k, 0.0) or 0.0)
+                bn = os.path.basename(p).lower()
             except Exception:
-                return 0.0
+                bn = ''
+            try:
+                base = float(temp_music_scores.get(k, 0.0) or 0.0)
+            except Exception:
+                base = 0.0
+            try:
+                extra = float(temp_music_basename_penalty.get(bn, 0.0) or 0.0) if bn else 0.0
+            except Exception:
+                extra = 0.0
+            return float(base) + float(extra)
 
         def _pick_min_exposure(indices, score_fn):
             if not indices:
@@ -792,7 +1093,29 @@ class BumpManager:
                     dur_ms = None
             return dur_ms
 
-        def _select_music_index_for_script(script: dict, pool_indices):
+        used_music_basenames = set()
+
+        def _is_reserved_music_basename(name_lower: str) -> bool:
+            """Return True if a basename is reserved for explicit script requests.
+
+            Reserved tracks are excluded from auto-selection when a script uses
+            `music=any`, but are allowed when a script explicitly requests them.
+            """
+            try:
+                n = str(name_lower or '').strip().lower()
+            except Exception:
+                n = ''
+            if not n:
+                return False
+            return n.startswith('xmas') or n.startswith('special')
+
+        def _select_music_index_for_script(
+            script: dict,
+            pool_indices,
+            *,
+            avoid_basename: str | None = None,
+            disallow_basenames: set | None = None,
+        ):
             if not isinstance(script, dict) or not pool_indices:
                 return None
 
@@ -803,16 +1126,23 @@ class BumpManager:
 
             music_pref = str(script.get('music') or 'any').strip()
 
-            # Prefer <=15s tracks for short scripts.
+            # Prefer <=15s tracks whenever the script can actually be compressed to fit a 15s clip.
             prefer_short = False
             try:
-                prefer_short = float(timing.get('estimated_ms', 0) or 0) <= float(self._short_bump_s) * 1000.0
+                prefer_short = self._can_fit_short_clip(
+                    timing,
+                    target_ms=int(round(float(self._short_bump_s) * 1000.0)),
+                    overage_tolerance=float(short_eps),
+                )
             except Exception:
                 prefer_short = False
 
             # Explicit track request.
             if music_pref and music_pref.lower() != 'any':
                 want = music_pref.lower()
+                # Hard rule: if a script specifies a music track, never substitute.
+                # If the requested track can't be used (missing/ineligible), the
+                # script must fail selection for this queue build.
                 for idx in list(pool_indices):
                     entry0 = self.music_files[int(idx)]
                     entry = entry0 if isinstance(entry0, dict) else {'path': str(entry0)}
@@ -821,6 +1151,8 @@ class BumpManager:
                         continue
                     if os.path.basename(p).lower() != want:
                         continue
+                    # If the script explicitly requests the track, honor it even
+                    # if it matches the avoid rule.
                     dur_ms = _music_duration_ms(entry)
                     if dur_ms is not None and not self._is_music_eligible_for_script(timing, music_duration_ms=int(dur_ms)):
                         return None
@@ -829,6 +1161,10 @@ class BumpManager:
 
             eligible = []
             eligible_short = []
+            try:
+                short_cap_ms = int(round(float(self._short_bump_s) * 1000.0)) + 750
+            except Exception:
+                short_cap_ms = 15_750
             for idx in list(pool_indices):
                 entry0 = self.music_files[int(idx)]
                 entry = entry0 if isinstance(entry0, dict) else {'path': str(entry0)}
@@ -837,8 +1173,26 @@ class BumpManager:
                     continue
 
                 try:
+                    bn_here = os.path.basename(p).lower()
+                except Exception:
+                    bn_here = ''
+                if disallow_basenames is not None and bn_here:
+                    try:
+                        if bn_here in set([str(x).lower() for x in disallow_basenames]):
+                            continue
+                    except Exception:
+                        pass
+
+                if avoid_basename:
+                    try:
+                        if os.path.basename(p).lower() == str(avoid_basename).lower():
+                            continue
+                    except Exception:
+                        pass
+
+                try:
                     name = os.path.basename(p).lower()
-                    if name.startswith('xmas') or name.startswith('special'):
+                    if _is_reserved_music_basename(name):
                         continue
                 except Exception:
                     continue
@@ -846,11 +1200,28 @@ class BumpManager:
                 dur_ms = _music_duration_ms(entry)
                 if dur_ms is None:
                     continue
-                if not self._is_music_eligible_for_script(timing, music_duration_ms=int(dur_ms)):
-                    continue
+
+                # For short tracks, allow compression (up to the short-clip overage window)
+                # as long as the fitter can actually succeed.
+                if prefer_short and int(dur_ms) <= int(short_cap_ms):
+                    try:
+                        T_est = int(timing.get('estimated_ms', 0) or 0)
+                    except Exception:
+                        T_est = 0
+                    try:
+                        max_est_ms = int(round(float(short_target_ms) * (1.0 + float(short_eps))))
+                    except Exception:
+                        max_est_ms = int(short_target_ms)
+                    if int(T_est) > int(max_est_ms):
+                        continue
+                    if self._fit_scalable_durations(timing, music_duration_ms=int(dur_ms)) is None:
+                        continue
+                else:
+                    if not self._is_music_eligible_for_script(timing, music_duration_ms=int(dur_ms)):
+                        continue
 
                 eligible.append(int(idx))
-                if int(dur_ms) <= int(round(float(self._short_bump_s) * 1000.0)):
+                if int(dur_ms) <= int(short_cap_ms):
                     eligible_short.append(int(idx))
 
             if prefer_short and eligible_short:
@@ -867,7 +1238,7 @@ class BumpManager:
             for p in list(self.outro_sounds or []):
                 pk = self._norm_path_key(p)
                 try:
-                    sc = float(self.outro_exposure_scores.get(pk, 0.0) or 0.0)
+                    sc = float(temp_outro_scores.get(pk, 0.0) or 0.0)
                 except Exception:
                     sc = 0.0
                 if best_score is None or sc < best_score:
@@ -879,11 +1250,40 @@ class BumpManager:
                 return None
             return random.choice(ties)
 
+        # Prevent the first item of a rebuilt queue from repeating the most recent
+        # bump's music (best-effort).
+        last_music_basename = None
+        try:
+            if recent_basenames:
+                last_music_basename = str(recent_basenames[-1] or '').lower() or None
+        except Exception:
+            last_music_basename = None
+
+        # Temporary exposure delta applied when an item is added to the queue.
+        # This makes subsequent picks within the same rebuild avoid repeats even
+        # if there are duplicate tracks (e.g. same basename in different folders).
+        queue_delta = float(base_penalty) if float(base_penalty) > 0 else 1000.0
+
         guard = max_n * 4
         while len(self._bump_queue) < max_n and script_pool and music_pool and guard > 0:
             guard -= 1
 
-            script_idx = _pick_min_exposure(script_pool, _script_score)
+            # If there are any scripts that can fit a 15s clip, enforce that the
+            # first few queue entries are chosen only from that short-fit set.
+            # This prevents long/non-compressible scripts from ever being first
+            # (or otherwise dominating the opening) just because their exposure
+            # is lower than well-worn short scripts.
+            candidate_scripts = list(script_pool)
+            try:
+                early_slots = int(getattr(self, '_early_short_only_slots', 0) or 0)
+            except Exception:
+                early_slots = 0
+            if early_slots > 0 and short_fit_scripts and int(len(self._bump_queue)) < int(early_slots):
+                filtered = [i for i in candidate_scripts if int(i) in short_fit_scripts]
+                if filtered:
+                    candidate_scripts = filtered
+
+            script_idx = _pick_min_exposure(candidate_scripts, _script_score)
             if script_idx is None:
                 break
             try:
@@ -895,7 +1295,21 @@ class BumpManager:
                 script_pool = [i for i in script_pool if int(i) != int(script_idx)]
                 continue
 
-            music_idx = _select_music_index_for_script(script, music_pool)
+            music_idx = _select_music_index_for_script(
+                script,
+                music_pool,
+                avoid_basename=last_music_basename,
+                disallow_basenames=used_music_basenames,
+            )
+            if music_idx is None:
+                # If the avoid rule blocked everything, retry once without it.
+                music_idx = _select_music_index_for_script(
+                    script,
+                    music_pool,
+                    avoid_basename=None,
+                    disallow_basenames=used_music_basenames,
+                )
+
             if music_idx is None:
                 # This script can't find any eligible music right now; drop it.
                 script_pool = [i for i in script_pool if int(i) != int(script_idx)]
@@ -907,6 +1321,16 @@ class BumpManager:
             if not audio_path:
                 music_pool = [i for i in music_pool if int(i) != int(music_idx)]
                 continue
+
+            try:
+                last_music_basename = os.path.basename(audio_path).lower() or None
+            except Exception:
+                last_music_basename = None
+            try:
+                if last_music_basename:
+                    used_music_basenames.add(str(last_music_basename).lower())
+            except Exception:
+                pass
 
             dur_ms = _music_duration_ms(entry)
             if dur_ms is None:
@@ -928,9 +1352,66 @@ class BumpManager:
                 if outro_path:
                     item['outro_audio_path'] = str(outro_path)
 
+            # Apply temporary exposure penalties so subsequent items in this queue
+            # strongly prefer different components.
+            try:
+                sk = self._script_key(script)
+                if sk:
+                    temp_script_scores[sk] = float(temp_script_scores.get(sk, 0.0) or 0.0) + float(queue_delta)
+            except Exception:
+                pass
+            try:
+                mk = self._norm_path_key(audio_path)
+                if mk:
+                    temp_music_scores[mk] = float(temp_music_scores.get(mk, 0.0) or 0.0) + float(queue_delta)
+            except Exception:
+                pass
+            try:
+                if last_music_basename:
+                    temp_music_basename_penalty[last_music_basename] = float(temp_music_basename_penalty.get(last_music_basename, 0.0) or 0.0) + float(queue_delta)
+            except Exception:
+                pass
+            try:
+                op = item.get('outro_audio_path')
+                if op:
+                    ok = self._norm_path_key(str(op))
+                    if ok:
+                        temp_outro_scores[ok] = float(temp_outro_scores.get(ok, 0.0) or 0.0) + float(queue_delta)
+            except Exception:
+                pass
+
             self._bump_queue.append(item)
             script_pool = [i for i in script_pool if int(i) != int(script_idx)]
             music_pool = [i for i in music_pool if int(i) != int(music_idx)]
+
+    def get_random_bump(self):
+        """
+        Returns {'script': dict, 'audio': str} or None
+        """
+        # Backward-compatible public API: now draws from a unified bump queue.
+        if not self._bump_queue:
+            self._rebuild_bump_queue()
+        if not self._bump_queue:
+            return None
+
+        try:
+            item = self._bump_queue.pop(0)
+        except Exception:
+            return None
+
+        # Track recent usage for spacing across queue rebuilds.
+        try:
+            if isinstance(item, dict):
+                p = item.get('audio')
+                if p:
+                    self._note_recent_music_path(str(p))
+                op = item.get('outro_audio_path')
+                if op:
+                    self._note_recent_outro_path(str(op))
+        except Exception:
+            pass
+
+        return item
 
     def _make_next_bump_item(self):
         # Legacy helper no longer used by the exposure-based queue builder.
@@ -1046,9 +1527,14 @@ class BumpManager:
             return None
         try:
             audio = _mutagen_file(p)
-            if not audio or not getattr(audio, 'info', None):
+            # Important: mutagen File objects can be falsy if they have no tags.
+            # We care about the decoded stream info, not whether tags exist.
+            if audio is None:
                 return None
-            length = getattr(audio.info, 'length', None)
+            info = getattr(audio, 'info', None)
+            if info is None:
+                return None
+            length = getattr(info, 'length', None)
             if length is None:
                 return None
             ms = int(round(float(length) * 1000.0))
@@ -1129,6 +1615,13 @@ class BumpManager:
                     if max_files_v is not None and parsed >= max_files_v:
                         dirs[:] = []
                         break
+
+        # Seed script exposure defaults (one-time) for scripts that cannot be
+        # compressed to fit the short bump duration.
+        try:
+            self.seed_initial_script_exposure_scores(initial_score=1.0)
+        except Exception:
+            self._script_exposure_seeded_last_changed = False
 
         # Scripts inventory changed; rebuild complete-bump queue lazily.
         self._bump_queue = []
@@ -1638,8 +2131,16 @@ class BumpManager:
                 cleaned = str(full_card_text or '')
                 cleaned = re.sub(r'<\s*img\b[^>]*>', '', cleaned, flags=re.IGNORECASE)
                 cleaned = re.sub(r'<\s*sound\b[^>]*>', '', cleaned, flags=re.IGNORECASE)
-                lines = [ln for ln in cleaned.splitlines() if ln.strip()]
-                info['lines_count'] = int(len(lines))
+                # Count lines including intentional blank lines.
+                # Use split('\n') (not splitlines()) so a trailing newline from a final
+                # explicit blank line is preserved as an empty string element.
+                cleaned = cleaned.replace('\r\n', '\n').replace('\r', '\n')
+                raw_lines = cleaned.split('\n')
+                # If the card is truly empty/whitespace-only, treat it as 0 lines.
+                if str(cleaned).strip() == '':
+                    info['lines_count'] = 0
+                else:
+                    info['lines_count'] = int(len(raw_lines))
             except Exception:
                 info['lines_count'] = 0
 
@@ -1780,6 +2281,31 @@ class BumpManager:
                             before = _strip_sound_markup((text[:img_m.start()] or '')).rstrip()
                             after = _strip_sound_markup((text[img_m.end():] or '')).lstrip()
 
+                            def _count_lines_preserve_trailing(s):
+                                try:
+                                    raw = str(s or '').replace('\r\n', '\n').replace('\r', '\n')
+                                except Exception:
+                                    raw = ''
+                                if raw.strip() == '':
+                                    return 0
+                                # split('\n') preserves a final empty line when the string ends with '\n'
+                                return len(raw.split('\n'))
+
+                            def _display_text_preserve_blank_lines(s):
+                                try:
+                                    raw = str(s or '').replace('\r\n', '\n').replace('\r', '\n')
+                                except Exception:
+                                    raw = ''
+                                if raw == '':
+                                    return ''
+                                parts = raw.split('\n')
+                                # Convert blank lines to NBSP so QLabel renders the line height.
+                                parts = [('\u00A0' if str(ln).strip() == '' else str(ln).rstrip()) for ln in parts]
+                                return "\n".join(parts)
+
+                            before_display = _display_text_preserve_blank_lines(before)
+                            after_display = _display_text_preserve_blank_lines(after)
+
                             if str(img_info.get('mode')) == 'char':
                                 template = _strip_sound_markup((text[:img_m.start()] or '')) + '[[IMG]]' + _strip_sound_markup((text[img_m.end():] or ''))
                                 card_obj = {
@@ -1792,19 +2318,16 @@ class BumpManager:
                                     '_delta_ms': int(delta_ms),
                                 }
                             else:
-                                def _count_lines(s):
-                                    try:
-                                        return len([ln for ln in str(s or '').splitlines() if ln.strip()])
-                                    except Exception:
-                                        return 0
-
                                 card_obj = {
                                     'type': 'img',
-                                    'text_before': before.strip(),
-                                    'text_after': after.strip(),
+                                    # Preserve explicit blank lines (<\s> on its own line) so that
+                                    # <img ... lines> can reserve stable line-height and avoid
+                                    # image jumping between cards.
+                                    'text_before': before_display,
+                                    'text_after': after_display,
                                     'image': img_info,
-                                    'before_lines': _count_lines(before),
-                                    'after_lines': _count_lines(after),
+                                    'before_lines': _count_lines_preserve_trailing(before),
+                                    'after_lines': _count_lines_preserve_trailing(after),
                                     'duration': duration,
                                     '_duration_mode': duration_mode,
                                     '_base_duration_ms': int(base_duration_ms),
@@ -2002,6 +2525,11 @@ class BumpManager:
                         _add_file(os.path.join(root, f))
 
         # Music inventory changed; rebuild complete-bump queue lazily.
+        # Also seed initial exposure scores for selected "starter" tracks.
+        try:
+            self.seed_initial_music_exposure_scores(initial_score=1.0)
+        except Exception:
+            self._music_exposure_seeded_last_changed = False
         self._bump_queue = []
 
     def _iter_music_entries(self):
@@ -2352,21 +2880,6 @@ class BumpManager:
             candidates.append({'path': str(path), 'duration_s': float(dur_s)})
 
         return candidates
-
-    def get_random_bump(self):
-        """
-        Returns {'script': dict, 'audio': str} or None
-        """
-        # Backward-compatible public API: now draws from a unified bump queue.
-        if not self._bump_queue:
-            self._rebuild_bump_queue()
-        if not self._bump_queue:
-            return None
-
-        try:
-            return self._bump_queue.pop(0)
-        except Exception:
-            return None
 
     def get_next_bump(self):
         """Preferred API: returns the next complete bump item."""

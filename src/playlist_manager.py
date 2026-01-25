@@ -122,6 +122,8 @@ class PlaylistManager:
         self._exposure_dirty = False
         self._load_exposure_scores()
 
+
+
     def reset_playback_state(self):
         self.play_queue = []
         self.episode_history = []
@@ -1081,6 +1083,17 @@ class PlaylistManager:
         self.bump_manager.load_bumps(scripts_folder)
         self.bump_manager.scan_music(music_folder)
 
+        # If bump scanning seeded any initial exposure values, persist them now.
+        try:
+            if (
+                bool(getattr(self.bump_manager, '_music_exposure_seeded_last_changed', False))
+                or bool(getattr(self.bump_manager, '_script_exposure_seeded_last_changed', False))
+            ):
+                self._exposure_dirty = True
+                self._save_exposure_scores(force=True)
+        except Exception:
+            pass
+
     def generate_playlist(self, selected_episodes=None, shuffle=False, inject_interstitials=False, inject_bumps=False):
         """
         Generates a playback queue.
@@ -1195,7 +1208,17 @@ class PlaylistManager:
         except Exception:
             pass
         try:
-            return [f for f in os.listdir(folder) if str(f).lower().endswith('.json')]
+            out = []
+            for f in os.listdir(folder):
+                name = str(f)
+                low = name.lower()
+                if not low.endswith('.json'):
+                    continue
+                # Internal state file; not a user playlist.
+                if low == 'exposure_scores.json':
+                    continue
+                out.append(name)
+            return out
         except Exception:
             return []
     

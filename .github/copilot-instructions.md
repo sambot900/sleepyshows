@@ -17,3 +17,5 @@
 - [x] Verify Sleep Timer Visuals
 
 - [x] Ensure Documentation is Complete
+
+- [x] Use ripgrep (rg) instead of grep

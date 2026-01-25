@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SleepyShows
+Comment=Video player with sleep timer
+Exec=SleepyShows
+Icon=sleepyshows
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=SleepyShows

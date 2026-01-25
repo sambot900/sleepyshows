@@ -11,19 +11,27 @@ import hashlib
 import shutil
 import tempfile
 import threading
+import datetime
+
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QFileDialog, QTreeWidget, 
                                QTreeWidgetItem, QSplitter, QLabel, QSlider, QTabWidget,
                                QListWidget, QListWidgetItem, QInputDialog, QMessageBox, QMenu, QStackedWidget,
                                QDockWidget, QFrame, QSizePolicy, QToolButton, QStyle, QGridLayout,
                                QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider,
-                               QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
+                               QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+                               QAbstractButton)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor, QGuiApplication
+from PySide6.QtCore import QUrl
 
 from player_backend import MpvPlayer, MpvAudioPlayer
+from keep_awake import KeepAwakeInhibitor
 from playlist_manager import PlaylistManager, VIDEO_EXTENSIONS, natural_sort_key
 from ui_styles import DARK_THEME
+
+from services import playlist_io
+from services import web_mode_paths
 
 
 THEME_COLOR = "#0e1a77"
@@ -83,20 +91,20 @@ class BumpImageView(QWidget):
             return QRect(x, y, w, h)
 
         # Default/lines behavior: fit-to-viewport with optional stretch.
+        #
+        # Key rule:
+        # - Plain <img filename> (mode 'default') may upscale beyond 200% to fill
+        #   the available viewport.
+        # - Explicit sizing modes (esp. 'lines') must NOT upscale beyond 200%
+        #   to avoid blowing up small UI/animation frames.
         fit_scale = min(vw / float(iw), vh / float(ih))
-        if fit_scale > 1.0:
-            scale = min(2.0, fit_scale)
-        else:
+        if self._mode == 'default':
             scale = fit_scale
+        else:
+            scale = fit_scale if fit_scale <= 1.0 else min(2.0, fit_scale)
 
         w0 = float(iw) * float(scale)
         h0 = float(ih) * float(scale)
-
-        # If we scaled to 200% and still don't hit either dimension, just center.
-        if abs(scale - 2.0) < 1e-6 and w0 < vw and h0 < vh:
-            x = int(round((vw - w0) / 2.0))
-            y = int(round((vh - h0) / 2.0))
-            return QRect(x, y, int(round(w0)), int(round(h0)))
 
         w = w0
         h = h0
@@ -462,6 +470,14 @@ def _get_user_settings_path() -> str:
     return os.path.join(cfg_dir, "settings.json")
 
 
+def _get_user_config_dir() -> str:
+    try:
+        return os.path.dirname(_get_user_settings_path())
+    except Exception:
+        home = os.path.expanduser("~")
+        return os.path.join(home, ".config", "SleepyShows")
+
+
 def _append_startup_geometry_log(window: QMainWindow):
     try:
         settings_path = _get_user_settings_path()
@@ -546,6 +562,49 @@ class Spinner(QWidget):
         span_deg = 280
         start_deg = -self._angle
         painter.drawArc(rect, int(start_deg * 16), int(-span_deg * 16))
+
+
+class ToggleSwitch(QAbstractButton):
+    """A small switch-style toggle (not a checkbox).
+
+    Visual: pill track + sliding thumb.
+    """
+
+    def __init__(self, parent=None, *, width: int = 54, height: int = 30):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self._w = int(width)
+        self._h = int(height)
+        self.setFixedSize(self._w, self._h)
+
+    def sizeHint(self):
+        return QSize(self._w, self._h)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+
+            r = self.rect().adjusted(1, 1, -1, -1)
+            radius = int(r.height() / 2)
+
+            # Track
+            track_color = QColor(THEME_COLOR) if self.isChecked() else QColor('#444444')
+            p.setPen(Qt.NoPen)
+            p.setBrush(track_color)
+            p.drawRoundedRect(r, radius, radius)
+
+            # Thumb
+            pad = 3
+            d = r.height() - 2 * pad
+            x_off = r.right() - pad - d if self.isChecked() else r.left() + pad
+            thumb_rect = QRect(int(x_off), int(r.top() + pad), int(d), int(d))
+            p.setBrush(QColor('#e0e0e0'))
+            p.drawEllipse(thumb_rect)
+        finally:
+            p.end()
 
 
 class TriStrokeButton(QPushButton):
@@ -698,9 +757,6 @@ class BumpsModeWidget(QWidget):
         layout.addWidget(self.btn_clear_history)
 
         # --- Sound settings ---
-        self._check_on_icon = QIcon(get_asset_path("check.png"))
-        self._check_off_icon = QIcon(get_asset_path("checkbox.png"))
-
         def add_toggle_row(label_text, initial_checked, on_toggle):
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
@@ -709,36 +765,65 @@ class BumpsModeWidget(QWidget):
             lbl = QLabel(label_text)
             lbl.setStyleSheet("font-size: 16px; color: white;")
 
-            btn = QPushButton("")
-            btn.setCheckable(True)
+            btn = ToggleSwitch()
             btn.setChecked(bool(initial_checked))
-            btn.setFixedSize(40, 40)
-            btn.setIconSize(QSize(28, 28))
-            btn.setStyleSheet("QPushButton { background: transparent; border: none; }")
-
-            def refresh_icon():
-                btn.setIcon(self._check_on_icon if btn.isChecked() else self._check_off_icon)
-
-            refresh_icon()
-            btn.clicked.connect(lambda _=False: (refresh_icon(), on_toggle(btn.isChecked())))
+            btn.toggled.connect(lambda checked: on_toggle(bool(checked)))
 
             row.addWidget(btn)
             row.addWidget(lbl)
             row.addStretch(1)
             layout.addLayout(row)
-            return btn
+            return btn, lbl
 
-        self.btn_startup_crickets = add_toggle_row(
+        self.btn_startup_crickets, self.lbl_startup_crickets = add_toggle_row(
             "Startup cricket sound",
             getattr(self.main_window, "startup_crickets_enabled", True),
             lambda checked: self.main_window.set_startup_crickets_enabled(checked),
         )
 
-        self.btn_normalize_audio = add_toggle_row(
+        self.btn_normalize_audio, self.lbl_normalize_audio = add_toggle_row(
             "Normalize volume",
             getattr(self.main_window, "normalize_audio_enabled", False),
             lambda checked: self.main_window.set_normalize_audio_enabled(checked),
         )
+
+        initial_web_mode = (
+            str(getattr(self.main_window, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web'
+        )
+
+        self.btn_web_mode, self.lbl_playback_mode = add_toggle_row(
+            "Playback mode: Web" if initial_web_mode else "Playback mode: Portable",
+            initial_web_mode,
+            lambda checked: (self.main_window.set_web_mode_enabled(checked), self.refresh_status()),
+        )
+
+        # Web mode configuration (filesystem-based via mounted share)
+
+        web_files_row = QHBoxLayout()
+        web_files_row.setContentsMargins(0, 0, 0, 0)
+        web_files_row.setSpacing(10)
+
+        web_files_lbl = QLabel("Web Files Root:")
+        web_files_lbl.setStyleSheet("font-size: 16px; color: white;")
+
+        self.input_web_files_root = QLineEdit()
+        self.input_web_files_root.setText(str(getattr(self.main_window, 'web_files_root', '') or ''))
+        self.input_web_files_root.setPlaceholderText("/mnt/shows  (or \\\\10.0.0.210\\shows on Windows)")
+        self.input_web_files_root.setStyleSheet(
+            "QLineEdit { background: #333; color: white; padding: 6px 10px; border: 1px solid #111; border-radius: 4px; }"
+            "QLineEdit:focus { border: 1px solid #0e1a77; }"
+        )
+
+        def _commit_web_files_root():
+            try:
+                self.main_window.set_web_files_root(self.input_web_files_root.text())
+            except Exception:
+                pass
+
+        self.input_web_files_root.editingFinished.connect(_commit_web_files_root)
+        web_files_row.addWidget(web_files_lbl)
+        web_files_row.addWidget(self.input_web_files_root, 1)
+        layout.addLayout(web_files_row)
 
         # Auto-config external drive name
         drive_row = QHBoxLayout()
@@ -858,17 +943,21 @@ class BumpsModeWidget(QWidget):
         except Exception:
             pass
 
-        # Sync toggle icons/checked state from main window settings.
+        # Sync toggle state from main window settings.
         try:
             if hasattr(self, 'btn_startup_crickets'):
                 self.btn_startup_crickets.setChecked(bool(getattr(self.main_window, 'startup_crickets_enabled', True)))
             if hasattr(self, 'btn_normalize_audio'):
                 self.btn_normalize_audio.setChecked(bool(getattr(self.main_window, 'normalize_audio_enabled', False)))
-            if hasattr(self, '_check_on_icon') and hasattr(self, '_check_off_icon'):
-                if hasattr(self, 'btn_startup_crickets'):
-                    self.btn_startup_crickets.setIcon(self._check_on_icon if self.btn_startup_crickets.isChecked() else self._check_off_icon)
-                if hasattr(self, 'btn_normalize_audio'):
-                    self.btn_normalize_audio.setIcon(self._check_on_icon if self.btn_normalize_audio.isChecked() else self._check_off_icon)
+            if hasattr(self, 'btn_web_mode'):
+                self.btn_web_mode.setChecked(
+                    (str(getattr(self.main_window, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web')
+                )
+            if hasattr(self, 'lbl_playback_mode'):
+                is_web = (
+                    str(getattr(self.main_window, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web'
+                )
+                self.lbl_playback_mode.setText("Playback mode: Web" if is_web else "Playback mode: Portable")
         except Exception:
             pass
 
@@ -1284,6 +1373,31 @@ def _iter_mount_roots_for_label(label):
             yield p
 
 
+def _volume_label_is_mounted(label: str) -> bool:
+    """Return True if we can find any mount root for the given label.
+
+    This is used to decide whether Portable mode should be the default at startup.
+    """
+    try:
+        lab = str(label or '').strip()
+    except Exception:
+        lab = ''
+    if not lab:
+        return False
+
+    try:
+        for p in _iter_mount_roots_for_label(lab) or []:
+            try:
+                if p and os.path.isdir(p) and os.access(p, os.R_OK):
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        return False
+
+    return False
+
+
 def _iter_mount_roots_fallback():
     """Yield mount roots to probe when label-based detection is unavailable."""
     system = platform.system().lower()
@@ -1359,7 +1473,7 @@ def auto_detect_default_show_sources(volume_label='T7'):
     if show_folders:
         # Preserve stable ordering.
         ordered = []
-        for key in ("King of the Hill", "Bob's Burgers"):
+        for key in ("King of the Hill", "Bob's Burgers", "Squidbillies", "Aqua Teen Hunger Force"):
             p = show_folders.get(key)
             if p:
                 ordered.append(p)
@@ -1375,6 +1489,9 @@ def auto_detect_default_show_sources(volume_label='T7'):
         # (display, [relative paths to probe])
         ("King of the Hill", [
             # Preferred layout
+            os.path.join('Shows', 'King of the Hill', 'Episodes'),
+            os.path.join('Shows', 'King of the Hill', 'King of the Hill'),
+            os.path.join('Shows', 'King of the Hill'),
             os.path.join('King of the Hill', 'Episodes'),
             # Older/fallback layouts
             os.path.join('King of the Hill', 'King of the Hill'),
@@ -1382,6 +1499,16 @@ def auto_detect_default_show_sources(volume_label='T7'):
         ]),
         ("Bob's Burgers", [
             # Preferred layout (note: "Episodesl" per user)
+            os.path.join('Shows', "Bob's Burgers", 'Episodesl'),
+            os.path.join('Shows', "Bob's Burgers", 'Episodes'),
+            os.path.join('Shows', "Bob's Burgers", "Bob's Burgers"),
+            os.path.join('Shows', "Bob's Burgers", "Bob's Burgersl"),
+            os.path.join('Shows', "Bob's Burgers"),
+            os.path.join('Shows', "Bob's Burgersl"),
+            os.path.join('Shows', 'Bobs Burgers', 'Episodesl'),
+            os.path.join('Shows', 'Bobs Burgers', 'Episodes'),
+            os.path.join('Shows', 'Bobs Burgers', 'Bobs Burgers'),
+            os.path.join('Shows', 'Bobs Burgers'),
             os.path.join("Bob's Burgers", 'Episodesl'),
             # Common fallback in case of spelling differences
             os.path.join("Bob's Burgers", 'Episodes'),
@@ -1394,6 +1521,23 @@ def auto_detect_default_show_sources(volume_label='T7'):
             os.path.join('Bobs Burgers', 'Episodes'),
             os.path.join('Bobs Burgers', 'Bobs Burgers'),
             os.path.join('Bobs Burgers'),
+        ]),
+        ("Squidbillies", [
+            os.path.join('Shows', 'Squidbillies', 'Episodes'),
+            os.path.join('Shows', 'Squidbillies'),
+            os.path.join('Squidbillies', 'Episodes'),
+            os.path.join('Squidbillies'),
+        ]),
+        ("Aqua Teen Hunger Force", [
+            os.path.join('Shows', 'Aqua Teen Hunger Force', 'Episodes'),
+            os.path.join('Shows', 'Aqua Teen Hunger Force'),
+            os.path.join('Aqua Teen Hunger Force', 'Episodes'),
+            os.path.join('Aqua Teen Hunger Force'),
+            # Common abbreviation fallback
+            os.path.join('Shows', 'ATHF', 'Episodes'),
+            os.path.join('Shows', 'ATHF'),
+            os.path.join('ATHF', 'Episodes'),
+            os.path.join('ATHF'),
         ]),
     ]
 
@@ -1444,11 +1588,24 @@ def auto_detect_show_folders(volume_label='T7'):
     """Return best-effort mapping of show name -> episodes folder path."""
     show_patterns = [
         ("King of the Hill", [
+            os.path.join('Shows', 'King of the Hill', 'Episodes'),
+            os.path.join('Shows', 'King of the Hill', 'King of the Hill'),
+            os.path.join('Shows', 'King of the Hill'),
             os.path.join('King of the Hill', 'Episodes'),
             os.path.join('King of the Hill', 'King of the Hill'),
             os.path.join('King of the Hill'),
         ]),
         ("Bob's Burgers", [
+            os.path.join('Shows', "Bob's Burgers", 'Episodesl'),
+            os.path.join('Shows', "Bob's Burgers", 'Episodes'),
+            os.path.join('Shows', "Bob's Burgers", "Bob's Burgers"),
+            os.path.join('Shows', "Bob's Burgers", "Bob's Burgersl"),
+            os.path.join('Shows', "Bob's Burgers"),
+            os.path.join('Shows', "Bob's Burgersl"),
+            os.path.join('Shows', 'Bobs Burgers', 'Episodesl'),
+            os.path.join('Shows', 'Bobs Burgers', 'Episodes'),
+            os.path.join('Shows', 'Bobs Burgers', 'Bobs Burgers'),
+            os.path.join('Shows', 'Bobs Burgers'),
             os.path.join("Bob's Burgers", 'Episodesl'),
             os.path.join("Bob's Burgers", 'Episodes'),
             os.path.join("Bob's Burgers", "Bob's Burgers"),
@@ -1459,6 +1616,23 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join('Bobs Burgers', 'Episodes'),
             os.path.join('Bobs Burgers', 'Bobs Burgers'),
             os.path.join('Bobs Burgers'),
+        ]),
+        ("Squidbillies", [
+            os.path.join('Shows', 'Squidbillies', 'Episodes'),
+            os.path.join('Shows', 'Squidbillies'),
+            os.path.join('Squidbillies', 'Episodes'),
+            os.path.join('Squidbillies'),
+        ]),
+        ("Aqua Teen Hunger Force", [
+            os.path.join('Shows', 'Aqua Teen Hunger Force', 'Episodes'),
+            os.path.join('Shows', 'Aqua Teen Hunger Force'),
+            os.path.join('Aqua Teen Hunger Force', 'Episodes'),
+            os.path.join('Aqua Teen Hunger Force'),
+            # Common abbreviation fallback
+            os.path.join('Shows', 'ATHF', 'Episodes'),
+            os.path.join('Shows', 'ATHF'),
+            os.path.join('ATHF', 'Episodes'),
+            os.path.join('ATHF'),
         ]),
     ]
 
@@ -1497,8 +1671,8 @@ def auto_detect_show_folders(volume_label='T7'):
     if not found:
         for mount_root in _iter_mount_roots_fallback() or []:
             probe_mount(mount_root)
-            # Stop early if we've found both.
-            if len(found) >= 2:
+            # Stop early if we've found all known shows.
+            if len(found) >= len(show_patterns):
                 break
 
     return found
@@ -1567,6 +1741,258 @@ def auto_detect_tv_vibe_scripts_dir(volume_label='T7'):
         if found:
             return found
 
+    return None
+
+
+def _normalize_mount_roots_override(mount_roots_override):
+    """Best-effort cleanup for a list of user-provided mount roots."""
+    roots = []
+    try:
+        it = list(mount_roots_override or [])
+    except Exception:
+        it = []
+
+    for r in it:
+        try:
+            s = str(r or '').strip().strip('"').strip("'")
+        except Exception:
+            continue
+        if not s:
+            continue
+        try:
+            s = os.path.expanduser(s)
+        except Exception:
+            pass
+        try:
+            s = os.path.normpath(s)
+        except Exception:
+            pass
+        if s and s not in roots:
+            roots.append(s)
+    return roots
+
+
+def auto_detect_default_show_sources_web(mount_roots_override):
+    """Web-mode helper: detect show sources by probing only provided roots."""
+    roots = _normalize_mount_roots_override(mount_roots_override)
+    if not roots:
+        return []
+    show_folders = auto_detect_show_folders_web(roots)
+    ordered = []
+    for key in ("King of the Hill", "Bob's Burgers", "Squidbillies", "Aqua Teen Hunger Force"):
+        p = show_folders.get(key)
+        if p:
+            ordered.append(p)
+    for k, p in show_folders.items():
+        if p and p not in ordered:
+            ordered.append(p)
+    return ordered
+
+
+def auto_detect_show_folders_web(mount_roots_override):
+    """Web-mode helper: detect show folders by probing only provided roots."""
+    roots = _normalize_mount_roots_override(mount_roots_override)
+    if not roots:
+        return {}
+
+    show_patterns = [
+        ("King of the Hill", [
+            os.path.join('Shows', 'King of the Hill', 'Episodes'),
+            os.path.join('Shows', 'King of the Hill', 'King of the Hill'),
+            os.path.join('Shows', 'King of the Hill'),
+            os.path.join('King of the Hill', 'Episodes'),
+            os.path.join('King of the Hill', 'King of the Hill'),
+            os.path.join('King of the Hill'),
+        ]),
+        ("Bob's Burgers", [
+            os.path.join('Shows', "Bob's Burgers", 'Episodesl'),
+            os.path.join('Shows', "Bob's Burgers", 'Episodes'),
+            os.path.join('Shows', "Bob's Burgers", "Bob's Burgers"),
+            os.path.join('Shows', "Bob's Burgers", "Bob's Burgersl"),
+            os.path.join('Shows', "Bob's Burgers"),
+            os.path.join('Shows', "Bob's Burgersl"),
+            os.path.join('Shows', 'Bobs Burgers', 'Episodesl'),
+            os.path.join('Shows', 'Bobs Burgers', 'Episodes'),
+            os.path.join('Shows', 'Bobs Burgers', 'Bobs Burgers'),
+            os.path.join('Shows', 'Bobs Burgers'),
+            os.path.join("Bob's Burgers", 'Episodesl'),
+            os.path.join("Bob's Burgers", 'Episodes'),
+            os.path.join("Bob's Burgers", "Bob's Burgers"),
+            os.path.join("Bob's Burgers", "Bob's Burgersl"),
+            os.path.join("Bob's Burgers"),
+            os.path.join("Bob's Burgersl"),
+            os.path.join('Bobs Burgers', 'Episodesl'),
+            os.path.join('Bobs Burgers', 'Episodes'),
+            os.path.join('Bobs Burgers', 'Bobs Burgers'),
+            os.path.join('Bobs Burgers'),
+        ]),
+        ("Squidbillies", [
+            os.path.join('Shows', 'Squidbillies', 'Episodes'),
+            os.path.join('Shows', 'Squidbillies'),
+            os.path.join('Squidbillies', 'Episodes'),
+            os.path.join('Squidbillies'),
+        ]),
+        ("Aqua Teen Hunger Force", [
+            os.path.join('Shows', 'Aqua Teen Hunger Force', 'Episodes'),
+            os.path.join('Shows', 'Aqua Teen Hunger Force'),
+            os.path.join('Aqua Teen Hunger Force', 'Episodes'),
+            os.path.join('Aqua Teen Hunger Force'),
+            # Common abbreviation fallback
+            os.path.join('Shows', 'ATHF', 'Episodes'),
+            os.path.join('Shows', 'ATHF'),
+            os.path.join('ATHF', 'Episodes'),
+            os.path.join('ATHF'),
+        ]),
+    ]
+
+    found = {}
+    checked = set()
+
+    def probe_mount(mount_root):
+        if not mount_root or not os.path.isdir(mount_root):
+            return
+
+        data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+        roots_to_probe = []
+        if os.path.isdir(data_root):
+            roots_to_probe.append(data_root)
+        roots_to_probe.append(mount_root)
+
+        for root in roots_to_probe:
+            for show_name, rels in show_patterns:
+                if show_name in found:
+                    continue
+                for rel in rels:
+                    candidate = os.path.join(root, rel)
+                    norm = os.path.normpath(candidate)
+                    if norm in checked:
+                        continue
+                    checked.add(norm)
+                    if os.path.isdir(norm) and _looks_like_show_folder(norm):
+                        found[show_name] = norm
+                        break
+
+    for mount_root in roots:
+        probe_mount(mount_root)
+        if len(found) >= len(show_patterns):
+            break
+
+    return found
+
+
+def auto_detect_tv_vibe_scripts_dir_web(mount_roots_override):
+    roots = _normalize_mount_roots_override(mount_roots_override)
+    if not roots:
+        return None
+    for mount_root in roots:
+        try:
+            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+            roots_to_probe = []
+            if os.path.isdir(data_root):
+                roots_to_probe.append(data_root)
+            roots_to_probe.append(mount_root)
+
+            for root in roots_to_probe:
+                direct = os.path.join(root, 'TV Vibe', 'scripts')
+                if os.path.isdir(direct):
+                    return direct
+
+                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+                if not tv_vibe_dir:
+                    continue
+
+                scripts_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'scripts')
+                if scripts_dir and os.path.isdir(scripts_dir):
+                    return scripts_dir
+        except Exception:
+            continue
+    return None
+
+
+def auto_detect_tv_vibe_music_dir_web(mount_roots_override):
+    roots = _normalize_mount_roots_override(mount_roots_override)
+    if not roots:
+        return None
+    for mount_root in roots:
+        try:
+            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+            roots_to_probe = []
+            if os.path.isdir(data_root):
+                roots_to_probe.append(data_root)
+            roots_to_probe.append(mount_root)
+
+            for root in roots_to_probe:
+                direct = os.path.join(root, 'TV Vibe', 'music')
+                if os.path.isdir(direct):
+                    return direct
+
+                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+                if not tv_vibe_dir:
+                    continue
+
+                music_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'music')
+                if music_dir and os.path.isdir(music_dir):
+                    return music_dir
+        except Exception:
+            continue
+    return None
+
+
+def auto_detect_tv_vibe_images_dir_web(mount_roots_override):
+    roots = _normalize_mount_roots_override(mount_roots_override)
+    if not roots:
+        return None
+    for mount_root in roots:
+        try:
+            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+            roots_to_probe = []
+            if os.path.isdir(data_root):
+                roots_to_probe.append(data_root)
+            roots_to_probe.append(mount_root)
+
+            for root in roots_to_probe:
+                direct = os.path.join(root, 'TV Vibe', 'images')
+                if os.path.isdir(direct):
+                    return direct
+
+                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+                if not tv_vibe_dir:
+                    continue
+
+                images_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'images')
+                if images_dir and os.path.isdir(images_dir):
+                    return images_dir
+        except Exception:
+            continue
+    return None
+
+
+def auto_detect_tv_vibe_audio_fx_dir_web(mount_roots_override):
+    roots = _normalize_mount_roots_override(mount_roots_override)
+    if not roots:
+        return None
+    for mount_root in roots:
+        try:
+            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+            roots_to_probe = []
+            if os.path.isdir(data_root):
+                roots_to_probe.append(data_root)
+            roots_to_probe.append(mount_root)
+
+            for root in roots_to_probe:
+                direct = os.path.join(root, 'TV Vibe', 'audio')
+                if os.path.isdir(direct):
+                    return direct
+
+                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+                if not tv_vibe_dir:
+                    continue
+
+                audio_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'audio')
+                if audio_dir and os.path.isdir(audio_dir):
+                    return audio_dir
+        except Exception:
+            continue
     return None
 
 
@@ -1709,7 +2135,35 @@ def _scan_episode_files(folder_path):
     """Return naturally sorted full paths of video files under folder_path."""
     results = []
     if not folder_path or not os.path.isdir(folder_path):
-        return results
+        # Try loading from static manifest (for network paths)
+        return _load_from_manifest(folder_path)
+
+    # Cache scan results to avoid slow network scans on every startup
+    cache_key = hashlib.md5(folder_path.encode('utf-8')).hexdigest()
+    cache_dir = os.path.join(get_local_playlists_dir(), '.scan_cache')
+    cache_file = os.path.join(cache_dir, f'{cache_key}.json')
+    
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except Exception:
+        pass
+    
+    # Try to load from cache (valid for 24 hours)
+    if os.path.exists(cache_file):
+        try:
+            cache_age = time.time() - os.path.getmtime(cache_file)
+            if cache_age < 86400:  # 24 hours
+                with open(cache_file, 'r') as f:
+                    cached = json.load(f)
+                    if isinstance(cached, dict) and cached.get('folder') == folder_path:
+                        return cached.get('files', [])
+        except Exception:
+            pass
+
+    # Try manifest before expensive network scan
+    manifest_results = _load_from_manifest(folder_path)
+    if manifest_results:
+        return manifest_results
 
     try:
         for root, dirs, files in os.walk(folder_path):
@@ -1721,10 +2175,61 @@ def _scan_episode_files(folder_path):
     except Exception:
         return []
 
+    # Save to cache
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump({'folder': folder_path, 'files': results}, f)
+    except Exception:
+        pass
+
     return results
 
 
-def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle_mode='standard'):
+def _load_from_manifest(folder_path):
+    """Load episode list from static manifest instead of scanning network."""
+    try:
+        manifest_path = os.path.join(get_local_playlists_dir(), 'network_manifest.json')
+        if not os.path.exists(manifest_path):
+            return []
+        
+        with open(manifest_path, 'r') as f:
+            manifest = json.load(f)
+        
+        # Check if this is HTTP streaming mode
+        streaming_mode = manifest.get('streaming_mode', 'filesystem')
+        base_url = manifest.get('base_url', '')
+        base_path = manifest.get('base_path', '')
+        shows = manifest.get('shows', {})
+        
+        # Match folder_path to a show
+        for show_name, episodes in shows.items():
+            # Check if folder_path matches this show's episodes folder
+            if show_name in str(folder_path):
+                result = []
+                if streaming_mode == 'http' and base_url:
+                    # HTTP streaming - construct URLs
+                    for url_path in episodes:
+                        full_url = f"{base_url}/{url_path}"
+                        result.append(full_url)
+                else:
+                    # Filesystem mode - reconstruct full paths
+                    for rel_path in episodes:
+                        full_path = os.path.join(base_path, rel_path)
+                        result.append(full_path)
+                return result
+        
+        return []
+    except Exception:
+        return []
+
+
+def _write_auto_playlist_json(
+    playlist_filename,
+    episode_folder,
+    default_shuffle_mode='standard',
+    *,
+    prefer_existing_playlist_paths: bool = False,
+):
     """Create/update a playlist JSON under playlists/ for a given episodes folder.
 
     Regeneration policy:
@@ -1812,11 +2317,72 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
                     return True
             return False
 
-        # If the existing playlist still points at a valid folder, don't touch it,
-        # except to backfill frequency settings if missing.
+        def _playlist_paths_match_source(existing_data: dict | None, source_folder: str) -> bool:
+            """Return True if the existing playlist's episode paths appear rooted in source_folder.
+
+            This is a string-based heuristic (no filesystem probing) to avoid stale playlists
+            when switching between Web/Portable topologies.
+            """
+            if not isinstance(existing_data, dict):
+                return True
+
+            try:
+                src = os.path.normpath(str(source_folder or ''))
+            except Exception:
+                src = str(source_folder or '')
+            if not src:
+                return True
+
+            # Grab a small sample of episode paths.
+            sample: list[str] = []
+            try:
+                for it in list(existing_data.get('playlist', []) or []):
+                    if not isinstance(it, dict) or it.get('type', 'video') != 'video':
+                        continue
+                    p = str(it.get('path') or '').strip()
+                    if not p:
+                        continue
+                    sample.append(p)
+                    if len(sample) >= 6:
+                        break
+            except Exception:
+                sample = []
+
+            if not sample:
+                return True
+
+            checked = 0
+            mismatched = 0
+            for p in sample:
+                # Relative paths can't be verified here; assume OK.
+                try:
+                    if not os.path.isabs(p):
+                        return True
+                except Exception:
+                    return True
+
+                checked += 1
+                try:
+                    p_norm = os.path.normpath(p)
+                    common = os.path.commonpath([src, p_norm])
+                    if common != src:
+                        mismatched += 1
+                except Exception:
+                    mismatched += 1
+
+            # If *all* sampled episode paths point outside the detected source folder,
+            # treat the playlist as stale.
+            return not (checked > 0 and mismatched >= checked)
+
+        # If the existing playlist still points at a valid folder and its episode paths
+        # match that folder, don't touch it, except to backfill frequency settings.
         try:
             existing_source = (existing or {}).get('source_folder', '')
-            if existing_source and os.path.isdir(existing_source):
+            if (
+                existing_source
+                and os.path.isdir(existing_source)
+                and _playlist_paths_match_source(existing, existing_source)
+            ):
                 try:
                     existing_fs = (existing or {}).get('frequency_settings', None)
                 except Exception:
@@ -1848,9 +2414,28 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
         except Exception:
             pass
 
-        eps = _scan_episode_files(episode_folder)
+        # Web mode optimization: avoid scanning network folders by reusing existing
+        # playlist entries when available.
+        #
+        # Portable mode fix: when the external drive is present, we MUST rescan so
+        # stale paths (e.g. /mnt/shows/...) get rewritten to the real mounted drive.
+        eps = []
+        if bool(prefer_existing_playlist_paths):
+            try:
+                if os.path.exists(playlist_path):
+                    with open(playlist_path, 'r') as f:
+                        existing_data = json.load(f)
+                        for item in existing_data.get('playlist', []):
+                            if item.get('type') == 'video':
+                                eps.append(item.get('path'))
+            except Exception:
+                eps = []
+
+        # Scan the detected episode folder when we don't have reusable entries.
         if not eps:
-            return False
+            eps = _scan_episode_files(episode_folder)
+            if not eps:
+                return False
 
         # Preserve user settings if the file already existed.
         shuffle_mode = None
@@ -1892,9 +2477,10 @@ def _write_auto_playlist_json(playlist_filename, episode_folder, default_shuffle
 class AutoConfigWorker(QObject):
     finished = Signal(object)
 
-    def __init__(self, volume_label='T7'):
+    def __init__(self, volume_label='T7', mount_roots_override=None):
         super().__init__()
         self.volume_label = volume_label
+        self.mount_roots_override = mount_roots_override
 
     @Slot()
     def run(self):
@@ -1912,22 +2498,39 @@ class AutoConfigWorker(QObject):
         }
 
         try:
-            show_folders = auto_detect_show_folders(volume_label=self.volume_label)
-            result['tv_vibe_scripts_dir'] = auto_detect_tv_vibe_scripts_dir(volume_label=self.volume_label)
-            result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir(volume_label=self.volume_label)
-            result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir(volume_label=self.volume_label)
-            result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir(volume_label=self.volume_label)
+            roots = _normalize_mount_roots_override(getattr(self, 'mount_roots_override', None))
+            if roots:
+                show_folders = auto_detect_show_folders_web(roots)
+                result['tv_vibe_scripts_dir'] = auto_detect_tv_vibe_scripts_dir_web(roots)
+                result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir_web(roots)
+                result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir_web(roots)
+                result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir_web(roots)
+            else:
+                show_folders = auto_detect_show_folders(volume_label=self.volume_label)
+                result['tv_vibe_scripts_dir'] = auto_detect_tv_vibe_scripts_dir(volume_label=self.volume_label)
+                result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir(volume_label=self.volume_label)
+                result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir(volume_label=self.volume_label)
+                result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir(volume_label=self.volume_label)
             sources = []
-            for key in ("King of the Hill", "Bob's Burgers"):
+            for key in ("King of the Hill", "Bob's Burgers", "Squidbillies", "Aqua Teen Hunger Force"):
                 p = show_folders.get(key)
                 if p:
                     sources.append(p)
+
+            # Add any additional detected show folders (stable order).
+            for k, p in (show_folders or {}).items():
+                try:
+                    if p and p not in sources:
+                        sources.append(p)
+                except Exception:
+                    continue
 
             result['show_folders'] = show_folders
             result['sources'] = sources
 
             # Build library scan in the worker so the UI thread stays responsive.
-            if sources:
+            # Skip slow network scans in web mode - rely on existing playlist files
+            if sources and not roots:
                 pm = PlaylistManager()
                 for folder in sources:
                     pm.add_source(folder)
@@ -1941,12 +2544,28 @@ class AutoConfigWorker(QObject):
                     "Bob's Burgers.json",
                     show_folders["Bob's Burgers"],
                     default_shuffle_mode='standard',
+                    prefer_existing_playlist_paths=bool(roots),
                 ) or updated
             if show_folders.get("King of the Hill"):
                 updated = _write_auto_playlist_json(
                     "King of the Hill.json",
                     show_folders["King of the Hill"],
                     default_shuffle_mode='standard',
+                    prefer_existing_playlist_paths=bool(roots),
+                ) or updated
+            if show_folders.get("Squidbillies"):
+                updated = _write_auto_playlist_json(
+                    "Squidbillies.json",
+                    show_folders["Squidbillies"],
+                    default_shuffle_mode='standard',
+                    prefer_existing_playlist_paths=bool(roots),
+                ) or updated
+            if show_folders.get("Aqua Teen Hunger Force"):
+                updated = _write_auto_playlist_json(
+                    "Aqua Teen Hunger Force.json",
+                    show_folders["Aqua Teen Hunger Force"],
+                    default_shuffle_mode='standard',
+                    prefer_existing_playlist_paths=bool(roots),
                 ) or updated
             result['playlists_updated'] = bool(updated)
         except Exception:
@@ -2073,7 +2692,9 @@ class WelcomeScreen(QWidget):
             
             # Keep a reasonable visible minimum, but don't lock the window width.
             btn.setMinimumSize(160, 240)
-            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # Do NOT expand to fill the row; that makes the hover background enormous.
+            btn.setMaximumSize(280, 420)
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             btn.setFlat(True)
             
             btn.setStyleSheet("""
@@ -2101,13 +2722,23 @@ class WelcomeScreen(QWidget):
         
         # King of the Hill
         self.btn_koth = create_show_btn("koth-icon.png", lambda: self.load_show_playlist("King of the Hill"))
-        shows_layout.addWidget(self.btn_koth)
+        shows_layout.addWidget(self.btn_koth, 0, Qt.AlignCenter)
         self.show_btns.append(self.btn_koth)
         
+        # Aqua Teen Hunger Force
+        self.btn_athf = create_show_btn("athf-icon.png", lambda: self.load_show_playlist("Aqua Teen Hunger Force"))
+        shows_layout.addWidget(self.btn_athf, 0, Qt.AlignCenter)
+        self.show_btns.append(self.btn_athf)
+
         # Bobs Burgers
         self.btn_bobs = create_show_btn("bobs-icon.png", lambda: self.load_show_playlist("Bob's Burgers"))
-        shows_layout.addWidget(self.btn_bobs)
+        shows_layout.addWidget(self.btn_bobs, 0, Qt.AlignCenter)
         self.show_btns.append(self.btn_bobs)
+
+        # Squidbillies
+        self.btn_squid = create_show_btn("squid-icon.png", lambda: self.load_show_playlist("Squidbillies"))
+        shows_layout.addWidget(self.btn_squid, 0, Qt.AlignCenter)
+        self.show_btns.append(self.btn_squid)
         
         main_layout.addLayout(shows_layout)
         main_layout.addStretch(1) # Balanced vertical centering
@@ -2267,8 +2898,12 @@ class WelcomeScreen(QWidget):
         btn = None
         if show_name == "King of the Hill":
             btn = getattr(self, 'btn_koth', None)
+        elif show_name == "Aqua Teen Hunger Force":
+            btn = getattr(self, 'btn_athf', None)
         elif show_name == "Bob's Burgers":
             btn = getattr(self, 'btn_bobs', None)
+        elif show_name == "Squidbillies":
+            btn = getattr(self, 'btn_squid', None)
 
         if btn is None:
             return
@@ -2443,11 +3078,14 @@ class WelcomeScreen(QWidget):
                 txt_btn.setFixedSize(w + pad, icon_h + pad)
 
     def load_show_playlist(self, show_name):
-        filename = resolve_playlist_path(os.path.join("playlists", f"{show_name}.json"))
-        if filename and os.path.exists(filename):
-            self.main_window.load_playlist(filename, auto_play=True)
-        else:
-            print(f"Playlist not found: {filename}")
+        try:
+            self.main_window.ensure_show_playlist_loaded(show_name, auto_play=True)
+        except Exception:
+            filename = resolve_playlist_path(os.path.join("playlists", f"{show_name}.json"))
+            if filename and os.path.exists(filename):
+                self.main_window.load_playlist(filename, auto_play=True)
+            else:
+                print(f"Playlist not found: {filename}")
 
     def go_to_player_menu(self):
         self.main_window.set_mode(2) # Play mode
@@ -3577,6 +4215,10 @@ class MainWindow(QMainWindow):
         # Tracks the current playlist file on disk (if loaded/saved).
         self.current_playlist_filename = None
 
+        # If a show card is clicked before its auto-playlist exists, we'll
+        # auto-config and then auto-load it after the worker finishes.
+        self._pending_show_autoload = None
+
         # Local bumps scripts folder (like `playlists/`).
         self.bump_scripts_dir = get_local_bumps_scripts_dir()
         try:
@@ -3596,6 +4238,41 @@ class MainWindow(QMainWindow):
         self.bump_images_dir = self._settings.get('bump_images_dir', None)
         self.bump_audio_fx_dir = self._settings.get('bump_audio_fx_dir', None)
         self.auto_config_volume_label = str(self._settings.get('auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
+
+        # Playback topology
+        # - portable: play local files from the external drive (auto-detected by volume label)
+        # - web: play from a network filesystem root (SMB/UNC mounted as a local folder)
+        configured_mode = str(self._settings.get('playback_mode', 'portable') or 'portable').strip().lower()
+        if configured_mode not in {'portable', 'web'}:
+            configured_mode = 'portable'
+
+        # Startup behavior: prefer Portable mode when the configured external drive is present.
+        # If it's not mounted, fall back to Web mode.
+        try:
+            has_portable_drive = _volume_label_is_mounted(self.auto_config_volume_label)
+        except Exception:
+            has_portable_drive = False
+        self.playback_mode = 'portable' if has_portable_drive else 'web'
+
+        # Persist the effective mode so UI + next launch match reality.
+        # (If the drive comes/goes, this will flip accordingly on next launch.)
+        try:
+            if self._settings.get('playback_mode') != self.playback_mode:
+                self._settings['playback_mode'] = self.playback_mode
+                self._save_user_settings()
+        except Exception:
+            pass
+
+        # Web mode configuration (filesystem/mount based).
+        # Optional network/mounted filesystem root for Web mode (SMB/UNC path or mounted folder).
+        # If set, the app can resolve relative playlist paths into this root.
+        self.web_files_root = str(self._settings.get('web_files_root', '') or '').strip()
+
+        # Best-effort auto-defaults so switching to Web mode "just works" on a typical LAN.
+        # Users can override in Settings.
+        if self.playback_mode == 'web':
+            self._ensure_web_defaults()
+        # Web mode is filesystem-only; no remote playlist plumbing.
 
         try:
             self.playlist_manager.bump_manager.bump_images_dir = self.bump_images_dir
@@ -3674,6 +4351,19 @@ class MainWindow(QMainWindow):
         self.was_maximized = False # Track window state for fullscreen toggle
         self.last_activity_time = time.time()
 
+        # Playback diagnostics: JSONL event log (helps debug overnight stops).
+        self._playback_log_path = os.path.join(_get_user_config_dir(), 'playback_events.jsonl')
+        self._last_stop_reason = None
+        self._last_stop_reason_at = None
+
+        # Best-effort cross-platform sleep/idle inhibitor while actively playing.
+        self._keep_awake = KeepAwakeInhibitor()
+        self._keep_awake_active = False
+        self._keep_awake_timer = QTimer(self)
+        self._keep_awake_timer.setInterval(60_000)
+        self._keep_awake_timer.timeout.connect(self._sync_keep_awake)
+        self._keep_awake_timer.start()
+
         # Playback watchdog: some MPV setups do not reliably deliver end-file events.
         # This ensures we still auto-advance when a file reaches EOF.
         self.playback_watchdog = QTimer(self)
@@ -3742,6 +4432,13 @@ class MainWindow(QMainWindow):
 
         # Optional outro audio (<outro ... audio>): pick a random sound from this folder.
         self._outro_sounds_dir = os.path.join('/media', 'tyler', 'T7', 'Sleepy Shows Data', 'TV Vibe', 'outro sounds')
+        try:
+            if self._is_web_mode():
+                wd = self._web_data_root_for_files_root(str(getattr(self, 'web_files_root', '') or '').strip())
+                if wd:
+                    self._outro_sounds_dir = os.path.join(wd, 'TV Vibe', 'outro sounds')
+        except Exception:
+            pass
 
         # Apply audio normalization as early as possible.
         try:
@@ -3777,6 +4474,10 @@ class MainWindow(QMainWindow):
         self.player.positionChanged.connect(self.update_seeker, Qt.QueuedConnection)
         self.player.durationChanged.connect(self.update_duration, Qt.QueuedConnection)
         self.player.playbackFinished.connect(self.on_playback_finished, Qt.QueuedConnection)
+        try:
+            self.player.endFileReason.connect(self.on_mpv_end_file_reason, Qt.QueuedConnection)
+        except Exception:
+            pass
         self.player.errorOccurred.connect(self.on_player_error, Qt.QueuedConnection)
         self.player.playbackPaused.connect(self.on_player_paused, Qt.QueuedConnection)
         self.player.mouseMoved.connect(self.on_mouse_move, Qt.QueuedConnection)
@@ -3834,6 +4535,73 @@ class MainWindow(QMainWindow):
         # Best-effort: auto-populate library from an external drive (e.g. "T7").
         # If nothing is found, the user can still add a folder manually.
         QTimer.singleShot(0, self._try_auto_populate_library)
+
+    def _log_event(self, event: str, **fields):
+        try:
+            os.makedirs(os.path.dirname(self._playback_log_path), exist_ok=True)
+        except Exception:
+            pass
+
+        try:
+            # Soft rotation at ~1MB to keep the file bounded.
+            if os.path.exists(self._playback_log_path) and os.path.getsize(self._playback_log_path) > 1_000_000:
+                try:
+                    backup = self._playback_log_path + '.1'
+                    if os.path.exists(backup):
+                        os.remove(backup)
+                    os.replace(self._playback_log_path, backup)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            payload = {
+                'ts': datetime.datetime.now().isoformat(timespec='seconds'),
+                'event': str(event or ''),
+            }
+            for k, v in (fields or {}).items():
+                try:
+                    payload[str(k)] = v
+                except Exception:
+                    continue
+            with open(self._playback_log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            return
+
+    def _set_stop_reason(self, reason: str, **fields):
+        try:
+            self._last_stop_reason = str(reason or '').strip() or None
+            self._last_stop_reason_at = time.time()
+        except Exception:
+            pass
+        self._log_event('stop_reason', reason=self._last_stop_reason, **(fields or {}))
+
+    def _is_actively_playing(self) -> bool:
+        try:
+            if not hasattr(self, 'player') or not self.player or not getattr(self.player, 'mpv', None):
+                return False
+            mpv = self.player.mpv
+            if bool(getattr(mpv, 'core_idle', True)):
+                return False
+            if bool(getattr(mpv, 'pause', False)):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _sync_keep_awake(self):
+        should = self._is_actively_playing()
+
+        if should and not self._keep_awake_active:
+            st = self._keep_awake.enable(reason='SleepyShows playback')
+            self._keep_awake_active = bool(st.enabled)
+            self._log_event('keep_awake', action='enable', enabled=bool(st.enabled), backend=st.backend, detail=st.detail)
+        elif (not should) and self._keep_awake_active:
+            st = self._keep_awake.disable()
+            self._keep_awake_active = False
+            self._log_event('keep_awake', action='disable', enabled=bool(st.enabled), backend=st.backend, detail=st.detail)
 
     def _start_startup_ambient(self):
         # Play an ambient track on launch (Welcome screen). It is cut off as soon as
@@ -3922,21 +4690,391 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def set_web_mode_enabled(self, enabled: bool):
+        self.playback_mode = 'web' if bool(enabled) else 'portable'
+        try:
+            self._settings['playback_mode'] = self.playback_mode
+            if self.playback_mode == 'web':
+                self._ensure_web_defaults()
+            self._save_user_settings()
+        except Exception:
+            pass
+
+        # Refresh visible playlists list immediately when toggling modes.
+        try:
+            if hasattr(self, 'play_mode_widget'):
+                self.play_mode_widget.refresh_playlists()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'bumps_mode_widget'):
+                self.bumps_mode_widget.refresh_status()
+        except Exception:
+            pass
+
+    def _ensure_web_defaults(self):
+        """Fill in sane Web mode defaults if settings are empty."""
+        try:
+            # Skip slow network detection if manifest exists - just use config
+            manifest_path = os.path.join(get_local_playlists_dir(), 'network_manifest.json')
+            if os.path.exists(manifest_path):
+                # Manifest exists - use configured web_files_root or default
+                if not str(getattr(self, 'web_files_root', '') or '').strip():
+                    system = platform.system().lower()
+                    if system.startswith('win'):
+                        self.web_files_root = r'Z:\\Sleepy Shows Data'
+                    elif system == 'darwin':
+                        self.web_files_root = '/Volumes/shows/Sleepy Shows Data'
+                    else:
+                        self.web_files_root = '/mnt/shows/Sleepy Shows Data'
+                    self._settings['web_files_root'] = self.web_files_root
+                return
+            
+            # Default Web mode to filesystem-based playback via a mounted share.
+            # Users can override this in Settings.
+            if not str(getattr(self, 'web_files_root', '') or '').strip():
+                label = str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
+                detected = self._detect_web_files_root(label)
+                if detected:
+                    self.web_files_root = detected
+                else:
+                    system = platform.system().lower()
+                    if system.startswith('win'):
+                        self.web_files_root = r'Z:\\Sleepy Shows Data'
+                    elif system == 'darwin':
+                        self.web_files_root = '/Volumes/shows/Sleepy Shows Data'
+                    else:
+                        self.web_files_root = '/mnt/shows/Sleepy Shows Data'
+                self._settings['web_files_root'] = self.web_files_root
+
+            try:
+                self._maybe_autofix_web_files_root()
+            except Exception:
+                pass
+
+            # Legacy HTTP defaults are no longer auto-filled because Web mode is
+            # intended to be filesystem-based.
+            # (We keep the settings keys for compatibility with older configs.)
+
+        except Exception:
+            return
+
+    def _maybe_autofix_web_files_root(self):
+        """If Web mode is active and the configured root isn't accessible, auto-switch to a detected root."""
+        try:
+            if not self._is_web_mode():
+                return
+        except Exception:
+            return
+
+        if self._web_files_root_accessible():
+            return
+
+        try:
+            label = str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
+        except Exception:
+            label = 'T7'
+
+        detected = self._detect_web_files_root(label)
+        if not detected:
+            return
+
+        # Persist and refresh UI.
+        try:
+            self.set_web_files_root(detected)
+        except Exception:
+            # Fallback minimal persistence.
+            self.web_files_root = detected
+            try:
+                self._settings['web_files_root'] = detected
+                self._save_user_settings()
+            except Exception:
+                pass
+
+    def _detect_web_files_root_candidates(self, volume_label: str) -> list[str]:
+        """Return best-effort cross-platform candidates for a mounted library root.
+
+        Candidates may point at (or contain) 'Sleepy Shows Data'.
+        """
+        try:
+            label = str(volume_label or 'T7').strip() or 'T7'
+        except Exception:
+            label = 'T7'
+
+        candidates: list[str] = []
+        system = ''
+        try:
+            system = platform.system().lower()
+        except Exception:
+            system = ''
+
+        # Universal likely locations (fast checks only).
+        candidates.extend([
+            '/mnt/shows/Sleepy Shows Data',
+            '/mnt/shows',
+            '/Volumes/shows/Sleepy Shows Data',
+        ])
+
+        if system.startswith('win'):
+            # Common mapped-drive convention.
+            candidates.extend([
+                r'Z:\\Sleepy Shows Data',
+                r'Z:\\',
+            ])
+            # Check other drive letters for a root-level folder.
+            for letter in 'ZYXWVUTSRQPONMLKJIHGFEDCBA':
+                try:
+                    drive = f'{letter}:\\'
+                    candidates.append(os.path.join(drive, 'Sleepy Shows Data'))
+                except Exception:
+                    continue
+        elif system == 'darwin':
+            # macOS volume mounts.
+            for base in ('/Volumes',):
+                try:
+                    candidates.append(os.path.join(base, label, 'Sleepy Shows Data'))
+                except Exception:
+                    pass
+                try:
+                    candidates.append(os.path.join(base, label))
+                except Exception:
+                    pass
+        else:
+            # Linux mounts.
+            for base in ('/media', '/run/media'):
+                # Label-based (fast and targeted).
+                for pattern in (
+                    os.path.join(base, '*', label, 'Sleepy Shows Data'),
+                    os.path.join(base, '*', label),
+                ):
+                    try:
+                        candidates.extend(sorted(glob.glob(pattern)))
+                    except Exception:
+                        pass
+                # Fallback: any mounted volume that contains the folder.
+                try:
+                    pattern = os.path.join(base, '*', '*', 'Sleepy Shows Data')
+                    candidates.extend(sorted(glob.glob(pattern)))
+                except Exception:
+                    pass
+
+        # Keep order but de-dup.
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for p in candidates:
+            if not p:
+                continue
+            try:
+                normalized = os.path.normpath(str(p))
+            except Exception:
+                normalized = str(p)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
+
+    def _detect_web_files_root(self, volume_label: str) -> str:
+        """Return the first accessible Web Files Root candidate."""
+        for p in self._detect_web_files_root_candidates(volume_label):
+            try:
+                if os.path.isdir(p) and os.access(p, os.R_OK):
+                    return p
+            except Exception:
+                continue
+        return ''
+
+    def set_web_files_root(self, path: str):
+        value = str(path or '').strip()
+        self.web_files_root = value
+        try:
+            self._settings['web_files_root'] = value
+            self._save_user_settings()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'bumps_mode_widget') and hasattr(self.bumps_mode_widget, 'input_web_files_root'):
+                self.bumps_mode_widget.input_web_files_root.setText(value)
+        except Exception:
+            pass
+
+    def _web_data_root_for_files_root(self, files_root: str) -> str:
+        """Return a directory that should behave like '.../Sleepy Shows Data' for a given files_root."""
+        return web_mode_paths.web_data_root_for_files_root(files_root)
+
+    def _path_to_web_files_path(self, path: str) -> str:
+        """Best-effort conversion from a playlist path to an on-filesystem path under web_files_root."""
+        return web_mode_paths.path_to_web_files_path(path, str(getattr(self, 'web_files_root', '') or '').strip())
+
+    def _is_web_mode(self) -> bool:
+        try:
+            return str(getattr(self, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web'
+        except Exception:
+            return False
+
+    def _effective_web_data_root(self) -> str:
+        """Return the effective 'Sleepy Shows Data' root for the configured Web Files Root."""
+        try:
+            wfr = str(getattr(self, 'web_files_root', '') or '').strip()
+        except Exception:
+            wfr = ''
+        if not wfr:
+            return ''
+        try:
+            return self._web_data_root_for_files_root(wfr)
+        except Exception:
+            return ''
+
+    def _web_files_root_accessible(self) -> bool:
+        """Best-effort check that Web mode's filesystem root is mounted and readable."""
+        try:
+            wfr = str(getattr(self, 'web_files_root', '') or '').strip()
+        except Exception:
+            wfr = ''
+        if not wfr:
+            return False
+
+        # In web mode, check if manifest exists instead of checking network paths
+        # This avoids slow/hanging network operations during startup
+        try:
+            manifest_path = os.path.join(get_local_playlists_dir(), 'network_manifest.json')
+            if os.path.exists(manifest_path):
+                return True
+        except Exception:
+            pass
+
+        try:
+            data_root = str(self._effective_web_data_root() or '')
+        except Exception:
+            data_root = ''
+
+        candidates = []
+        if wfr:
+            candidates.append(wfr)
+        if data_root and data_root not in candidates:
+            candidates.append(data_root)
+
+        for p in candidates:
+            try:
+                if os.path.isdir(p) and os.access(p, os.R_OK):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _warn_web_files_root_unavailable_once(self, *, context: str):
+        """Warn once per run if Web Files Root isn't accessible (avoids popup spam)."""
+        if not self._is_web_mode():
+            return
+
+        # Best-effort auto-fix before warning.
+        try:
+            self._maybe_autofix_web_files_root()
+        except Exception:
+            pass
+
+        if self._web_files_root_accessible():
+            return
+
+        if self._web_files_root_accessible():
+            return
+
+        if bool(getattr(self, '_web_files_root_unavailable_warned', False)):
+            return
+        self._web_files_root_unavailable_warned = True
+
+        try:
+            wfr = str(getattr(self, 'web_files_root', '') or '').strip()
+        except Exception:
+            wfr = ''
+        try:
+            data_root = str(self._effective_web_data_root() or '')
+        except Exception:
+            data_root = ''
+
+        suggestions = []
+        try:
+            label = str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
+            for sug in self._detect_web_files_root_candidates(label)[:6]:
+                if sug and sug not in (wfr, data_root):
+                    suggestions.append(sug)
+        except Exception:
+            suggestions = []
+
+        extra = ''
+        if suggestions:
+            extra = "\n\nSuggested Web Files Root (detected):\n" + "\n".join(suggestions)
+
+        msg = (
+            "Web mode is enabled, but the Web Files Root is not accessible.\n\n"
+            f"Context: {context}\n\n"
+            f"Web Files Root: {wfr or '(not set)'}\n"
+            f"Expected data root: {data_root or '(unknown)'}\n\n"
+            "Mount the share (SMB/UNC) in your OS and/or update Settings → Web Files Root."
+            f"{extra}"
+        )
+
+        try:
+            QMessageBox.warning(self, 'Web Files Root Unavailable', msg)
+        except Exception:
+            print(f"DEBUG: {msg}")
+
+    def _resolve_video_play_target(self, path: str) -> str:
+        """Return the string mpv should play for an episode/interstitial."""
+        return web_mode_paths.resolve_video_play_target(
+            path,
+            str(getattr(self, 'playback_mode', 'portable') or 'portable'),
+            str(getattr(self, 'web_files_root', '') or ''),
+        )
+
     def _try_auto_populate_library(self):
         try:
             if getattr(self, '_auto_config_running', False):
                 return
 
+            # In Web mode we do NOT scan for removable drives. Instead, if the user
+            # configured a Web Files Root (mounted share / UNC path), probe that.
+            web_mount_roots = None
+            try:
+                if self._is_web_mode():
+                    try:
+                        self._maybe_autofix_web_files_root()
+                    except Exception:
+                        pass
+                    wfr = str(getattr(self, 'web_files_root', '') or '').strip()
+                    if wfr:
+                        if not self._web_files_root_accessible():
+                            self._warn_web_files_root_unavailable_once(context='auto-config')
+                            self._auto_config_running = False
+                            return
+                        web_mount_roots = [wfr]
+                    else:
+                        # Web mode requires a configured/mounted root.
+                        self._warn_web_files_root_unavailable_once(context='auto-config (no Web Files Root set)')
+                        self._auto_config_running = False
+                        return
+            except Exception:
+                web_mount_roots = None
+
+            self._auto_config_running = True
+
             # Show pending overlay on the show cards while we probe external storage.
             if hasattr(self, 'welcome_screen'):
                 try:
                     self.welcome_screen.set_show_pending("King of the Hill", True)
+                    self.welcome_screen.set_show_pending("Aqua Teen Hunger Force", True)
                     self.welcome_screen.set_show_pending("Bob's Burgers", True)
+                    self.welcome_screen.set_show_pending("Squidbillies", True)
                 except Exception:
                     pass
 
             self._auto_config_thread = QThread(self)
-            self._auto_config_worker = AutoConfigWorker(volume_label=getattr(self, 'auto_config_volume_label', 'T7'))
+            self._auto_config_worker = AutoConfigWorker(
+                volume_label=getattr(self, 'auto_config_volume_label', 'T7'),
+                mount_roots_override=web_mount_roots,
+            )
             self._auto_config_worker.moveToThread(self._auto_config_thread)
 
             self._auto_config_thread.started.connect(self._auto_config_worker.run)
@@ -3949,6 +5087,33 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._auto_config_running = False
             print(f"DEBUG: Auto library detection failed: {e}")
+
+    def ensure_show_playlist_loaded(self, show_name: str, *, auto_play: bool = True):
+        """Load a show playlist by show name, generating it via auto-config if needed."""
+        try:
+            name = str(show_name or '').strip()
+        except Exception:
+            name = ''
+        if not name:
+            return
+
+        filename = resolve_playlist_path(os.path.join("playlists", f"{name}.json"))
+        if filename and os.path.exists(filename):
+            self.load_playlist(filename, auto_play=bool(auto_play))
+            return
+
+        # Not present yet: request auto-config, then load after it completes.
+        self._pending_show_autoload = name
+        try:
+            if hasattr(self, 'welcome_screen'):
+                self.welcome_screen.set_show_pending(name, True)
+        except Exception:
+            pass
+
+        # If already running, just wait for completion.
+        if bool(getattr(self, '_auto_config_running', False)):
+            return
+        self._try_auto_populate_library()
 
     def set_auto_config_volume_label(self, label: str):
         value = str(label or '').strip()
@@ -3964,11 +5129,14 @@ class MainWindow(QMainWindow):
 
     def _on_auto_config_finished(self, result):
         try:
+            self._auto_config_running = False
             # Remove pending overlays.
             if hasattr(self, 'welcome_screen'):
                 try:
                     self.welcome_screen.set_show_pending("King of the Hill", False)
+                    self.welcome_screen.set_show_pending("Aqua Teen Hunger Force", False)
                     self.welcome_screen.set_show_pending("Bob's Burgers", False)
+                    self.welcome_screen.set_show_pending("Squidbillies", False)
                 except Exception:
                     pass
 
@@ -3993,6 +5161,27 @@ class MainWindow(QMainWindow):
                     self.play_mode_widget.refresh_playlists()
                 except Exception:
                     pass
+
+            # If a show-card click requested an auto-generated playlist, try to load it now.
+            pending = None
+            try:
+                pending = str(getattr(self, '_pending_show_autoload', None) or '').strip() or None
+            except Exception:
+                pending = None
+            if pending:
+                try:
+                    target = resolve_playlist_path(os.path.join("playlists", f"{pending}.json"))
+                except Exception:
+                    target = None
+                if target and os.path.exists(target):
+                    try:
+                        self._pending_show_autoload = None
+                    except Exception:
+                        pass
+                    try:
+                        self.load_playlist(target, auto_play=True)
+                    except Exception:
+                        pass
 
             # Auto-detect bumps scripts/music/assets on the same external drive.
             # Important: images/audio FX can be used even if scripts are local, so don't gate
@@ -4028,6 +5217,13 @@ class MainWindow(QMainWindow):
                                 bump_mgr.load_bumps(tv_vibe_scripts_dir)
                         except Exception:
                             pass
+                        # Persist any one-time script exposure seeds immediately.
+                        try:
+                            if bump_mgr and bool(getattr(bump_mgr, '_script_exposure_seeded_last_changed', False)):
+                                self.playlist_manager._exposure_dirty = True
+                                self.playlist_manager._save_exposure_scores(force=True)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -4041,10 +5237,18 @@ class MainWindow(QMainWindow):
                         bump_mgr.scan_music(tv_vibe_music_dir)
                 except Exception:
                     pass
+                # Persist any one-time exposure seeds immediately.
+                try:
+                    if bump_mgr and bool(getattr(bump_mgr, '_music_exposure_seeded_last_changed', False)):
+                        self.playlist_manager._exposure_dirty = True
+                        self.playlist_manager._save_exposure_scores(force=True)
+                except Exception:
+                    pass
 
             if tv_vibe_images_dir and os.path.isdir(tv_vibe_images_dir):
                 # Only override if the user hasn't configured one yet.
-                if not getattr(self, 'bump_images_dir', None):
+                prev_images_dir = getattr(self, 'bump_images_dir', None)
+                if not prev_images_dir or not os.path.isdir(str(prev_images_dir)):
                     self.bump_images_dir = tv_vibe_images_dir
                     try:
                         self._settings['bump_images_dir'] = tv_vibe_images_dir
@@ -4059,7 +5263,8 @@ class MainWindow(QMainWindow):
 
             if tv_vibe_audio_fx_dir and os.path.isdir(tv_vibe_audio_fx_dir):
                 # Only override if the user hasn't configured one yet.
-                if not getattr(self, 'bump_audio_fx_dir', None):
+                prev_fx_dir = getattr(self, 'bump_audio_fx_dir', None)
+                if not prev_fx_dir or not os.path.isdir(str(prev_fx_dir)):
                     self.bump_audio_fx_dir = tv_vibe_audio_fx_dir
                     try:
                         self._settings['bump_audio_fx_dir'] = tv_vibe_audio_fx_dir
@@ -4071,6 +5276,17 @@ class MainWindow(QMainWindow):
                         bump_mgr.bump_audio_fx_dir = self.bump_audio_fx_dir
                 except Exception:
                     pass
+
+            # If we updated asset base directories after scripts were already parsed,
+            # re-parse scripts so <img>/<sound> tags re-resolve to valid paths.
+            try:
+                if (
+                    (tv_vibe_images_dir and os.path.isdir(tv_vibe_images_dir) and (not prev_images_dir or not os.path.isdir(str(prev_images_dir))))
+                    or (tv_vibe_audio_fx_dir and os.path.isdir(tv_vibe_audio_fx_dir) and (not prev_fx_dir or not os.path.isdir(str(prev_fx_dir))))
+                ):
+                    self._reload_bump_scripts_for_assets()
+            except Exception:
+                pass
 
             # Auto-config implies storage topology may have changed (drive mounted / letter changed).
             # Refresh outro sounds so the UI doesn't get stuck with a stale cached list.
@@ -4147,6 +5363,23 @@ class MainWindow(QMainWindow):
             elif event.key() == Qt.Key_F:
                 self.toggle_fullscreen()
         return super().eventFilter(obj, event)
+
+    def _apply_bump_safe_padding_now(self):
+        """Apply the current bump safe padding ratio to the bump layout immediately."""
+        try:
+            bw = getattr(self, 'bump_widget', None)
+            if bw is None:
+                return
+            layout = getattr(self, '_bump_layout', None) or bw.layout()
+            if layout is None:
+                return
+            h = int(bw.height())
+            pad = int(round(h * float(getattr(self, '_bump_safe_vpad_ratio', 0.15))))
+            pad = max(0, min(pad, max(0, (h // 2) - 1)))
+            l, _t, r, _b = layout.getContentsMargins()
+            layout.setContentsMargins(l, pad, r, pad)
+        except Exception:
+            return
 
     def _on_spacebar(self):
         try:
@@ -4277,10 +5510,34 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
+        # Important: only react to cursor movement when this window is active and
+        # the cursor is actually over this window. Otherwise, moving the cursor on
+        # another monitor can incorrectly trigger control visibility.
+        try:
+            if not self.isActiveWindow():
+                try:
+                    self._fs_last_cursor_pos = QCursor.pos()
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
+
         try:
             pos = QCursor.pos()
         except Exception:
             return
+
+        try:
+            fg = self.frameGeometry()
+            if fg is not None and not fg.contains(pos):
+                # Still update last position so we don't repeatedly treat
+                # off-window movement as a "new" event.
+                self._fs_last_cursor_pos = pos
+                return
+        except Exception:
+            # If we can't determine geometry, fall back to old behavior.
+            pass
 
         if self._fs_last_cursor_pos is None or pos != self._fs_last_cursor_pos:
             self._fs_last_cursor_pos = pos
@@ -4596,27 +5853,6 @@ class MainWindow(QMainWindow):
             # Leaving fullscreen: don't keep the episode title overlay hanging around.
             self._hide_episode_overlay()
 
-    def setup_ui(self):
-        self.create_menu()
-
-        central_widget = GradientBackgroundWidget()
-        central_widget.setObjectName('gradient_background')
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.mode_stack = QStackedWidget()
-        main_layout.addWidget(self.mode_stack)
-        
-        # 0. Welcome Screen
-        self.welcome_screen = WelcomeScreen(self)
-        self.mode_stack.addWidget(self.welcome_screen)
-        
-        # 1. Edit Mode
-        self.edit_mode_widget = EditModeWidget(self)
-        self.mode_stack.addWidget(self.edit_mode_widget)
-        
-        # 2. Play Mode
     def setup_ui(self):
         # 1. Hide Standard Menu Bar
         self.menuBar().setVisible(False)
@@ -5265,6 +6501,13 @@ class MainWindow(QMainWindow):
             pass
 
         self.playlist_manager.bump_manager.load_bumps(folder)
+        # Persist any one-time exposure seeds immediately.
+        try:
+            if bool(getattr(self.playlist_manager.bump_manager, '_script_exposure_seeded_last_changed', False)):
+                self.playlist_manager._exposure_dirty = True
+                self.playlist_manager._save_exposure_scores(force=True)
+        except Exception:
+            pass
         QMessageBox.information(
             self,
             "Bumps",
@@ -5278,6 +6521,13 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select Bump Music Directory")
         if folder:
             self.playlist_manager.bump_manager.scan_music(folder)
+            # Persist any one-time exposure seeds immediately.
+            try:
+                if bool(getattr(self.playlist_manager.bump_manager, '_music_exposure_seeded_last_changed', False)):
+                    self.playlist_manager._exposure_dirty = True
+                    self.playlist_manager._save_exposure_scores(force=True)
+            except Exception:
+                pass
             QMessageBox.information(self, "Bumps", f"Found {len(self.playlist_manager.bump_manager.music_files)} music files.")
             if hasattr(self, 'bumps_mode_widget'):
                 self.bumps_mode_widget.refresh_status()
@@ -5296,6 +6546,12 @@ class MainWindow(QMainWindow):
 
         try:
             self.playlist_manager.bump_manager.bump_images_dir = folder
+        except Exception:
+            pass
+
+        # Reload scripts so any <img ...> tags re-resolve against the new base dir.
+        try:
+            self._reload_bump_scripts_for_assets()
         except Exception:
             pass
 
@@ -5322,6 +6578,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Reload scripts so any <sound ...> tags re-resolve against the new base dir.
+        try:
+            self._reload_bump_scripts_for_assets()
+        except Exception:
+            pass
+
         if hasattr(self, 'bumps_mode_widget'):
             try:
                 self.bumps_mode_widget.refresh_status()
@@ -5330,6 +6592,59 @@ class MainWindow(QMainWindow):
 
     def set_bumps_enabled(self, enabled):
         self.bumps_enabled = bool(enabled)
+
+    def _reload_bump_scripts_for_assets(self):
+        """Re-parse bump scripts so <img> and <sound> tags resolve correctly.
+
+        Image/audio-FX paths are resolved at script parse time. If the user (or
+        auto-config) sets `bump_images_dir` / `bump_audio_fx_dir` after scripts
+        have already been loaded, previously-parsed cards can keep stale/relative
+        paths (e.g. "campfire.png") that won't render/play.
+        """
+        bump_mgr = getattr(getattr(self, 'playlist_manager', None), 'bump_manager', None)
+        if not bump_mgr:
+            return
+
+        scripts_dir = getattr(self, 'bump_scripts_dir', None)
+        if not scripts_dir:
+            try:
+                scripts_dir = get_local_bumps_scripts_dir()
+            except Exception:
+                scripts_dir = None
+        if not scripts_dir:
+            return
+        try:
+            if not os.path.isdir(str(scripts_dir)):
+                return
+        except Exception:
+            return
+
+        # Clear image cache so newly-resolved absolute paths can be loaded.
+        try:
+            if hasattr(self, '_bump_prefetch_lock') and hasattr(self, '_bump_prefetch_images'):
+                with self._bump_prefetch_lock:
+                    self._bump_prefetch_images = {}
+        except Exception:
+            pass
+
+        try:
+            bump_mgr.load_bumps(str(scripts_dir))
+        except Exception:
+            return
+
+        # Persist any one-time script exposure seeds immediately.
+        try:
+            if bool(getattr(bump_mgr, '_script_exposure_seeded_last_changed', False)):
+                self.playlist_manager._exposure_dirty = True
+                self.playlist_manager._save_exposure_scores(force=True)
+        except Exception:
+            pass
+
+        if hasattr(self, 'bumps_mode_widget'):
+            try:
+                self.bumps_mode_widget.refresh_status()
+            except Exception:
+                pass
 
     def add_dropped_items(self, items):
         candidates = []
@@ -5450,16 +6765,20 @@ class MainWindow(QMainWindow):
             os.makedirs(files_dir, exist_ok=True)
             filename, _ = QFileDialog.getOpenFileName(self, "Load Playlist", files_dir, "Sleepy Playlist (*.json)")
 
+        # Resolve local path if possible.
         try:
             if filename:
+                playlist_io.reject_url_source(str(filename))
                 filename = resolve_playlist_path(filename)
         except Exception:
             pass
-        
-        if filename and os.path.exists(filename):
+
+        playlist_source = filename
+
+        if playlist_source and os.path.exists(str(playlist_source)):
             try:
-                with open(filename, 'r') as f:
-                    data = json.load(f)
+                result = playlist_io.load_playlist_json(str(playlist_source))
+                data = result.data
 
                 self.current_playlist_filename = filename
 
@@ -5469,7 +6788,13 @@ class MainWindow(QMainWindow):
                     pass
                 
                 if 'interstitial_folder' in data:
-                    self.playlist_manager.scan_interstitials(data['interstitial_folder'])
+                    folder = data['interstitial_folder']
+                    try:
+                        if self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
+                            folder = self._path_to_web_files_path(str(folder))
+                    except Exception:
+                        folder = data['interstitial_folder']
+                    self.playlist_manager.scan_interstitials(folder)
                     
                 self.playlist_manager.current_playlist = data.get('playlist', [])
                 self.playlist_manager.reset_playback_state()
@@ -5513,14 +6838,17 @@ class MainWindow(QMainWindow):
 
         try:
             if filename:
+                playlist_io.reject_url_source(str(filename))
                 filename = resolve_playlist_path(filename)
         except Exception:
             pass
 
-        if filename and os.path.exists(filename):
+        playlist_source = filename
+
+        if playlist_source and os.path.exists(str(playlist_source)):
             try:
-                with open(filename, 'r') as f:
-                    data = json.load(f)
+                result = playlist_io.load_playlist_json(str(playlist_source))
+                data = result.data
 
                 self.current_playlist_filename = filename
 
@@ -5530,7 +6858,13 @@ class MainWindow(QMainWindow):
                     pass
 
                 if 'interstitial_folder' in data:
-                    self.playlist_manager.scan_interstitials(data['interstitial_folder'])
+                    folder = data['interstitial_folder']
+                    try:
+                        if self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
+                            folder = self._path_to_web_files_path(str(folder))
+                    except Exception:
+                        folder = data['interstitial_folder']
+                    self.playlist_manager.scan_interstitials(folder)
 
                 self.playlist_manager.current_playlist = data.get('playlist', [])
                 self.playlist_manager.reset_playback_state()
@@ -5679,8 +7013,25 @@ class MainWindow(QMainWindow):
             if self.play_mode_widget.sidebar_visible:
                 self.play_mode_widget.toggle_sidebar()
 
-    def play_index(self, index, record_history=True, bypass_bump_gate=False):
+    def _should_suppress_auto_nav_ui(self) -> bool:
+        try:
+            if bool(getattr(self, '_advancing_from_eof', False)):
+                return True
+        except Exception:
+            pass
+        try:
+            if bool(getattr(self, '_advancing_from_bump_end', False)):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def play_index(self, index, record_history=True, bypass_bump_gate=False, *, suppress_ui: bool = False):
         pm = self.playlist_manager
+        try:
+            suppress_ui = bool(suppress_ui) or self._should_suppress_auto_nav_ui()
+        except Exception:
+            suppress_ui = bool(suppress_ui)
         try:
             if index is not None and int(index) != int(getattr(pm, 'current_index', -1)):
                 self._maybe_apply_episode_skip_penalty()
@@ -5759,14 +7110,28 @@ class MainWindow(QMainWindow):
                     path = item['path']
                     self.video_stack.setCurrentIndex(0)
                     try:
-                        if not self.isFullScreen():
+                        if (not suppress_ui) and (not self.isFullScreen()):
                             self._show_episode_overlay(auto_hide_seconds=4.0)
                     except Exception:
                         pass
-                    self.player.play(path)
+                    target = self._resolve_video_play_target(path)
+                    try:
+                        self._last_play_target = str(target or '')
+                        self._last_play_source_path = str(path or '')
+                    except Exception:
+                        self._last_play_target = None
+                        self._last_play_source_path = None
+                    # Skip slow network file existence check - let mpv handle missing files
+                    # In web mode with manifest, we trust the file exists
+                    self.player.play(target)
                     self._played_since_start = True
                     prefix = "[INT]" if itype == 'interstitial' else ""
                     self.setWindowTitle(f"Sleepy Shows - {prefix} {os.path.basename(path)}")
+                    try:
+                        self._log_event('play_start', kind=itype, source_path=str(path or ''), target=str(target or ''), index=int(index))
+                    except Exception:
+                        pass
+                    self._sync_keep_awake()
                     self._resume_sleep_countdown_if_needed()
                     QTimer.singleShot(200, self._resume_sleep_countdown_if_needed)
                 elif itype == 'bump':
@@ -5779,17 +7144,33 @@ class MainWindow(QMainWindow):
                  # Legacy
                  self.video_stack.setCurrentIndex(0)
                  try:
-                     if not self.isFullScreen():
+                     if (not suppress_ui) and (not self.isFullScreen()):
                          self._show_episode_overlay(auto_hide_seconds=4.0)
                  except Exception:
                      pass
-                 self.player.play(item)
+                 target = self._resolve_video_play_target(item)
+                 try:
+                     self._last_play_target = str(target or '')
+                     self._last_play_source_path = str(item or '')
+                 except Exception:
+                     self._last_play_target = None
+                     self._last_play_source_path = None
+                 # IMPORTANT: Avoid synchronous filesystem existence checks here.
+                 # On network mounts these can block UI for many seconds.
+                 # Let mpv attempt the open and report errors via errorOccurred.
+                 self.player.play(target)
                  self._played_since_start = True
                  self.setWindowTitle(f"Sleepy Shows - {os.path.basename(item)}")
+                 try:
+                     self._log_event('play_start', kind='video', source_path=str(item or ''), target=str(target or ''), index=int(index))
+                 except Exception:
+                     pass
+                 self._sync_keep_awake()
                  self._resume_sleep_countdown_if_needed()
                  QTimer.singleShot(200, self._resume_sleep_countdown_if_needed)
         
-        self.show_controls()
+        if not suppress_ui:
+            self.show_controls()
 
     def play_bump(self, bump_item):
         # Bumps are not episodes; always hide the episode title overlay.
@@ -5803,7 +7184,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Ensure bump manager has a fresh list of outro sounds (for future bump creation).
+        # Ensure bump manager eventually has a list of outro sounds.
+        # Do NOT block the UI thread on filesystem probing here.
         try:
             self._ensure_outro_sounds_loaded()
         except Exception:
@@ -5830,7 +7212,13 @@ class MainWindow(QMainWindow):
         self._bump_outro_audio_exclusive = False
         
         if audio:
-            self.player.play(self._maybe_staged_path(audio))
+            target = self._maybe_staged_path(audio)
+            self.player.play(target)
+            try:
+                self._log_event('play_start', kind='bump', source_path=str(audio or ''), target=str(target or ''), index=int(getattr(self.playlist_manager, 'current_index', -1) or -1))
+            except Exception:
+                pass
+            self._sync_keep_awake()
             
         if script:
             self.current_bump_script = script.get('cards', [])
@@ -5966,12 +7354,51 @@ class MainWindow(QMainWindow):
         if already and not force:
             return
 
-        files = self._list_outro_sounds_cached()
-        if files:
+        # Never probe the filesystem synchronously here (called during playback).
+        # If we don't already have a cached list (or force=True), refresh in background.
+        try:
+            cached = getattr(self, '_outro_sounds_cache', None)
+        except Exception:
+            cached = None
+
+        if isinstance(cached, list) and cached and not force:
             try:
-                bump_mgr.set_outro_sounds(files)
+                bump_mgr.set_outro_sounds(list(cached))
             except Exception:
                 pass
+            return
+
+        # Avoid launching multiple refresh threads.
+        if bool(getattr(self, '_outro_sounds_refresh_running', False)):
+            return
+        self._outro_sounds_refresh_running = True
+
+        def _refresh_worker():
+            try:
+                files = self._list_outro_sounds()
+            except Exception:
+                files = []
+
+            def _apply():
+                try:
+                    self._outro_sounds_cache = list(files or [])
+                except Exception:
+                    self._outro_sounds_cache = []
+                try:
+                    bump_mgr.set_outro_sounds(list(self._outro_sounds_cache or []))
+                except Exception:
+                    pass
+                try:
+                    self._outro_sounds_refresh_running = False
+                except Exception:
+                    pass
+
+            try:
+                QTimer.singleShot(0, _apply)
+            except Exception:
+                _apply()
+
+        threading.Thread(target=_refresh_worker, daemon=True).start()
 
     def _invalidate_outro_sounds_cache(self):
         try:
@@ -5992,15 +7419,8 @@ class MainWindow(QMainWindow):
             cached = self._outro_sounds_cache
         except Exception:
             cached = None
-        if isinstance(cached, list) and cached:
-            # If cached paths are no longer valid (e.g. drive remounted), re-scan.
-            try:
-                for p in cached:
-                    if p and not os.path.exists(str(p)):
-                        cached = None
-                        break
-            except Exception:
-                cached = None
+        # IMPORTANT: Do not validate cached paths with os.path.exists() here.
+        # On SMB/NFS this can block the UI thread (bump transitions).
         if isinstance(cached, list) and cached:
             return cached
 
@@ -6329,7 +7749,7 @@ class MainWindow(QMainWindow):
             path = self._pick_random_outro_sound()
 
         path = self._maybe_staged_path(path)
-        if not path or not os.path.exists(path):
+        if not path:
             return
 
         # Outro audio is always a CUT and trumps all other audio:
@@ -6365,6 +7785,7 @@ class MainWindow(QMainWindow):
                         self.fx_player.set_volume(float(prev_vol) * float(atten))
                 except Exception:
                     self._bump_fx_prev_volume = None
+                # Avoid os.path.exists() checks on network paths; let mpv handle missing files.
                 self.fx_player.play(path)
         except Exception:
             self._stop_bump_fx()
@@ -6390,7 +7811,7 @@ class MainWindow(QMainWindow):
 
             path = str(sound.get('path') or '').strip()
             path = self._maybe_staged_path(path)
-            if not path or not os.path.exists(path):
+            if not path:
                 return
 
             mix = str(sound.get('mix') or 'add').strip().lower()
@@ -6471,10 +7892,19 @@ class MainWindow(QMainWindow):
                  record_history = bool(getattr(self, '_pending_next_record_history', True))
                  self._pending_next_index = None
                  self._pending_next_record_history = True
-                 self.play_index(idx, record_history=record_history, bypass_bump_gate=True)
+                 self._advancing_from_bump_end = True
+                 try:
+                     self.play_index(idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=True)
+                 finally:
+                     self._advancing_from_bump_end = False
                  return
 
-             self.play_next()
+             # Bump completion is an automatic transition; keep controls/overlay hidden.
+             self._advancing_from_bump_end = True
+             try:
+                 self.play_next()
+             finally:
+                 self._advancing_from_bump_end = False
              return
 
          # Card ended: stop any card-scoped FX before showing the next card.
@@ -6510,6 +7940,11 @@ class MainWindow(QMainWindow):
 
          ctype = card.get('type', 'text')
          if ctype == 'text':
+             try:
+                 self._bump_safe_vpad_ratio = 0.15
+                 self._apply_bump_safe_padding_now()
+             except Exception:
+                 pass
              _hide_all_bump_widgets()
              self.lbl_bump_text.setTextFormat(Qt.PlainText)
              self.lbl_bump_text.setText(card.get('text', ''))
@@ -6517,22 +7952,54 @@ class MainWindow(QMainWindow):
              if bool(card.get('outro_audio', False)):
                  self._play_outro_audio()
          elif ctype == 'pause':
+             try:
+                 self._bump_safe_vpad_ratio = 0.15
+                 self._apply_bump_safe_padding_now()
+             except Exception:
+                 pass
              _hide_all_bump_widgets()
          elif ctype == 'img_char':
+             try:
+                 # Char-inline images always include text; keep safe padding.
+                 self._bump_safe_vpad_ratio = 0.15
+                 self._apply_bump_safe_padding_now()
+             except Exception:
+                 pass
              _hide_all_bump_widgets()
              img_info = card.get('image') if isinstance(card.get('image'), dict) else {}
              img_path = str(img_info.get('path') or '')
              pm = QPixmap()
              if img_path:
                  try:
-                     with self._bump_prefetch_lock:
-                         qimg = self._bump_prefetch_images.get(img_path)
-                     if qimg is not None:
-                         pm = QPixmap.fromImage(qimg)
-                     else:
-                         pm = QPixmap(img_path)
-                 except Exception:
+                     # Prefer loading pixmap directly on the GUI thread.
+                     # This avoids issues with QImage objects decoded in background threads.
                      pm = QPixmap(img_path)
+                     if pm.isNull():
+                         with self._bump_prefetch_lock:
+                             qimg = self._bump_prefetch_images.get(img_path)
+                         if qimg is None:
+                             # If this bump wasn't prefetched (common for the global bump gate),
+                             # load on-demand so <img> cards can still display.
+                             try:
+                                 qimg_try = QImage(img_path)
+                                 if not qimg_try.isNull():
+                                     with self._bump_prefetch_lock:
+                                         self._bump_prefetch_images[img_path] = qimg_try
+                                     qimg = qimg_try
+                             except Exception:
+                                 qimg = None
+                         if qimg is not None:
+                             # QImage objects can be created in a background thread during prefetch.
+                             # Make a deep copy before converting to QPixmap on the GUI thread.
+                             try:
+                                 qimg_use = qimg.copy()
+                             except Exception:
+                                 qimg_use = qimg
+                             pm = QPixmap.fromImage(qimg_use)
+                         else:
+                             pm = QPixmap()
+                 except Exception:
+                     pm = QPixmap()
              if pm.isNull():
                  try:
                      print(f"DEBUG: Bump image failed to load (img_char): {img_path} exists={os.path.exists(img_path) if img_path else False}")
@@ -6551,7 +8018,11 @@ class MainWindow(QMainWindow):
                  before = before.replace('\n', '<br>')
                  after = after.replace('\n', '<br>')
                  font_px = max(1, int(self.lbl_bump_text.fontMetrics().height()))
-                 img_html = f'<img src="{html.escape(img_path)}" style="height:{font_px}px;" />'
+                 try:
+                     img_url = QUrl.fromLocalFile(img_path).toString()
+                 except Exception:
+                     img_url = str(img_path)
+                 img_html = f'<img src="{html.escape(img_url)}" style="height:{font_px}px;" />'
                  html_body = f'<div align="center">{before}{img_html}{after}</div>'
                  self.lbl_bump_text.setTextFormat(Qt.RichText)
                  self.lbl_bump_text.setText(html_body)
@@ -6563,14 +8034,35 @@ class MainWindow(QMainWindow):
              pm = QPixmap()
              if img_path:
                  try:
-                     with self._bump_prefetch_lock:
-                         qimg = self._bump_prefetch_images.get(img_path)
-                     if qimg is not None:
-                         pm = QPixmap.fromImage(qimg)
-                     else:
-                         pm = QPixmap(img_path)
-                 except Exception:
+                     # Prefer loading pixmap directly on the GUI thread.
+                     # This avoids issues with QImage objects decoded in background threads.
                      pm = QPixmap(img_path)
+                     if pm.isNull():
+                         with self._bump_prefetch_lock:
+                             qimg = self._bump_prefetch_images.get(img_path)
+                         if qimg is None:
+                             # If this bump wasn't prefetched (common for the global bump gate),
+                             # load on-demand so <img> cards can still display.
+                             try:
+                                 qimg_try = QImage(img_path)
+                                 if not qimg_try.isNull():
+                                     with self._bump_prefetch_lock:
+                                         self._bump_prefetch_images[img_path] = qimg_try
+                                     qimg = qimg_try
+                             except Exception:
+                                 qimg = None
+                         if qimg is not None:
+                             # QImage objects can be created in a background thread during prefetch.
+                             # Make a deep copy before converting to QPixmap on the GUI thread.
+                             try:
+                                 qimg_use = qimg.copy()
+                             except Exception:
+                                 qimg_use = qimg
+                             pm = QPixmap.fromImage(qimg_use)
+                         else:
+                             pm = QPixmap()
+                 except Exception:
+                     pm = QPixmap()
              if pm.isNull():
                  try:
                      print(f"DEBUG: Bump image failed to load (img): {img_path} exists={os.path.exists(img_path) if img_path else False} mode={img_info.get('mode')}")
@@ -6589,8 +8081,26 @@ class MainWindow(QMainWindow):
                  except Exception:
                      percent = None
 
-                 before = str(card.get('text_before') or '').strip()
-                 after = str(card.get('text_after') or '').strip()
+                 # Note: do NOT strip here. For <img ... lines> cards, the bump parser
+                 # uses NBSP lines to preserve explicit blank lines (<\s>), and stripping
+                 # would delete them (causing image jumping between cards).
+                 before = str(card.get('text_before') or '')
+                 after = str(card.get('text_after') or '')
+
+                 # Disable the bump safe padding only for image-only cards.
+                 # This allows default <img filename> cards (like bsod.png) to truly
+                 # fill the bump view and max out width/height.
+                 try:
+                     def _blankish(s):
+                         ss = str(s or '')
+                         ss = ss.replace('\u00A0', ' ').strip()
+                         return ss == ''
+
+                     is_image_only = (mode == 'default') and _blankish(before) and _blankish(after)
+                     self._bump_safe_vpad_ratio = 0.0 if is_image_only else 0.15
+                     self._apply_bump_safe_padding_now()
+                 except Exception:
+                     pass
 
                  # If "lines" mode, reserve space for the explicit number of text lines.
                  if mode == 'lines':
@@ -6599,14 +8109,16 @@ class MainWindow(QMainWindow):
                      top_lines = int(card.get('before_lines', 0) or 0)
                      bot_lines = int(card.get('after_lines', 0) or 0)
 
-                     if before:
+                     # Always reserve the computed height, even if the text is visually blank.
+                     # This keeps the image stable when spacer lines (<\s>) are used.
+                     if top_lines > 0:
                          self.lbl_bump_text_top.setTextFormat(Qt.PlainText)
-                         self.lbl_bump_text_top.setText(before)
+                         self.lbl_bump_text_top.setText(before if before else '\u00A0')
                          self.lbl_bump_text_top.setFixedHeight(max(0, top_lines * line_h))
                          self.lbl_bump_text_top.show()
-                     if after:
+                     if bot_lines > 0:
                          self.lbl_bump_text_bottom.setTextFormat(Qt.PlainText)
-                         self.lbl_bump_text_bottom.setText(after)
+                         self.lbl_bump_text_bottom.setText(after if after else '\u00A0')
                          self.lbl_bump_text_bottom.setFixedHeight(max(0, bot_lines * line_h))
                          self.lbl_bump_text_bottom.show()
                  else:
@@ -6642,6 +8154,11 @@ class MainWindow(QMainWindow):
                 self.player.stop()
             except Exception:
                 pass
+            try:
+                self._set_stop_reason('stop_bump_playback')
+            except Exception:
+                pass
+            self._sync_keep_awake()
 
         # Stop any active FX and restore bump music mute.
         self._stop_bump_fx()
@@ -6701,6 +8218,10 @@ class MainWindow(QMainWindow):
             else:
                 self.play_index(self.playlist_manager.current_index)
         else:
+            try:
+                self._user_pause_toggle = True
+            except Exception:
+                pass
             self.player.toggle_pause()
 
     def _maybe_apply_episode_skip_penalty(self):
@@ -6789,11 +8310,22 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.player.stop()
+        try:
+            self._set_stop_reason('stop_playback')
+        except Exception:
+            pass
         self.show_controls()
         self._pause_sleep_countdown()
+        self._sync_keep_awake()
 
     def play_next(self):
         pm = self.playlist_manager
+
+        suppress_ui = False
+        try:
+            suppress_ui = self._should_suppress_auto_nav_ui()
+        except Exception:
+            suppress_ui = False
 
         # Manual forward navigation mid-episode counts as a skip/cut-off.
         try:
@@ -6808,7 +8340,8 @@ class MainWindow(QMainWindow):
             self._pending_next_index = None
             self._pending_next_record_history = True
             self.stop_bump_playback()
-            self.play_index(idx, record_history=record_history, bypass_bump_gate=True)
+            # User explicitly skipped the bump; do not suppress UI.
+            self.play_index(idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=False)
             return
 
         next_idx = -1
@@ -6830,6 +8363,10 @@ class MainWindow(QMainWindow):
             record_history = True
 
         if next_idx == -1:
+            try:
+                self._set_stop_reason('end_of_playlist')
+            except Exception:
+                pass
             self.stop_playback()
             return
 
@@ -6837,7 +8374,7 @@ class MainWindow(QMainWindow):
         try:
             next_item = pm.current_playlist[next_idx]
             if isinstance(next_item, dict) and next_item.get('type') == 'bump':
-                self.play_index(next_idx, record_history=record_history, bypass_bump_gate=True)
+                self.play_index(next_idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=bool(suppress_ui))
                 return
         except Exception:
             pass
@@ -6857,7 +8394,7 @@ class MainWindow(QMainWindow):
                 self.play_bump(bump_item)
                 return
 
-        self.play_index(next_idx, record_history=record_history)
+        self.play_index(next_idx, record_history=record_history, suppress_ui=bool(suppress_ui))
 
     def play_previous(self):
         # 1) First press goes to start of current episode if we're not near the beginning.
@@ -6897,6 +8434,11 @@ class MainWindow(QMainWindow):
             pass
 
         # Auto advance
+        try:
+            self._set_stop_reason('mpv_eof')
+        except Exception:
+            pass
+        self._sync_keep_awake()
         self._advancing_from_eof = True
         try:
             self.play_next()
@@ -6905,9 +8447,92 @@ class MainWindow(QMainWindow):
 
     def on_player_error(self, msg):
         print(f"Player Error: {msg}")
+
+        try:
+            self._set_stop_reason('player_error', message=str(msg or ''))
+        except Exception:
+            pass
+        self._sync_keep_awake()
+
+        # In packaged builds, stdout/stderr isn't visible. Show a helpful, non-spammy
+        # dialog when playback fails so users understand what's wrong.
+        try:
+            # Only show one dialog per unique target per run.
+            target = str(getattr(self, '_last_play_target', '') or '').strip()
+            if not target:
+                return
+
+            last_shown = getattr(self, '_player_error_last_dialog_target', None)
+            if last_shown == target:
+                return
+            self._player_error_last_dialog_target = target
+
+            mode = 'portable'
+            try:
+                mode = str(getattr(self, 'playback_mode', 'portable') or 'portable').strip().lower()
+            except Exception:
+                mode = 'portable'
+
+            # Provide a specific hint when it looks like the user is trying to play from
+            # a configured network mount root (common: /mnt/shows) but it's not mounted.
+            wfr = ''
+            try:
+                wfr = str(getattr(self, 'web_files_root', '') or '').strip()
+            except Exception:
+                wfr = ''
+
+            hint = ''
+            try:
+                if wfr and (target == wfr or target.startswith(wfr.rstrip('/\\') + os.sep)):
+                    hint = (
+                        "\n\nIt looks like your library is on a mounted path that isn't available right now.\n"
+                        f"Web Files Root (from Settings): {wfr}\n\n"
+                        "If you're using a network share, make sure it is mounted in your OS, or switch to Settings → Web mode so the app can warn you when the mount is missing."
+                    )
+            except Exception:
+                hint = ''
+
+            src_path = str(getattr(self, '_last_play_source_path', '') or '').strip()
+            shown_path = src_path if src_path else target
+
+            title = 'Playback Error'
+            body = (
+                "Sleepy Shows couldn't open the media file.\n\n"
+                f"Path: {shown_path}\n\n"
+                "Common causes:\n"
+                "- The drive/share isn't mounted\n"
+                "- The file was moved/renamed\n"
+                "- Permissions prevent reading the file"
+                f"{hint}"
+            )
+
+            # Don't block playback flow with repeated popups.
+            QMessageBox.warning(self, title, body)
+        except Exception:
+            return
         
     def on_player_paused(self, paused):
-        self.show_controls()
+        suppress_ui = False
+        try:
+            suppress_ui = self._should_suppress_auto_nav_ui()
+        except Exception:
+            suppress_ui = False
+
+        # Don't force controls visible on unpause. mpv often emits pause=False when a new
+        # file starts; showing controls there causes the "pop".
+        if bool(paused):
+            self.show_controls()
+        else:
+            try:
+                if (not suppress_ui) and bool(getattr(self, '_user_pause_toggle', False)):
+                    self.show_controls()
+            except Exception:
+                pass
+
+        try:
+            self._user_pause_toggle = False
+        except Exception:
+            pass
 
         if not paused:
             self._played_since_start = True
@@ -6917,6 +8542,33 @@ class MainWindow(QMainWindow):
             self._pause_sleep_countdown()
         else:
             self._resume_sleep_countdown_if_needed()
+
+        try:
+            self._log_event('paused', paused=bool(paused))
+        except Exception:
+            pass
+        self._sync_keep_awake()
+
+    def on_mpv_end_file_reason(self, reason: str):
+        try:
+            r = str(reason or '').strip()
+        except Exception:
+            r = ''
+
+        try:
+            target = str(getattr(self, '_last_play_target', '') or '')
+        except Exception:
+            target = ''
+
+        self._log_event('mpv_end_file', reason=r, target=target)
+
+        # If this wasn't EOF, capture it as a stop reason for overnight debugging.
+        try:
+            if r and r.lower() != 'eof':
+                self._set_stop_reason(f'mpv_end_file:{r}')
+        except Exception:
+            pass
+        self._sync_keep_awake()
 
         # Episode title overlay behavior:
         # - Windowed: shown briefly on episode start (see play_index)
@@ -7067,11 +8719,30 @@ class MainWindow(QMainWindow):
         self.play_mode_widget.lbl_current_time.setText(f"{fmt(current)} / {fmt(total)}")
 
     def on_sleep_timer(self):
+        try:
+            self._set_stop_reason('sleep_timer_fired')
+        except Exception:
+            pass
         self.stop_playback()
         self.set_mode(0) # Go to Welcome
 
         # Ensure internal state + UI reflects Off after timer fires.
         self.cancel_sleep_timer()
+
+    def closeEvent(self, event):
+        try:
+            self._log_event('app_close')
+        except Exception:
+            pass
+        try:
+            self._keep_awake.disable()
+        except Exception:
+            pass
+        try:
+            self._keep_awake_active = False
+        except Exception:
+            pass
+        return super().closeEvent(event)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ class MpvPlayer(QWidget):
     durationChanged = Signal(float)
     playbackFinished = Signal()
     errorOccurred = Signal(str)
+    endFileReason = Signal(str)
     playbackPaused = Signal(bool)
     mouseMoved = Signal()
     fullscreenRequested = Signal()
@@ -37,6 +38,13 @@ class MpvPlayer(QWidget):
     @Slot()
     def _emit_finished(self):
         self.playbackFinished.emit()
+
+    @Slot(str)
+    def _emit_end_file_reason(self, reason: str):
+        try:
+            self.endFileReason.emit(str(reason or ''))
+        except Exception:
+            return
 
     @Slot()
     def _emit_mouse_moved(self):
@@ -138,12 +146,27 @@ class MpvPlayer(QWidget):
 
             @self.mpv.event_callback('end-file')
             def end_file_callback(event):
-                # mpv reports end-of-file as reason "eof" (sometimes surfaces as 0 in older bindings).
                 try:
-                    reason = None
                     props = event.get('event_props', {}) if isinstance(event, dict) else {}
                     reason = props.get('reason')
-                    if reason in (0, 'eof', 'EOF'):
+                    # Normalize to a readable string.
+                    if isinstance(reason, int):
+                        # Older bindings sometimes surface eof as 0.
+                        reason_str = 'eof' if reason == 0 else str(reason)
+                    else:
+                        reason_str = str(reason or '')
+
+                    try:
+                        QMetaObject.invokeMethod(
+                            self,
+                            "_emit_end_file_reason",
+                            Qt.QueuedConnection,
+                            Q_ARG(str, reason_str),
+                        )
+                    except Exception:
+                        pass
+
+                    if reason_str.lower() == 'eof':
                         try:
                             QMetaObject.invokeMethod(self, "_emit_finished", Qt.QueuedConnection)
                         except Exception:

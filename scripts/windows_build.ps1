@@ -106,7 +106,7 @@ if (-not (Test-Path $venvPython)) {
 
 # 3) Build app (folder-based dist)
 # Note: on Windows, PyInstaller --add-data uses a semicolon: source;dest
-& $venvPython -m PyInstaller --name "SleepyShows" --windowed --noconsole --add-data "assets;assets" src/main.py
+& $venvPython -m PyInstaller --name "SleepyShows" --windowed --noconsole --icon "assets/sleepy-ico.ico" --add-data "assets;assets" src/main.py
 
 # 4) Extract MPV + copy libmpv-2.dll into dist
 $extractDir = Join-Path $env:TEMP "sleepyshows-mpv"
