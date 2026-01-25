@@ -7,7 +7,7 @@ A robust video player with sleep timer functionality, episode browser, and playl
 - Play/Pause/Previous/Next controls
 - Episode browser by season
 - Playlist creation (source folders, ordering, culling, shuffling)
-- Interstitial media injection
+- Interlude media injection
 - Portable mode (local files) or Web mode (LAN mounts)
 
 ## Usage

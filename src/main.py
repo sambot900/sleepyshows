@@ -21,16 +21,19 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider,
                                QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
                                QAbstractButton)
-from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop
+from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop, QFileSystemWatcher
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor, QGuiApplication
 from PySide6.QtCore import QUrl
 
 from player_backend import MpvPlayer, MpvAudioPlayer
+from PySide6.QtCore import QAbstractNativeEventFilter
 from keep_awake import KeepAwakeInhibitor
 from playlist_manager import PlaylistManager, VIDEO_EXTENSIONS, natural_sort_key
 from ui_styles import DARK_THEME
 
 from services import playlist_io
+
+
 from services import web_mode_paths
 
 
@@ -38,6 +41,55 @@ THEME_COLOR = "#0e1a77"
 
 # White strokes are intentionally transparent so the global background gradient shows through.
 WHITE_STROKE_ALPHA = 0
+
+
+class _WinFullscreenKeyFilter(QAbstractNativeEventFilter):
+    """Windows-only key hook to toggle fullscreen on F.
+
+    Qt key handling can miss key events when focus is inside a native child window
+    (mpv embedding). A native event filter sees the Win32 message first.
+    """
+
+    WM_KEYDOWN = 0x0100
+    WM_SYSKEYDOWN = 0x0104
+    VK_F = 0x46  # 'F'
+
+    def __init__(self, main_window):
+        super().__init__()
+        self._mw = main_window
+
+    def nativeEventFilter(self, eventType, message):
+        try:
+            if not sys.platform.startswith('win'):
+                return False, 0
+            if eventType not in ('windows_generic_MSG', 'windows_dispatcher_MSG'):
+                return False, 0
+
+            from ctypes import wintypes
+
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message not in (self.WM_KEYDOWN, self.WM_SYSKEYDOWN):
+                return False, 0
+
+            if int(msg.wParam) != self.VK_F:
+                return False, 0
+
+            # Ignore auto-repeat (bit 30 set means key was already down).
+            try:
+                if int(msg.lParam) & (1 << 30):
+                    return True, 0
+            except Exception:
+                pass
+
+            try:
+                QTimer.singleShot(0, self._mw.toggle_fullscreen)
+            except Exception:
+                pass
+
+            # Consume the key so mpv/other widgets don't also process it.
+            return True, 0
+        except Exception:
+            return False, 0
 
 
 class BumpImageView(QWidget):
@@ -1996,6 +2048,50 @@ def auto_detect_tv_vibe_audio_fx_dir_web(mount_roots_override):
     return None
 
 
+def auto_detect_tv_vibe_interstitials_dir_web(mount_roots_override):
+    """Best-effort detection for TV Vibe interludes in Web mode.
+
+    Expected layout: <mount_root>/Sleepy Shows Data/TV Vibe/interludes
+    (Falls back to legacy <mount_root>/.../TV Vibe/interstitials.)
+    """
+    roots = _normalize_mount_roots_override(mount_roots_override)
+    if not roots:
+        return None
+    for mount_root in roots:
+        try:
+            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+            roots_to_probe = []
+            if os.path.isdir(data_root):
+                roots_to_probe.append(data_root)
+            roots_to_probe.append(mount_root)
+
+            for root in roots_to_probe:
+                # New naming
+                direct = os.path.join(root, 'TV Vibe', 'interludes')
+                if os.path.isdir(direct):
+                    return direct
+
+                # Legacy naming
+                direct = os.path.join(root, 'TV Vibe', 'interstitials')
+                if os.path.isdir(direct):
+                    return direct
+
+                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+                if not tv_vibe_dir:
+                    continue
+
+                inter_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'interludes')
+                if inter_dir and os.path.isdir(inter_dir):
+                    return inter_dir
+
+                inter_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'interstitials')
+                if inter_dir and os.path.isdir(inter_dir):
+                    return inter_dir
+        except Exception:
+            continue
+    return None
+
+
 def auto_detect_tv_vibe_music_dir(volume_label='T7'):
     """Best-effort detection for bump music on the same drive as episodes.
 
@@ -2115,6 +2211,61 @@ def auto_detect_tv_vibe_audio_fx_dir(volume_label='T7'):
             audio_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'audio')
             if audio_dir and os.path.isdir(audio_dir):
                 return audio_dir
+
+        return None
+
+    for mount_root in _iter_mount_roots_for_label(volume_label) or []:
+        found = probe_mount(mount_root)
+        if found:
+            return found
+
+    for mount_root in _iter_mount_roots_fallback() or []:
+        found = probe_mount(mount_root)
+        if found:
+            return found
+
+    return None
+
+
+def auto_detect_tv_vibe_interstitials_dir(volume_label='T7'):
+    """Best-effort detection for TV Vibe interludes on the same drive as episodes.
+
+    Expected layout: <mount_root>/Sleepy Shows Data/TV Vibe/interludes
+    (Falls back to legacy <mount_root>/.../TV Vibe/interstitials.)
+    Returns the interludes folder path if found, else None.
+    """
+    def probe_mount(mount_root):
+        if not mount_root or not os.path.isdir(mount_root):
+            return None
+
+        data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+        roots_to_probe = []
+        if os.path.isdir(data_root):
+            roots_to_probe.append(data_root)
+        roots_to_probe.append(mount_root)
+
+        for root in roots_to_probe:
+            # New naming
+            direct = os.path.join(root, 'TV Vibe', 'interludes')
+            if os.path.isdir(direct):
+                return direct
+
+            # Legacy naming
+            direct = os.path.join(root, 'TV Vibe', 'interstitials')
+            if os.path.isdir(direct):
+                return direct
+
+            tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+            if not tv_vibe_dir:
+                continue
+
+            inter_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'interludes')
+            if inter_dir and os.path.isdir(inter_dir):
+                return inter_dir
+
+            inter_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'interstitials')
+            if inter_dir and os.path.isdir(inter_dir):
+                return inter_dir
 
         return None
 
@@ -2495,6 +2646,7 @@ class AutoConfigWorker(QObject):
             'tv_vibe_music_dir': None,
             'tv_vibe_images_dir': None,
             'tv_vibe_audio_fx_dir': None,
+            'tv_vibe_interstitials_dir': None,
         }
 
         try:
@@ -2505,12 +2657,14 @@ class AutoConfigWorker(QObject):
                 result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir_web(roots)
                 result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir_web(roots)
                 result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir_web(roots)
+                result['tv_vibe_interstitials_dir'] = auto_detect_tv_vibe_interstitials_dir_web(roots)
             else:
                 show_folders = auto_detect_show_folders(volume_label=self.volume_label)
                 result['tv_vibe_scripts_dir'] = auto_detect_tv_vibe_scripts_dir(volume_label=self.volume_label)
                 result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir(volume_label=self.volume_label)
                 result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir(volume_label=self.volume_label)
                 result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir(volume_label=self.volume_label)
+                result['tv_vibe_interstitials_dir'] = auto_detect_tv_vibe_interstitials_dir(volume_label=self.volume_label)
             sources = []
             for key in ("King of the Hill", "Bob's Burgers", "Squidbillies", "Aqua Teen Hunger Force"):
                 p = show_folders.get(key)
@@ -3248,13 +3402,13 @@ class EditModeWidget(QWidget):
         self.btn_shuffle_mode.clicked.connect(self.cycle_shuffle_mode)
         h_gen.addWidget(self.btn_shuffle_mode)
         
-        self.chk_interstitials = QPushButton("Interstitials: OFF")
+        self.chk_interstitials = QPushButton("Interludes: OFF")
         self.chk_interstitials.setCheckable(True)
-        self.chk_interstitials.toggled.connect(lambda c: self.chk_interstitials.setText(f"Interstitials: {'ON' if c else 'OFF'}"))
+        self.chk_interstitials.toggled.connect(lambda c: self.chk_interstitials.setText(f"Interludes: {'ON' if c else 'OFF'}"))
         h_gen.addWidget(self.chk_interstitials)
         gen_controls.addLayout(h_gen)
         
-        self.btn_set_interstitial = QPushButton("Set Interstitial Folder")
+        self.btn_set_interstitial = QPushButton("Set Interludes Folder")
         self.btn_set_interstitial.clicked.connect(self.main_window.choose_interstitial_folder)
         gen_controls.addWidget(self.btn_set_interstitial)
 
@@ -3593,7 +3747,7 @@ class EditModeWidget(QWidget):
                     self.playlist_list.addItem(f"{i+1}. {name}")
                 elif itype == 'interstitial':
                     name = os.path.basename(item['path'])
-                    self.playlist_list.addItem(f"{i+1}. [INT] {name}")
+                    self.playlist_list.addItem(f"{i+1}. [IL] {name}")
                 elif itype == 'bump':
                    self.playlist_list.addItem(f"{i+1}. [BUMP] {os.path.basename(item.get('audio', 'Unknown'))}")
             else:
@@ -3817,6 +3971,7 @@ class PlayModeWidget(QWidget):
         # Controls Group
         self.controls_widget = QWidget()
         self.controls_widget.setObjectName("controls_widget")
+        # Single-row controls bar; we dynamically shrink controls on resize.
         self.controls_widget.setFixedHeight(180)
         self.controls_widget.setStyleSheet("background-color: #1a1a1a;")
         controls_layout = QVBoxLayout(self.controls_widget)
@@ -3861,13 +4016,34 @@ class PlayModeWidget(QWidget):
         
         controls_layout.addLayout(seek_layout)
         
-        # Buttons Row
+        # Buttons Row (single line, responsive)
+        # Use explicit groups (left / playback / right) to preserve visual grouping.
         btns_layout = QHBoxLayout()
         btns_layout.setContentsMargins(10, 0, 10, 0)
-        
+        btns_layout.setSpacing(12)
+        self._controls_btns_layout = btns_layout
+
+        self._controls_group_left = QWidget()
+        left_layout = QHBoxLayout(self._controls_group_left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+        self._controls_left_layout = left_layout
+
+        self._controls_group_playback = QWidget()
+        playback_layout = QHBoxLayout(self._controls_group_playback)
+        playback_layout.setContentsMargins(0, 0, 0, 0)
+        playback_layout.setSpacing(8)
+        self._controls_playback_layout = playback_layout
+
+        self._controls_group_right = QWidget()
+        right_layout = QHBoxLayout(self._controls_group_right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+        self._controls_right_layout = right_layout
+
         button_height = 80
         font_style = "font-size: 14pt; font-weight: bold;"
-        
+
         # --- Left Group: Menu ---
         self.btn_menu = TriStrokeButton()
         self.btn_menu.setFixedSize(120, button_height)
@@ -3886,16 +4062,14 @@ class PlayModeWidget(QWidget):
         self.btn_menu.setIcon(menu_icon)
         self.btn_menu.setIconSize(QSize(32, 32))
         self.btn_menu.clicked.connect(self.toggle_sidebar)
-        btns_layout.addWidget(self.btn_menu)
-        
-        btns_layout.addStretch(1) # Stretch to center the middle group
+        left_layout.addWidget(self.btn_menu)
         
         # --- Center Group: Playback Controls ---
         self.btn_seek_back = TriStrokeButton("-20s")
         self.btn_seek_back.setFixedSize(100, button_height)
         self.btn_seek_back.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
         self.btn_seek_back.clicked.connect(lambda: self.main_window.seek_relative(-20))
-        btns_layout.addWidget(self.btn_seek_back)
+        playback_layout.addWidget(self.btn_seek_back)
         
         self.btn_prev = TriStrokeButton("<<")
         self.btn_prev.setText("")
@@ -3904,7 +4078,7 @@ class PlayModeWidget(QWidget):
         self.btn_prev.setFixedSize(100, button_height)
         self.btn_prev.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
         self.btn_prev.clicked.connect(self.main_window.play_previous)
-        btns_layout.addWidget(self.btn_prev)
+        playback_layout.addWidget(self.btn_prev)
         
         # Static play/pause icon button (doesn't change dynamically)
         self.btn_play = TriStrokeButton()
@@ -3913,7 +4087,7 @@ class PlayModeWidget(QWidget):
         self.btn_play.setFixedSize(140, button_height)
         self.btn_play.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
         self.btn_play.clicked.connect(self.main_window.toggle_play)
-        btns_layout.addWidget(self.btn_play)
+        playback_layout.addWidget(self.btn_play)
         
         self.btn_next = TriStrokeButton(">>")
         self.btn_next.setText("")
@@ -3922,17 +4096,13 @@ class PlayModeWidget(QWidget):
         self.btn_next.setFixedSize(100, button_height)
         self.btn_next.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
         self.btn_next.clicked.connect(self.main_window.play_next)
-        btns_layout.addWidget(self.btn_next)
+        playback_layout.addWidget(self.btn_next)
         
         self.btn_seek_fwd = TriStrokeButton("+20s")
         self.btn_seek_fwd.setFixedSize(100, button_height)
         self.btn_seek_fwd.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
         self.btn_seek_fwd.clicked.connect(lambda: self.main_window.seek_relative(20))
-        btns_layout.addWidget(self.btn_seek_fwd)
-        
-        btns_layout.addStretch(1) # Stretch to push right group to end
-        
-        # --- Right Group: Shuffle, Vol, Fullscreen ---
+        playback_layout.addWidget(self.btn_seek_fwd)
 
         # Sleep Timer Button (shows remaining minutes)
         self.btn_sleep_timer = TriStrokeButton("SLEEP\nOFF")
@@ -3940,9 +4110,7 @@ class PlayModeWidget(QWidget):
         self.btn_sleep_timer.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
         # Single-press cycle (menu dropdown is still available from the top menu).
         self.btn_sleep_timer.clicked.connect(self.main_window.cycle_sleep_timer_quick)
-        btns_layout.addWidget(self.btn_sleep_timer)
-
-        btns_layout.addSpacing(10)
+        right_layout.addWidget(self.btn_sleep_timer)
         
         # Shuffle Button (Icon with text)
         self.btn_shuffle = TriStrokeToolButton()
@@ -3963,13 +4131,11 @@ class PlayModeWidget(QWidget):
         self.btn_shuffle.setText("OFF")
         self.btn_shuffle.setStyleSheet("QToolButton { font-size: 10pt; font-weight: bold; color: white; background: transparent; border: none; }")
         self.btn_shuffle.clicked.connect(self.main_window.cycle_shuffle_mode)
-        btns_layout.addWidget(self.btn_shuffle)
-        
-        btns_layout.addSpacing(10)
+        right_layout.addWidget(self.btn_shuffle)
         
         self.lbl_volume = QLabel("Vol:")
         self.lbl_volume.setStyleSheet("font-size: 14pt; color: white;")
-        btns_layout.addWidget(self.lbl_volume)
+        right_layout.addWidget(self.lbl_volume)
         
         self.slider_vol = QSlider(Qt.Horizontal)
         self.slider_vol.setRange(0, 100)
@@ -4002,7 +4168,7 @@ class PlayModeWidget(QWidget):
             }}
         """)
         self.slider_vol.valueChanged.connect(self.main_window.set_volume)
-        btns_layout.addWidget(self.slider_vol)
+        right_layout.addWidget(self.slider_vol)
 
         self.btn_fullscreen = TriStrokeButton()
         enter_fs_icon = QIcon.fromTheme(
@@ -4018,9 +4184,24 @@ class PlayModeWidget(QWidget):
         self.btn_fullscreen.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
         self.btn_fullscreen.setCheckable(True)
         self.btn_fullscreen.clicked.connect(self.main_window.toggle_fullscreen)
-        btns_layout.addWidget(self.btn_fullscreen)
-        
+        right_layout.addWidget(self.btn_fullscreen)
+
+        # Assemble groups into the row.
+        # Keep menu left, utility controls right, and center the primary playback cluster.
+        btns_layout.addWidget(self._controls_group_left)
+        btns_layout.addStretch(1)
+        btns_layout.addWidget(self._controls_group_playback)
+        btns_layout.addStretch(1)
+        btns_layout.addWidget(self._controls_group_right)
+
         controls_layout.addLayout(btns_layout)
+
+        # Apply an initial size mode (and keep it updated via resizeEvent).
+        self._controls_size_mode = None
+        try:
+            self._update_controls_size_mode(force=True)
+        except Exception:
+            pass
         
         # Assemble Video Area
         self.video_layout.addWidget(self.video_placeholder, 1) # This will be replaced
@@ -4032,6 +4213,291 @@ class PlayModeWidget(QWidget):
         self.sidebar_container.setVisible(True)
         self.refresh_playlists()
 
+    def resizeEvent(self, event):
+        try:
+            self._update_controls_size_mode(force=False)
+        except Exception:
+            pass
+        return super().resizeEvent(event)
+
+    def _controls_size_mode_for_width(self, w: int) -> str:
+        try:
+            w = int(w)
+        except Exception:
+            w = 0
+        if w and w < 760:
+            return 'xs'
+        if w and w < 980:
+            return 'sm'
+        return 'md'
+
+    def _update_controls_size_mode(self, *, force: bool = False):
+        # Use the actual controls widget width (it excludes the sidebar).
+        try:
+            w = int(self.controls_widget.width())
+        except Exception:
+            w = int(self.width())
+
+        mode = self._controls_size_mode_for_width(w)
+        # Even if the breakpoint "mode" doesn't change, we still need to recompute widths
+        # on every resize (fullscreen toggles can change width without crossing breakpoints).
+        self._controls_size_mode = mode
+
+        # Defaults (we will shrink-to-fit deterministically).
+        if mode == 'md':
+            button_h = 80
+            seek_h = 60
+            icon = 32
+            shuffle_style = Qt.ToolButtonTextUnderIcon
+            show_vol_label = True
+            outer_spacing = 12
+            playback_spacing = 8
+            right_spacing = 10
+        elif mode == 'sm':
+            button_h = 72
+            seek_h = 58
+            icon = 28
+            shuffle_style = Qt.ToolButtonTextUnderIcon
+            show_vol_label = True
+            outer_spacing = 10
+            playback_spacing = 6
+            right_spacing = 8
+        else:
+            button_h = 64
+            seek_h = 54
+            icon = 24
+            shuffle_style = Qt.ToolButtonIconOnly
+            # Hide low-priority label to keep everything on one line.
+            show_vol_label = False
+            outer_spacing = 8
+            playback_spacing = 4
+            right_spacing = 6
+
+        # Update layout spacings to match mode.
+        try:
+            if getattr(self, '_controls_btns_layout', None) is not None:
+                self._controls_btns_layout.setSpacing(int(outer_spacing))
+            if getattr(self, '_controls_playback_layout', None) is not None:
+                self._controls_playback_layout.setSpacing(int(playback_spacing))
+            if getattr(self, '_controls_left_layout', None) is not None:
+                self._controls_left_layout.setSpacing(int(playback_spacing))
+            if getattr(self, '_controls_right_layout', None) is not None:
+                self._controls_right_layout.setSpacing(int(right_spacing))
+        except Exception:
+            pass
+
+        self.controls_widget.setFixedHeight(180)
+
+        try:
+            self.btn_menu.setIconSize(QSize(icon, icon))
+            self.btn_prev.setIconSize(QSize(icon, icon))
+            self.btn_next.setIconSize(QSize(icon, icon))
+            self.btn_fullscreen.setIconSize(QSize(icon, icon))
+            self.btn_shuffle.setIconSize(QSize(icon, icon))
+        except Exception:
+            pass
+
+        try:
+            self.btn_shuffle.setToolButtonStyle(shuffle_style)
+        except Exception:
+            pass
+
+        try:
+            self.lbl_volume.setVisible(bool(show_vol_label))
+        except Exception:
+            pass
+
+        # Width plan: set a mode-specific base width, then shrink-to-fit in priority order.
+        layout = getattr(self, '_controls_btns_layout', None)
+        if layout is None:
+            return
+
+        try:
+            m = layout.contentsMargins()
+            avail = max(0, int(self.controls_widget.width()) - int(m.left()) - int(m.right()))
+        except Exception:
+            avail = int(self.controls_widget.width())
+
+        def _set_w(widget, width, height=None):
+            if widget is None:
+                return
+            try:
+                if height is not None:
+                    widget.setFixedHeight(int(height))
+            except Exception:
+                pass
+            try:
+                widget.setFixedWidth(int(width))
+                return
+            except Exception:
+                pass
+            try:
+                widget.setMinimumWidth(int(width))
+                widget.setMaximumWidth(int(width))
+            except Exception:
+                pass
+
+        def _cur_w(widget) -> int:
+            try:
+                w = int(widget.fixedWidth())
+                if w > 0:
+                    return w
+            except Exception:
+                pass
+            try:
+                return int(widget.width())
+            except Exception:
+                return 0
+
+        def _visible(widget) -> bool:
+            try:
+                return bool(widget is not None and widget.isVisible())
+            except Exception:
+                return bool(widget is not None)
+
+        # Base widths (match the "look" per mode).
+        if mode == 'md':
+            base = {
+                'menu': 120,
+                'seek': 100,
+                'prevnext': 100,
+                'play': 140,
+                'sleep': 120,
+                'shuffle': 80,
+                'vol_label': 44,
+                'vol': 150,
+                'fs': button_h,
+            }
+        elif mode == 'sm':
+            base = {
+                'menu': 104,
+                'seek': 92,
+                'prevnext': 88,
+                'play': 128,
+                'sleep': 112,
+                'shuffle': 72,
+                'vol_label': 40,
+                'vol': 130,
+                'fs': button_h,
+            }
+        else:
+            base = {
+                'menu': 64,
+                'seek': 68,
+                'prevnext': 64,
+                'play': 96,
+                'sleep': 86,
+                'shuffle': 58,
+                'vol_label': 0,
+                'vol': 96,
+                'fs': button_h,
+            }
+
+        mins = {
+            'menu': 56,
+            'seek': 54,
+            'prevnext': 54,
+            'play': 70,
+            'sleep': 66,
+            'shuffle': 52,
+            'vol_label': 30,
+            'vol': 70,
+            'fs': 54,
+        }
+
+        # Apply base sizes.
+        _set_w(self.btn_menu, base['menu'], button_h)
+        _set_w(self.btn_seek_back, base['seek'], button_h)
+        _set_w(self.btn_prev, base['prevnext'], button_h)
+        _set_w(self.btn_play, base['play'], button_h)
+        _set_w(self.btn_next, base['prevnext'], button_h)
+        _set_w(self.btn_seek_fwd, base['seek'], button_h)
+        _set_w(self.btn_sleep_timer, base['sleep'], button_h)
+        _set_w(self.btn_shuffle, base['shuffle'], button_h)
+        if show_vol_label:
+            _set_w(self.lbl_volume, base['vol_label'], button_h)
+        _set_w(self.slider_vol, base['vol'], 50)
+        _set_w(self.btn_fullscreen, base['fs'], button_h)
+
+        # Compute the minimum used width for current fixed widths, including layout spacing.
+        def _group_used(group_layout, widgets_in_group):
+            if group_layout is None:
+                return 0
+            visible = [w for w in widgets_in_group if _visible(w)]
+            if not visible:
+                return 0
+            try:
+                sp = int(group_layout.spacing())
+            except Exception:
+                sp = 0
+            return sum(_cur_w(w) for w in visible) + max(0, (len(visible) - 1) * sp)
+
+        used_left = _group_used(getattr(self, '_controls_left_layout', None), [self.btn_menu])
+        used_playback = _group_used(getattr(self, '_controls_playback_layout', None), [
+            self.btn_seek_back,
+            self.btn_prev,
+            self.btn_play,
+            self.btn_next,
+            self.btn_seek_fwd,
+        ])
+        used_right = _group_used(getattr(self, '_controls_right_layout', None), [
+            self.btn_sleep_timer,
+            self.btn_shuffle,
+            self.lbl_volume if show_vol_label else None,
+            self.slider_vol,
+            self.btn_fullscreen,
+        ])
+
+        # Outer layout items are: left group, stretch, playback group, stretch, right group.
+        try:
+            outer_sp = int(layout.spacing())
+        except Exception:
+            outer_sp = 0
+        outer_space_total = 4 * outer_sp
+        used = int(used_left + used_playback + used_right + outer_space_total)
+
+        overflow = int(used - avail)
+        if overflow > 0:
+            # Shrink lowest-priority / widest items first.
+            shrink_order = [
+                (self.slider_vol, mins['vol']),
+                (self.btn_sleep_timer, mins['sleep']),
+                (self.btn_menu, mins['menu']),
+                (self.btn_shuffle, mins['shuffle']),
+                (self.btn_seek_back, mins['seek']),
+                (self.btn_seek_fwd, mins['seek']),
+                (self.btn_prev, mins['prevnext']),
+                (self.btn_next, mins['prevnext']),
+                (self.btn_play, mins['play']),
+                (self.btn_fullscreen, mins['fs']),
+            ]
+            if show_vol_label:
+                shrink_order.insert(0, (self.lbl_volume, mins['vol_label']))
+
+            for widget, min_w in shrink_order:
+                if overflow <= 0:
+                    break
+                if widget is None:
+                    continue
+                try:
+                    if not widget.isVisible():
+                        continue
+                except Exception:
+                    pass
+
+                cur = _cur_w(widget)
+                floor = int(min_w)
+                if cur <= floor:
+                    continue
+                delta = min(int(overflow), int(cur - floor))
+                _set_w(widget, int(cur - delta))
+                overflow -= int(delta)
+
+        try:
+            self.slider_seek.setFixedHeight(int(seek_h))
+        except Exception:
+            pass
+
     def set_controls_overlay(self, enabled):
         if enabled:
             # Remove from layout, reparent to video stack/container (done by main window mostly, 
@@ -4042,10 +4508,22 @@ class PlayModeWidget(QWidget):
             self.controls_widget.raise_()
              # Colors/Style for overlay?
             self.controls_widget.setStyleSheet("background-color: rgba(26, 26, 26, 200);") # Semi transparent?
+
+            # Overlay mode changes parent/geometry; recalc widths after the event loop settles.
+            try:
+                QTimer.singleShot(0, lambda: self._update_controls_size_mode(force=True))
+            except Exception:
+                pass
         else:
             self.controls_widget.setParent(self.video_area) # Make child of video area again
             self.video_layout.addWidget(self.controls_widget)
             self.controls_widget.setStyleSheet("background-color: #1a1a1a;") # Solid
+
+            # Reinserted into layout; recalc widths after relayout.
+            try:
+                QTimer.singleShot(0, lambda: self._update_controls_size_mode(force=True))
+            except Exception:
+                pass
             
     def toggle_sidebar(self):
         self.sidebar_visible = not self.sidebar_visible
@@ -4237,6 +4715,15 @@ class MainWindow(QMainWindow):
         self.normalize_audio_enabled = bool(self._settings.get('normalize_audio_enabled', False))
         self.bump_images_dir = self._settings.get('bump_images_dir', None)
         self.bump_audio_fx_dir = self._settings.get('bump_audio_fx_dir', None)
+        # Prefer the new key name, but keep backward compatibility.
+        self._interstitials_dir = str(self._settings.get('interlude_folder', self._settings.get('interstitial_folder', '')) or '').strip()
+        # One-time migration: if the legacy key exists, copy it to the new key.
+        try:
+            if (not str(self._settings.get('interlude_folder', '') or '').strip()) and str(self._settings.get('interstitial_folder', '') or '').strip():
+                self._settings['interlude_folder'] = str(self._settings.get('interstitial_folder', '') or '').strip()
+                self._save_user_settings()
+        except Exception:
+            pass
         self.auto_config_volume_label = str(self._settings.get('auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
 
         # Playback topology
@@ -4284,12 +4771,36 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Interstitials folder (commercials). Persisted independently of playlists.
+        self._interstitial_watcher = QFileSystemWatcher(self)
+        try:
+            self._interstitial_watcher.directoryChanged.connect(self._on_interstitials_dir_changed)
+        except Exception:
+            pass
+        try:
+            inter_dir = str(getattr(self, '_interstitials_dir', '') or '').strip()
+        except Exception:
+            inter_dir = ''
+        if inter_dir:
+            try:
+                if self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
+                    inter_dir = self._path_to_web_files_path(str(inter_dir))
+            except Exception:
+                pass
+            try:
+                self._set_interstitials_folder(inter_dir, persist=False)
+            except Exception:
+                pass
+
         # Startup ambient audio
         self._startup_ambient_playing = False
         self._startup_ambient_path = get_asset_path("crickets.mp3")
 
         # Global bumps toggle (controlled from Welcome)
         self.bumps_enabled = False
+
+        # Pending bump used for interstitial-before-bump preroll.
+        self._pending_bump_item = None
         
         # Timers
         self.sleep_timer_default_minutes = 180
@@ -4323,6 +4834,10 @@ class MainWindow(QMainWindow):
         self._space_shortcut = QShortcut(QKeySequence('Space'), self)
         self._space_shortcut.setContext(Qt.ApplicationShortcut)
         self._space_shortcut.activated.connect(self._on_spacebar)
+
+        # Fullscreen toggle uses a Windows native event filter (see _WinFullscreenKeyFilter).
+        # Keep the debounce field used by toggle_fullscreen.
+        self._last_fullscreen_toggle_mono = 0.0
 
         self.bump_timer = QTimer(self)
         self.bump_timer.setSingleShot(True)
@@ -4467,6 +4982,14 @@ class MainWindow(QMainWindow):
             app = QApplication.instance()
             if app is not None:
                 app.installEventFilter(self)
+
+                # Windows: native hook so F fullscreen works even with mpv native focus.
+                try:
+                    if sys.platform.startswith('win'):
+                        self._win_fullscreen_key_filter = _WinFullscreenKeyFilter(self)
+                        app.installNativeEventFilter(self._win_fullscreen_key_filter)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -4484,6 +5007,22 @@ class MainWindow(QMainWindow):
         # Handle fullscreen requests from MPV
         self.player.fullscreenRequested.connect(self.toggle_fullscreen, Qt.QueuedConnection)
         self.player.escapePressed.connect(self.on_escape_pressed, Qt.QueuedConnection)
+
+        # If MPV failed to initialize, its error can occur before signal wiring and be invisible.
+        # Surface it once here so playback failures aren't "silent".
+        try:
+            if getattr(self.player, 'mpv', None) is None:
+                init_err = getattr(self.player, '_init_error', None)
+                if init_err:
+                    QTimer.singleShot(0, lambda: self.on_player_error(str(init_err)))
+        except Exception:
+            pass
+
+        try:
+            if getattr(self.fx_player, 'mpv', None) is None:
+                print("DEBUG: fx_player MPV failed to init")
+        except Exception:
+            pass
         
         # Create Bump View
         self.bump_widget = QWidget()
@@ -5190,6 +5729,7 @@ class MainWindow(QMainWindow):
             tv_vibe_music_dir = (result or {}).get('tv_vibe_music_dir', None)
             tv_vibe_images_dir = (result or {}).get('tv_vibe_images_dir', None)
             tv_vibe_audio_fx_dir = (result or {}).get('tv_vibe_audio_fx_dir', None)
+            tv_vibe_interstitials_dir = (result or {}).get('tv_vibe_interstitials_dir', None)
 
             try:
                 default_scripts_dir = get_local_bumps_scripts_dir()
@@ -5277,6 +5817,24 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+            # Auto-detect interstitials (commercials) folder.
+            try:
+                prev_inter_dir = str(getattr(self.playlist_manager, 'interstitial_folder', '') or '').strip()
+            except Exception:
+                prev_inter_dir = ''
+            try:
+                prev_inter_ok = bool(prev_inter_dir and os.path.isdir(prev_inter_dir))
+            except Exception:
+                prev_inter_ok = False
+
+            if tv_vibe_interstitials_dir and os.path.isdir(str(tv_vibe_interstitials_dir)):
+                # Only override if none set (or stale).
+                if not prev_inter_ok:
+                    try:
+                        self._set_interstitials_folder(str(tv_vibe_interstitials_dir), persist=True)
+                    except Exception:
+                        pass
+
             # If we updated asset base directories after scripts were already parsed,
             # re-parse scripts so <img>/<sound> tags re-resolve to valid paths.
             try:
@@ -5350,6 +5908,15 @@ class MainWindow(QMainWindow):
             # Best-effort: treat any mouse movement as activity.
             self.on_mouse_move()
         elif event.type() == QEvent.KeyPress:
+            # Never respond to key events unless this window is actually active.
+            # (This avoids surprising behavior and also prevents double-toggles
+            # when mpv is handling keys inside the embedded video window.)
+            try:
+                if not self.isActiveWindow():
+                    return super().eventFilter(obj, event)
+            except Exception:
+                pass
+
             # Don't steal keys while the user is typing into inputs.
             try:
                 fw = QApplication.focusWidget()
@@ -5649,6 +6216,16 @@ class MainWindow(QMainWindow):
             btn.setIcon(enter_fs_icon)
 
     def toggle_fullscreen(self):
+        # Guard against double toggles triggered by both MPV and Qt handling the key.
+        try:
+            now = time.monotonic()
+            last = float(getattr(self, '_last_fullscreen_toggle_mono', 0.0) or 0.0)
+            if (now - last) < 0.25:
+                return
+            self._last_fullscreen_toggle_mono = now
+        except Exception:
+            pass
+
         if self.isFullScreen():
             # Exiting Fullscreen
             self.failsafe_timer.stop()
@@ -5790,6 +6367,12 @@ class MainWindow(QMainWindow):
             ch = max(1, min(ch, max(1, h)))
             ctrls.setGeometry(0, h - ch, w, ch)
             ctrls.raise_()
+
+            # Fullscreen overlay width changes don't always propagate through PlayModeWidget resize.
+            try:
+                QTimer.singleShot(0, lambda: self.play_mode_widget._update_controls_size_mode(force=True))
+            except Exception:
+                pass
         except Exception:
             return
 
@@ -5849,6 +6432,13 @@ class MainWindow(QMainWindow):
             self.statusBar().setVisible(True)
             # Ensure controls remain visible after leaving fullscreen.
             self.show_controls()
+
+            # Leaving fullscreen often changes widths without reliable resize timing;
+            # force a recompute after geometry/menu restoration settles.
+            try:
+                QTimer.singleShot(0, lambda: self.play_mode_widget._update_controls_size_mode(force=True))
+            except Exception:
+                pass
 
             # Leaving fullscreen: don't keep the episode title overlay hanging around.
             self._hide_episode_overlay()
@@ -6487,10 +7077,65 @@ class MainWindow(QMainWindow):
         self.edit_mode_widget.library_tree.clear()
 
     def choose_interstitial_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Interstitials Directory")
+        folder = QFileDialog.getExistingDirectory(self, "Select Interludes Directory")
         if folder:
+            self._set_interstitials_folder(folder, persist=True)
+            QMessageBox.information(self, "Interludes", f"Found {len(self.playlist_manager.interstitials)} items.")
+
+    def _set_interstitials_folder(self, folder: str, *, persist: bool):
+        """Scan + set interludes folder, and update the filesystem watcher."""
+        try:
+            folder = str(folder or '').strip()
+        except Exception:
+            folder = ''
+        if not folder:
+            return
+
+        try:
             self.playlist_manager.scan_interstitials(folder)
-            QMessageBox.information(self, "Interstitials", f"Found {len(self.playlist_manager.interstitials)} items.")
+        except Exception:
+            return
+
+        try:
+            # Keep legacy field for internal use.
+            self._interstitials_dir = folder
+        except Exception:
+            pass
+
+        if persist:
+            try:
+                # Save both names for backward compatibility.
+                self._settings['interlude_folder'] = str(folder)
+                self._settings['interstitial_folder'] = str(folder)
+                self._save_user_settings()
+            except Exception:
+                pass
+
+        # Update watcher paths (watch exactly this folder).
+        try:
+            existing = list(self._interstitial_watcher.directories())
+            if existing:
+                self._interstitial_watcher.removePaths(existing)
+        except Exception:
+            pass
+        try:
+            if os.path.isdir(folder):
+                self._interstitial_watcher.addPath(folder)
+        except Exception:
+            pass
+
+    def _on_interstitials_dir_changed(self, folder: str):
+        # Re-scan so interstitial count and queue stay current.
+        try:
+            folder = str(folder or '').strip()
+        except Exception:
+            folder = ''
+        if not folder:
+            return
+        try:
+            self.playlist_manager.scan_interstitials(folder)
+        except Exception:
+            pass
 
     def choose_bump_scripts(self):
         # Scripts are loaded from the app-local `bumps/` folder (like `playlists/`).
@@ -6733,6 +7378,8 @@ class MainWindow(QMainWindow):
                     item for item in self.playlist_manager.current_playlist
                     if not (isinstance(item, dict) and item.get('type') == 'bump')
                 ],
+                # Prefer new naming but keep backward compatibility.
+                'interlude_folder': self.playlist_manager.interstitial_folder,
                 'interstitial_folder': self.playlist_manager.interstitial_folder,
                 # Backward-compatible boolean (standard shuffle == True)
                 'shuffle_default': (self.playlist_manager.shuffle_mode != 'off'),
@@ -6787,14 +7434,26 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 
-                if 'interstitial_folder' in data:
-                    folder = data['interstitial_folder']
+                folder = None
+                if 'interlude_folder' in data:
+                    folder = data.get('interlude_folder')
+                elif 'interstitial_folder' in data:
+                    folder = data.get('interstitial_folder')
+
+                if folder:
                     try:
                         if self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
                             folder = self._path_to_web_files_path(str(folder))
                     except Exception:
-                        folder = data['interstitial_folder']
-                    self.playlist_manager.scan_interstitials(folder)
+                        # Fall back to raw stored value.
+                        try:
+                            folder = data.get('interlude_folder') or data.get('interstitial_folder')
+                        except Exception:
+                            folder = folder
+                    try:
+                        self._set_interstitials_folder(folder, persist=False)
+                    except Exception:
+                        pass
                     
                 self.playlist_manager.current_playlist = data.get('playlist', [])
                 self.playlist_manager.reset_playback_state()
@@ -6857,14 +7516,25 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-                if 'interstitial_folder' in data:
-                    folder = data['interstitial_folder']
+                folder = None
+                if 'interlude_folder' in data:
+                    folder = data.get('interlude_folder')
+                elif 'interstitial_folder' in data:
+                    folder = data.get('interstitial_folder')
+
+                if folder:
                     try:
                         if self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
                             folder = self._path_to_web_files_path(str(folder))
                     except Exception:
-                        folder = data['interstitial_folder']
-                    self.playlist_manager.scan_interstitials(folder)
+                        try:
+                            folder = data.get('interlude_folder') or data.get('interstitial_folder')
+                        except Exception:
+                            folder = folder
+                    try:
+                        self._set_interstitials_folder(folder, persist=False)
+                    except Exception:
+                        pass
 
                 self.playlist_manager.current_playlist = data.get('playlist', [])
                 self.playlist_manager.reset_playback_state()
@@ -6912,6 +7582,7 @@ class MainWindow(QMainWindow):
                 item for item in self.playlist_manager.current_playlist
                 if not (isinstance(item, dict) and item.get('type') == 'bump')
             ]
+            data['interlude_folder'] = self.playlist_manager.interstitial_folder
             data['interstitial_folder'] = self.playlist_manager.interstitial_folder
             data['shuffle_default'] = (self.playlist_manager.shuffle_mode != 'off')
             data['shuffle_mode'] = self.playlist_manager.shuffle_mode
@@ -7072,7 +7743,7 @@ class MainWindow(QMainWindow):
                     if bump_item:
                         self._pending_next_index = int(index)
                         self._pending_next_record_history = bool(record_history)
-                        self.play_bump(bump_item)
+                        self._play_bump_with_optional_interstitial(bump_item)
                         return
 
             # Global bumps are optional. If disabled, skip bump items.
@@ -7116,6 +7787,18 @@ class MainWindow(QMainWindow):
                         pass
                     target = self._resolve_video_play_target(path)
                     try:
+                        exists = None
+                        try:
+                            # Don't do expensive checks for non-local targets.
+                            t = str(target or '')
+                            if t and (len(t) > 2) and (t[1:3] == ':\\' or t.startswith('\\\\')):
+                                exists = os.path.exists(t)
+                        except Exception:
+                            exists = None
+                        print(f"DEBUG: play_index video kind={itype} index={index} src={path} target={target} exists={exists}")
+                    except Exception:
+                        pass
+                    try:
                         self._last_play_target = str(target or '')
                         self._last_play_source_path = str(path or '')
                     except Exception:
@@ -7125,7 +7808,7 @@ class MainWindow(QMainWindow):
                     # In web mode with manifest, we trust the file exists
                     self.player.play(target)
                     self._played_since_start = True
-                    prefix = "[INT]" if itype == 'interstitial' else ""
+                    prefix = "[IL]" if itype == 'interstitial' else ""
                     self.setWindowTitle(f"Sleepy Shows - {prefix} {os.path.basename(path)}")
                     try:
                         self._log_event('play_start', kind=itype, source_path=str(path or ''), target=str(target or ''), index=int(index))
@@ -7139,7 +7822,7 @@ class MainWindow(QMainWindow):
                         self._activate_prefetched_bump_assets(int(index))
                     except Exception:
                         pass
-                    self.play_bump(item)
+                    self._play_bump_with_optional_interstitial(item)
             else:
                  # Legacy
                  self.video_stack.setCurrentIndex(0)
@@ -7149,6 +7832,17 @@ class MainWindow(QMainWindow):
                  except Exception:
                      pass
                  target = self._resolve_video_play_target(item)
+                 try:
+                     exists = None
+                     try:
+                         t = str(target or '')
+                         if t and (len(t) > 2) and (t[1:3] == ':\\' or t.startswith('\\\\')):
+                             exists = os.path.exists(t)
+                     except Exception:
+                         exists = None
+                     print(f"DEBUG: play_index video kind=video index={index} src={item} target={target} exists={exists}")
+                 except Exception:
+                     pass
                  try:
                      self._last_play_target = str(target or '')
                      self._last_play_source_path = str(item or '')
@@ -7230,6 +7924,161 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._schedule_prefetch_next_bump_assets)
         except Exception:
             pass
+
+    def _interstitial_chance_per_bump(self) -> float:
+        """Chance that a bump gets an interstitial preroll.
+
+        Rule requested: 1/N where N is number of interstitials.
+        Example: 20 interstitials => 5% chance.
+        """
+        try:
+            n = int(len(getattr(self.playlist_manager, 'interstitials', []) or []))
+        except Exception:
+            n = 0
+        if n <= 0:
+            return 0.0
+        try:
+            return float(min(1.0, 1.0 / float(n)))
+        except Exception:
+            return 0.0
+
+    def _play_preroll_interstitial(self, path: str) -> bool:
+        try:
+            p = str(path or '').strip()
+        except Exception:
+            p = ''
+        if not p:
+            return False
+
+        # Ensure we're not in bump view.
+        try:
+            self.stop_bump_playback()
+        except Exception:
+            pass
+        try:
+            self.video_stack.setCurrentIndex(0)
+        except Exception:
+            pass
+
+        # Exposure scoring.
+        try:
+            self.playlist_manager.note_interstitial_played(p)
+        except Exception:
+            pass
+
+        # Reset EOF watchdog state for this transient playback.
+        try:
+            self._handled_eof_for_index = None
+            self._play_start_monotonic = time.monotonic()
+            self._played_since_start = False
+        except Exception:
+            pass
+
+        try:
+            target = self._resolve_video_play_target(p)
+        except Exception:
+            return False
+        try:
+            self._last_play_target = str(target or '')
+            self._last_play_source_path = str(p or '')
+        except Exception:
+            self._last_play_target = None
+            self._last_play_source_path = None
+
+        try:
+            self.player.play(target)
+            self._played_since_start = True
+        except Exception:
+            return False
+
+        try:
+            self.setWindowTitle(f"Sleepy Shows - [IL] {os.path.basename(p)}")
+        except Exception:
+            pass
+        try:
+            self._log_event('play_start', kind='interstitial_preroll', source_path=str(p or ''), target=str(target or ''), index=int(getattr(self.playlist_manager, 'current_index', -1) or -1))
+        except Exception:
+            pass
+
+        try:
+            self._sync_keep_awake()
+        except Exception:
+            pass
+        try:
+            self._resume_sleep_countdown_if_needed()
+            QTimer.singleShot(200, self._resume_sleep_countdown_if_needed)
+        except Exception:
+            pass
+
+        return True
+
+    def _play_bump_with_optional_interstitial(self, bump_item: dict):
+        """Play an interstitial before a bump (best-effort) when TV Vibes is on."""
+        # Interstitials only play when TV Vibes (bumps) are enabled.
+        if not bool(getattr(self, 'bumps_enabled', False)):
+            return self.play_bump(bump_item)
+
+        # Don't stack prerolls.
+        try:
+            if getattr(self, '_pending_bump_item', None) is not None:
+                return self.play_bump(bump_item)
+        except Exception:
+            pass
+
+        # Don't try to preroll while already in bump view.
+        try:
+            if self.video_stack.currentIndex() == 1:
+                return self.play_bump(bump_item)
+        except Exception:
+            pass
+
+        try:
+            inters = list(getattr(self.playlist_manager, 'interstitials', []) or [])
+        except Exception:
+            inters = []
+        if not inters:
+            return self.play_bump(bump_item)
+
+        try:
+            p = float(self._interstitial_chance_per_bump())
+        except Exception:
+            p = 0.0
+        if p <= 0.0:
+            return self.play_bump(bump_item)
+
+        try:
+            if random.random() >= p:
+                return self.play_bump(bump_item)
+        except Exception:
+            return self.play_bump(bump_item)
+
+        inter_path = None
+        try:
+            inter_path = self.playlist_manager.get_next_interstitial_path()
+        except Exception:
+            inter_path = None
+        if not inter_path:
+            try:
+                inter_path = random.choice(inters)
+            except Exception:
+                inter_path = None
+        if not inter_path:
+            return self.play_bump(bump_item)
+
+        # Play interstitial now; when it ends, start this bump.
+        try:
+            self._pending_bump_item = bump_item
+        except Exception:
+            self._pending_bump_item = bump_item
+
+        ok = self._play_preroll_interstitial(str(inter_path))
+        if not ok:
+            try:
+                self._pending_bump_item = None
+            except Exception:
+                pass
+            return self.play_bump(bump_item)
+        return None
 
     def _app_cache_dir(self):
         """Prefer an app-local cache dir, with a safe fallback."""
@@ -8309,6 +9158,10 @@ class MainWindow(QMainWindow):
             self._maybe_apply_episode_skip_penalty()
         except Exception:
             pass
+        try:
+            self._pending_bump_item = None
+        except Exception:
+            pass
         self.player.stop()
         try:
             self._set_stop_reason('stop_playback')
@@ -8391,7 +9244,7 @@ class MainWindow(QMainWindow):
                 self._pending_next_index = int(next_idx)
                 self._pending_next_record_history = bool(record_history)
                 self.stop_bump_playback()
-                self.play_bump(bump_item)
+                self._play_bump_with_optional_interstitial(bump_item)
                 return
 
         self.play_index(next_idx, record_history=record_history, suppress_ui=bool(suppress_ui))
@@ -8432,6 +9285,23 @@ class MainWindow(QMainWindow):
                 return
         except Exception:
             pass
+
+        # If an interstitial preroll just ended, start the pending bump instead of advancing.
+        pending_bump = getattr(self, '_pending_bump_item', None)
+        if pending_bump is not None:
+            try:
+                self._pending_bump_item = None
+            except Exception:
+                pass
+            try:
+                self.play_bump(pending_bump)
+                return
+            except Exception:
+                # Fall through to normal advance.
+                try:
+                    self._pending_bump_item = None
+                except Exception:
+                    pass
 
         # Auto advance
         try:
@@ -8559,6 +9429,11 @@ class MainWindow(QMainWindow):
             target = str(getattr(self, '_last_play_target', '') or '')
         except Exception:
             target = ''
+
+        try:
+            print(f"DEBUG: mpv end-file reason={r} target={target}")
+        except Exception:
+            pass
 
         self._log_event('mpv_end_file', reason=r, target=target)
 

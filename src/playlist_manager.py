@@ -94,6 +94,10 @@ class PlaylistManager:
         # - Session counters affect how much score is applied per play.
         self.episode_exposure_scores = {}
 
+        # Exposure score tracking for interstitials (commercial blocks).
+        # - Interstitials: {normalized_path: float}
+        self.interstitial_exposure_scores = {}
+
         # Per-playlist exposure controls (loaded from the playlist JSON).
         # Offsets are additive: effective exposure score is base + offsets.
         # Factors multiply per-play deltas and also influence queue selection via projected delta.
@@ -109,6 +113,10 @@ class PlaylistManager:
         # First 3 plays => +100, next 3 => +50, next 3 => +25, ... per kind.
         self._session_episode_plays = 0
         self._session_bump_plays = 0
+        self._session_interstitial_plays = 0
+
+        # Exposure-ordered interstitial queue (paths).
+        self._interstitial_queue = []
 
         # Exposure scaling rule depends on whether the sleep timer is enabled.
         # - Sleep timer ON: episode deltas diminish every 3 episode plays.
@@ -134,6 +142,7 @@ class PlaylistManager:
         # New viewing session: reset exposure scaling counters.
         self._session_episode_plays = 0
         self._session_bump_plays = 0
+        self._session_interstitial_plays = 0
 
     def set_sleep_timer_active_for_exposure(self, active: bool):
         """Update whether episode exposure deltas should diminish this session."""
@@ -203,6 +212,19 @@ class PlaylistManager:
                     cleaned[kk] = vv
             self.episode_exposure_scores = cleaned
 
+        ints = data.get('interstitials', None)
+        if isinstance(ints, dict):
+            cleaned = {}
+            for k, v in ints.items():
+                try:
+                    kk = self._norm_path_key(str(k))
+                    vv = float(v)
+                except Exception:
+                    continue
+                if kk:
+                    cleaned[kk] = vv
+            self.interstitial_exposure_scores = cleaned
+
         # Frequency settings (offsets/factors) are now persisted with playlist JSON only.
 
         bump_state = data.get('bump_components', None)
@@ -249,6 +271,7 @@ class PlaylistManager:
 
         payload = {
             'episodes': dict(self.episode_exposure_scores or {}),
+            'interstitials': dict(getattr(self, 'interstitial_exposure_scores', {}) or {}),
             'bump_components': dict(bump_state or {}),
         }
 
@@ -280,6 +303,19 @@ class PlaylistManager:
                 n = int(self._session_bump_plays)
             except Exception:
                 n = 0
+        elif kind_l == 'interstitial':
+            # Interludes: decay based on episodes played in the viewing session,
+            # matching the user's request (every 3 episodes => halve the delta).
+            # Mirror the episode behavior: if sleep timer is OFF, keep deltas constant.
+            try:
+                if not bool(getattr(self, '_sleep_timer_active_for_exposure', False)):
+                    return 100.0
+            except Exception:
+                return 100.0
+            try:
+                n = int(self._session_episode_plays)
+            except Exception:
+                n = 0
         else:
             # Sleep timer OFF: keep episode deltas constant during the session.
             try:
@@ -299,6 +335,29 @@ class PlaylistManager:
             delta = 100.0
         if delta < 1.0:
             delta = 1.0
+        return float(delta)
+
+    def note_interstitial_played(self, path: str):
+        """Apply exposure to an interstitial video."""
+        try:
+            p = str(path or '').strip()
+        except Exception:
+            p = ''
+        if not p:
+            return 0.0
+        key = self._norm_path_key(p)
+        if not key:
+            return 0.0
+
+        delta = self._exposure_delta_for_next_play('interstitial')
+        self._session_interstitial_plays += 1
+        try:
+            self.interstitial_exposure_scores[key] = float(self.interstitial_exposure_scores.get(key, 0.0) or 0.0) + float(delta)
+        except Exception:
+            self.interstitial_exposure_scores[key] = float(delta)
+
+        self._exposure_dirty = True
+        self._save_exposure_scores()
         return float(delta)
 
     def apply_episode_skip_penalty(self, index, points: float = 1.0):
@@ -1071,13 +1130,103 @@ class PlaylistManager:
     def scan_interstitials(self, folder_path):
         self.interstitial_folder = folder_path
         self.interstitials = []
+        self._interstitial_queue = []
         if not folder_path or not os.path.exists(folder_path):
             return 
         
+        # De-duplicate by normalized key so the queue never contains duplicates
+        # (e.g., case-insensitive collisions, symlinks, or repeated scan artifacts).
+        seen = set()
+        out = []
+
         for root, _, files in os.walk(folder_path):
             for f in files:
-                if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS:
-                    self.interstitials.append(os.path.join(root, f))
+                if os.path.splitext(f)[1].lower() not in VIDEO_EXTENSIONS:
+                    continue
+                p = os.path.join(root, f)
+                key = self._norm_path_key(p)
+                if not key:
+                    try:
+                        key = str(p).strip().lower()
+                    except Exception:
+                        key = ''
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                out.append(p)
+
+        self.interstitials = out
+
+        # Rebuild queue immediately so the next pick uses exposure ordering.
+        try:
+            self._rebuild_interstitial_queue()
+        except Exception:
+            pass
+
+    def _rebuild_interstitial_queue(self):
+        paths = list(getattr(self, 'interstitials', []) or [])
+        if not paths:
+            self._interstitial_queue = []
+            return
+
+        # Safety de-dupe (should already be unique from scan_interstitials).
+        uniq = []
+        seen = set()
+        for p in paths:
+            key = self._norm_path_key(p)
+            if not key:
+                try:
+                    key = str(p).strip().lower()
+                except Exception:
+                    key = ''
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            uniq.append(str(p))
+        paths = uniq
+
+        def _score(p: str) -> float:
+            key = self._norm_path_key(p)
+            try:
+                base = float(self.interstitial_exposure_scores.get(key, 0.0) or 0.0)
+            except Exception:
+                base = 0.0
+            try:
+                projected = float(self._exposure_delta_for_next_play('interstitial'))
+            except Exception:
+                projected = 0.0
+            return float(base + projected)
+
+        buckets = {}
+        for p in paths:
+            try:
+                s = round(float(_score(str(p))), 6)
+            except Exception:
+                s = 0.0
+            buckets.setdefault(s, []).append(str(p))
+
+        out = []
+        for s in sorted(buckets.keys()):
+            b = buckets[s]
+            random.shuffle(b)
+            out.extend(b)
+
+        self._interstitial_queue = out
+
+    def get_next_interstitial_path(self) -> str | None:
+        """Return the next interstitial path using exposure-ordered queue."""
+        try:
+            if not getattr(self, '_interstitial_queue', None):
+                self._rebuild_interstitial_queue()
+        except Exception:
+            self._interstitial_queue = []
+
+        try:
+            if self._interstitial_queue:
+                return str(self._interstitial_queue.pop(0) or '')
+        except Exception:
+            return None
+        return None
                     
     def scan_bumps(self, scripts_folder, music_folder):
         self.bump_manager.load_bumps(scripts_folder)
@@ -1171,7 +1320,7 @@ class PlaylistManager:
                 if candidates:
                     choice = random.choice(candidates)
                     if choice == 'int':
-                        inte = random.choice(self.interstitials)
+                        inte = self.get_next_interstitial_path() or random.choice(self.interstitials)
                         final_list.append({'type': 'interstitial', 'path': inte})
                     elif choice == 'bump':
                         bump_obj = self.bump_manager.get_next_bump()

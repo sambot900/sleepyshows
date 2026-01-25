@@ -2,9 +2,9 @@
 
 
 a = Analysis(
-    ['src/main.py'],
+    ['src\\main.py'],
     pathex=[],
-    binaries=[('libs/libxcb-cursor.so.0', '.')],
+    binaries=[],
     datas=[('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
@@ -32,6 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets\\sleepy-ico.ico'],
 )
 coll = COLLECT(
     exe,
