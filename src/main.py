@@ -2048,6 +2048,40 @@ def auto_detect_tv_vibe_audio_fx_dir_web(mount_roots_override):
     return None
 
 
+def auto_detect_tv_vibe_videos_dir_web(mount_roots_override):
+    """Best-effort detection for TV Vibe bump videos in Web mode.
+
+    Expected layout: <mount_root>/Sleepy Shows Data/TV Vibe/videos
+    (Falls back to legacy <mount_root>/.../TV Vibe/videos.)
+    """
+    roots = _normalize_mount_roots_override(mount_roots_override)
+    if not roots:
+        return None
+    for mount_root in roots:
+        try:
+            data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+            roots_to_probe = []
+            if os.path.isdir(data_root):
+                roots_to_probe.append(data_root)
+            roots_to_probe.append(mount_root)
+
+            for root in roots_to_probe:
+                direct = os.path.join(root, 'TV Vibe', 'videos')
+                if os.path.isdir(direct):
+                    return direct
+
+                tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+                if not tv_vibe_dir:
+                    continue
+
+                videos_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'videos')
+                if videos_dir and os.path.isdir(videos_dir):
+                    return videos_dir
+        except Exception:
+            continue
+    return None
+
+
 def auto_detect_tv_vibe_interstitials_dir_web(mount_roots_override):
     """Best-effort detection for TV Vibe interludes in Web mode.
 
@@ -2211,6 +2245,51 @@ def auto_detect_tv_vibe_audio_fx_dir(volume_label='T7'):
             audio_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'audio')
             if audio_dir and os.path.isdir(audio_dir):
                 return audio_dir
+
+        return None
+
+    for mount_root in _iter_mount_roots_for_label(volume_label) or []:
+        found = probe_mount(mount_root)
+        if found:
+            return found
+
+    for mount_root in _iter_mount_roots_fallback() or []:
+        found = probe_mount(mount_root)
+        if found:
+            return found
+
+    return None
+
+
+def auto_detect_tv_vibe_videos_dir(volume_label='T7'):
+    """Best-effort detection for TV Vibe bump videos on the same drive as episodes.
+
+    Expected layout: <mount_root>/Sleepy Shows Data/TV Vibe/videos
+    (Falls back to <mount_root>/TV Vibe/videos for older layouts.)
+    Returns the videos folder path if found, else None.
+    """
+    def probe_mount(mount_root):
+        if not mount_root or not os.path.isdir(mount_root):
+            return None
+
+        data_root = os.path.join(mount_root, 'Sleepy Shows Data')
+        roots_to_probe = []
+        if os.path.isdir(data_root):
+            roots_to_probe.append(data_root)
+        roots_to_probe.append(mount_root)
+
+        for root in roots_to_probe:
+            direct = os.path.join(root, 'TV Vibe', 'videos')
+            if os.path.isdir(direct):
+                return direct
+
+            tv_vibe_dir = _find_child_dir_case_insensitive(root, 'TV Vibe')
+            if not tv_vibe_dir:
+                continue
+
+            videos_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'videos')
+            if videos_dir and os.path.isdir(videos_dir):
+                return videos_dir
 
         return None
 
@@ -4996,33 +5075,63 @@ class MainWindow(QMainWindow):
             pass
 
         # Bump video assets folder (TV Vibe/videos).
+        # IMPORTANT: do not hardcode OS/user-specific mount paths here.
+        # Derive from the detected Portable/Web roots so this works on Linux + Windows.
         try:
             vdir = str(getattr(self, 'bump_videos_dir', '') or '').strip()
         except Exception:
             vdir = ''
 
-        if not vdir:
-            vdir = os.path.join('/media', 'tyler', 'T7', 'Sleepy Shows Data', 'TV Vibe', 'videos')
+        # In Web mode, re-root an old absolute path under the configured Web Files Root.
+        try:
+            if vdir and self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
+                vdir = self._path_to_web_files_path(str(vdir))
+        except Exception:
+            pass
+
+        needs_autofix = False
+        try:
+            if not vdir:
+                needs_autofix = True
+            else:
+                # Best-effort existence check; if a path from another OS is stored,
+                # it will fail and we'll auto-detect a correct one.
+                needs_autofix = (not os.path.isdir(str(vdir)))
+        except Exception:
+            needs_autofix = True
+
+        if needs_autofix:
+            detected = None
             try:
                 if self._is_web_mode():
-                    wd = self._web_data_root_for_files_root(str(getattr(self, 'web_files_root', '') or '').strip())
-                    if wd:
-                        vdir = os.path.join(wd, 'TV Vibe', 'videos')
+                    wfr = str(getattr(self, 'web_files_root', '') or '').strip()
+                    if wfr:
+                        detected = auto_detect_tv_vibe_videos_dir_web([wfr])
+                        if not detected:
+                            wd = self._web_data_root_for_files_root(wfr)
+                            if wd:
+                                candidate = os.path.join(str(wd), 'TV Vibe', 'videos')
+                                if os.path.isdir(candidate):
+                                    detected = candidate
+                else:
+                    detected = auto_detect_tv_vibe_videos_dir(volume_label=str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7'))
             except Exception:
-                pass
+                detected = None
 
-            # Persist the default so bump scripts can resolve video=... consistently.
-            try:
-                self.bump_videos_dir = vdir
+            if detected:
+                vdir = str(detected)
+
+        # Persist the value (if we have one) so bump scripts can resolve video=... consistently.
+        try:
+            self.bump_videos_dir = vdir
+        except Exception:
+            self.bump_videos_dir = vdir
+        try:
+            if vdir:
                 self._settings['bump_videos_dir'] = vdir
                 self._save_user_settings()
-            except Exception:
-                self.bump_videos_dir = vdir
-        else:
-            try:
-                self.bump_videos_dir = vdir
-            except Exception:
-                self.bump_videos_dir = vdir
+        except Exception:
+            pass
 
         try:
             self.playlist_manager.bump_manager.bump_videos_dir = str(self.bump_videos_dir or '').strip() or None
@@ -5045,16 +5154,43 @@ class MainWindow(QMainWindow):
             inter_dir = str(getattr(self, '_interstitials_dir', '') or '').strip()
         except Exception:
             inter_dir = ''
+
+        # In Web mode, re-root a stored absolute path under the configured Web Files Root.
+        try:
+            if inter_dir and self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
+                inter_dir = self._path_to_web_files_path(str(inter_dir))
+        except Exception:
+            pass
+
+        inter_needs_autofix = False
+        try:
+            inter_needs_autofix = (not inter_dir) or (not os.path.isdir(str(inter_dir)))
+        except Exception:
+            inter_needs_autofix = True
+
+        if inter_needs_autofix:
+            detected_inter = None
+            try:
+                if self._is_web_mode():
+                    wfr = str(getattr(self, 'web_files_root', '') or '').strip()
+                    if wfr:
+                        detected_inter = auto_detect_tv_vibe_interstitials_dir_web([wfr])
+                else:
+                    detected_inter = auto_detect_tv_vibe_interstitials_dir(volume_label=str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7'))
+            except Exception:
+                detected_inter = None
+            if detected_inter:
+                inter_dir = str(detected_inter)
+
         if inter_dir:
             try:
-                if self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
-                    inter_dir = self._path_to_web_files_path(str(inter_dir))
+                # Persist here so the setting stays correct across launches/OSes.
+                self._set_interstitials_folder(inter_dir, persist=True)
             except Exception:
-                pass
-            try:
-                self._set_interstitials_folder(inter_dir, persist=False)
-            except Exception:
-                pass
+                try:
+                    self._set_interstitials_folder(inter_dir, persist=False)
+                except Exception:
+                    pass
 
         # Startup ambient audio
         self._startup_ambient_playing = False
