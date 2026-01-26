@@ -163,6 +163,26 @@ class MpvPlayer(QWidget):
                     osc=False,
                 )
 
+            # Video scaling defaults: fill available widget while keeping aspect ratio.
+            # ("Reasonably maintaining" aspect means no stretching; letterboxing is OK.)
+            try:
+                self.mpv.keepaspect = True
+            except Exception:
+                pass
+            # Ensure OSD is enabled so commands like `show-text` can display.
+            try:
+                self.mpv.osd_level = 1
+            except Exception:
+                pass
+            try:
+                self.mpv.panscan = 0.0
+            except Exception:
+                pass
+            try:
+                self.mpv.video_unscaled = False
+            except Exception:
+                pass
+
             try:
                 wid = int(self.winId())
             except Exception:

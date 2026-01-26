@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
                                QAbstractButton)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop, QFileSystemWatcher
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor, QGuiApplication
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QFontDatabase, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor, QGuiApplication
 from PySide6.QtCore import QUrl
 
 from player_backend import MpvPlayer, MpvAudioPlayer
@@ -4930,6 +4930,7 @@ class MainWindow(QMainWindow):
         self.normalize_audio_enabled = bool(self._settings.get('normalize_audio_enabled', False))
         self.bump_images_dir = self._settings.get('bump_images_dir', None)
         self.bump_audio_fx_dir = self._settings.get('bump_audio_fx_dir', None)
+        self.bump_videos_dir = self._settings.get('bump_videos_dir', None)
         # Prefer the new key name, but keep backward compatibility.
         self._interstitials_dir = str(self._settings.get('interlude_folder', self._settings.get('interstitial_folder', '')) or '').strip()
         # One-time migration: if the legacy key exists, copy it to the new key.
@@ -4991,6 +4992,46 @@ class MainWindow(QMainWindow):
 
         try:
             self.playlist_manager.bump_manager.bump_audio_fx_dir = self.bump_audio_fx_dir
+        except Exception:
+            pass
+
+        # Bump video assets folder (TV Vibe/videos).
+        try:
+            vdir = str(getattr(self, 'bump_videos_dir', '') or '').strip()
+        except Exception:
+            vdir = ''
+
+        if not vdir:
+            vdir = os.path.join('/media', 'tyler', 'T7', 'Sleepy Shows Data', 'TV Vibe', 'videos')
+            try:
+                if self._is_web_mode():
+                    wd = self._web_data_root_for_files_root(str(getattr(self, 'web_files_root', '') or '').strip())
+                    if wd:
+                        vdir = os.path.join(wd, 'TV Vibe', 'videos')
+            except Exception:
+                pass
+
+            # Persist the default so bump scripts can resolve video=... consistently.
+            try:
+                self.bump_videos_dir = vdir
+                self._settings['bump_videos_dir'] = vdir
+                self._save_user_settings()
+            except Exception:
+                self.bump_videos_dir = vdir
+        else:
+            try:
+                self.bump_videos_dir = vdir
+            except Exception:
+                self.bump_videos_dir = vdir
+
+        try:
+            self.playlist_manager.bump_manager.bump_videos_dir = str(self.bump_videos_dir or '').strip() or None
+        except Exception:
+            pass
+
+        # Startup: probe exact durations for bump videos in the background.
+        try:
+            QTimer.singleShot(0, self._schedule_probe_bump_video_durations)
         except Exception:
             pass
 
@@ -5183,6 +5224,33 @@ class MainWindow(QMainWindow):
             self.player.set_audio_normalization(self.normalize_audio_enabled)
         except Exception:
             pass
+
+        # Bump script font: load bundled Helvetica Neue Condensed Black.
+        # (Use a runtime-loaded TTF so packaged builds behave consistently.)
+        self._bump_font_family = None
+        try:
+            font_path = get_asset_path("HelveticaNeue-CondensedBlack.ttf")
+        except Exception:
+            font_path = None
+        try:
+            if font_path and os.path.isfile(str(font_path)):
+                font_id = QFontDatabase.addApplicationFont(str(font_path))
+                if int(font_id) != -1:
+                    fams = QFontDatabase.applicationFontFamilies(int(font_id))
+                    if fams:
+                        self._bump_font_family = str(fams[0])
+        except Exception:
+            self._bump_font_family = None
+        if not self._bump_font_family:
+            # Best-effort fallback: if the OS already has it installed.
+            self._bump_font_family = "Helvetica Neue Condensed Black"
+
+        try:
+            self._bump_font_px = int(self._settings.get('bump_font_px', 28) or 28)
+        except Exception:
+            self._bump_font_px = 28
+        if int(self._bump_font_px) <= 0:
+            self._bump_font_px = 28
         
         # Overlay for Episode Title
         self.overlay_label = QLabel(self.video_container)
@@ -5190,6 +5258,24 @@ class MainWindow(QMainWindow):
         self.overlay_label.setStyleSheet("background-color: rgba(0, 0, 0, 150); color: white; padding: 10px; font-size: 18px; font-weight: bold;")
         self.overlay_label.setVisible(False)
         self.overlay_label.setAttribute(Qt.WA_TransparentForMouseEvents) # Let clicks pass through
+
+        # Overlay for inclusive bump-video outros (drawn over the playing video).
+        self.bump_video_overlay_label = QLabel(self.video_container)
+        self.bump_video_overlay_label.setAlignment(Qt.AlignCenter)
+        self.bump_video_overlay_label.setWordWrap(True)
+        try:
+            self.bump_video_overlay_label.setFont(QFont(str(self._bump_font_family), int(self._bump_font_px)))
+        except Exception:
+            self.bump_video_overlay_label.setFont(QFont("Arial", 28, QFont.Bold))
+        self.bump_video_overlay_label.setStyleSheet(
+            "background-color: rgba(12, 12, 12, 190); color: white; padding: 20px;"
+        )
+        self.bump_video_overlay_label.setVisible(False)
+        self.bump_video_overlay_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        self._bump_video_overlay_timer = QTimer(self)
+        self._bump_video_overlay_timer.setSingleShot(True)
+        self._bump_video_overlay_timer.timeout.connect(self._hide_bump_video_overlay)
 
         # Windowed-mode rule: show briefly at episode start, then hide.
         self._episode_overlay_hide_timer = QTimer(self)
@@ -5256,13 +5342,19 @@ class MainWindow(QMainWindow):
         self.lbl_bump_text = QLabel("")
         self.lbl_bump_text.setAlignment(Qt.AlignCenter)
         self.lbl_bump_text.setWordWrap(True)
-        self.lbl_bump_text.setFont(QFont("Arial", 28, QFont.Bold))
+        try:
+            self.lbl_bump_text.setFont(QFont(str(self._bump_font_family), int(self._bump_font_px)))
+        except Exception:
+            self.lbl_bump_text.setFont(QFont("Arial", 28, QFont.Bold))
         self.lbl_bump_text.setStyleSheet("color: white;")
 
         self.lbl_bump_text_top = QLabel("")
         self.lbl_bump_text_top.setAlignment(Qt.AlignCenter)
         self.lbl_bump_text_top.setWordWrap(True)
-        self.lbl_bump_text_top.setFont(QFont("Arial", 28, QFont.Bold))
+        try:
+            self.lbl_bump_text_top.setFont(QFont(str(self._bump_font_family), int(self._bump_font_px)))
+        except Exception:
+            self.lbl_bump_text_top.setFont(QFont("Arial", 28, QFont.Bold))
         self.lbl_bump_text_top.setStyleSheet("color: white;")
 
         self.bump_image_view = BumpImageView(self.bump_widget)
@@ -5271,7 +5363,10 @@ class MainWindow(QMainWindow):
         self.lbl_bump_text_bottom = QLabel("")
         self.lbl_bump_text_bottom.setAlignment(Qt.AlignCenter)
         self.lbl_bump_text_bottom.setWordWrap(True)
-        self.lbl_bump_text_bottom.setFont(QFont("Arial", 28, QFont.Bold))
+        try:
+            self.lbl_bump_text_bottom.setFont(QFont(str(self._bump_font_family), int(self._bump_font_px)))
+        except Exception:
+            self.lbl_bump_text_bottom.setFont(QFont("Arial", 28, QFont.Bold))
         self.lbl_bump_text_bottom.setStyleSheet("color: white;")
 
         bump_layout.addWidget(self.lbl_bump_text)
@@ -6104,6 +6199,12 @@ class MainWindow(QMainWindow):
              h = event.size().height()
              if hasattr(self, 'overlay_label'):
                  self.overlay_label.setGeometry(0, 0, w, 60) # Top 60px
+
+             if hasattr(self, 'bump_video_overlay_label') and self.bump_video_overlay_label is not None:
+                 try:
+                     self.bump_video_overlay_label.setGeometry(0, 0, w, h)
+                 except Exception:
+                     pass
                  
              # Positioning Controls in Fullscreen Overlay Mode
              if self.isFullScreen() and hasattr(self, 'play_mode_widget'):
@@ -6287,6 +6388,206 @@ class MainWindow(QMainWindow):
             self._show_episode_overlay(auto_hide_seconds=None)
         else:
             self._hide_episode_overlay()
+
+    def _hide_bump_video_overlay(self):
+        try:
+            if hasattr(self, '_bump_video_overlay_timer'):
+                self._bump_video_overlay_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'bump_video_overlay_label') and self.bump_video_overlay_label is not None:
+                self.bump_video_overlay_label.setVisible(False)
+                self.bump_video_overlay_label.setText('')
+        except Exception:
+            pass
+        try:
+            self._bump_video_overlay_scheduled = False
+        except Exception:
+            pass
+
+    def _show_mpv_osd_text(self, text: str, *, duration_ms: int):
+        """Show an on-video overlay using mpv's OSD.
+
+        Qt widget overlays don't reliably draw above mpv's native window on Linux,
+        so prefer mpv's OSD for bump-video inclusive outros.
+        """
+        try:
+            s = str(text or '')
+        except Exception:
+            s = ''
+        if not s:
+            return
+
+        try:
+            d = int(duration_ms)
+        except Exception:
+            d = 0
+        if d <= 0:
+            d = 1
+
+        # Make the OSD look like a bump card: centered and large.
+        # mpv's OSD uses ASS for formatting; use minimal overrides.
+        try:
+            ass = str(s).replace('{', '(').replace('}', ')')
+            ass = ass.replace('\r\n', '\n').replace('\r', '\n')
+            ass = ass.replace('\n', r'\N')
+            # Center (an5), big font, white with black border.
+            # IMPORTANT: ASS tags use single backslashes. Use raw strings so
+            # sequences like "\a" are not interpreted by Python.
+            ass = r'{\an5\fs52\bord6\shad0\1c&HFFFFFF&\3c&H000000&}' + ass
+        except Exception:
+            ass = s
+
+        try:
+            mpv = getattr(getattr(self, 'player', None), 'mpv', None)
+            if mpv is None:
+                return
+            # mpv command: show-text <string> [duration-ms]
+            mpv.command('show-text', str(ass), int(d))
+        except Exception:
+            return
+
+    def _show_bump_video_overlay(self, text: str, *, duration_ms: int, play_outro_audio: bool = False):
+        try:
+            s = str(text or '')
+        except Exception:
+            s = ''
+        if not s:
+            return
+
+        try:
+            self._hide_episode_overlay()
+        except Exception:
+            pass
+
+        # Prefer mpv OSD so the overlay appears above the video surface.
+        try:
+            self._show_mpv_osd_text(s, duration_ms=int(duration_ms))
+        except Exception:
+            pass
+
+        # Best-effort Qt overlay fallback (may be hidden behind mpv's native window).
+        try:
+            if hasattr(self, 'bump_video_overlay_label') and self.bump_video_overlay_label is not None:
+                try:
+                    r = self.video_container.rect()
+                    self.bump_video_overlay_label.setGeometry(r)
+                except Exception:
+                    pass
+                self.bump_video_overlay_label.setText(s)
+                self.bump_video_overlay_label.setVisible(True)
+                self.bump_video_overlay_label.raise_()
+        except Exception:
+            pass
+
+        if play_outro_audio:
+            try:
+                self._play_outro_audio(duration_ms=int(duration_ms))
+            except Exception:
+                pass
+
+        try:
+            d = int(duration_ms)
+        except Exception:
+            d = 0
+        if d <= 0:
+            d = 1
+        try:
+            self._bump_video_overlay_timer.start(int(d))
+        except Exception:
+            pass
+
+    def _schedule_inclusive_bump_video_overlay(self, video_duration_ms: int):
+        """Schedule the inclusive outro overlay so it ends at video EOF."""
+        try:
+            if not bool(getattr(self, '_current_bump_is_video', False)):
+                return
+            if not bool(getattr(self, '_current_bump_video_inclusive', False)):
+                return
+            if bool(getattr(self, '_bump_video_overlay_scheduled', False)):
+                return
+        except Exception:
+            return
+
+        text = None
+        try:
+            text = str(getattr(self, '_bump_video_overlay_text', None) or '').strip()
+        except Exception:
+            text = ''
+        if not text:
+            return
+
+        try:
+            outro_ms = int(getattr(self, '_bump_video_overlay_ms', 800) or 800)
+        except Exception:
+            outro_ms = 800
+        if outro_ms <= 0:
+            outro_ms = 1
+
+        try:
+            vid_ms = int(video_duration_ms)
+        except Exception:
+            return
+        if vid_ms <= 0:
+            return
+
+        start_ms = max(0, int(vid_ms) - int(outro_ms))
+
+        cur_ms = 0
+        try:
+            pos = getattr(self, '_last_time_pos', None)
+            if pos is None and hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                pos = getattr(self.player.mpv, 'time_pos', None)
+            if pos is not None:
+                cur_ms = int(round(float(pos) * 1000.0))
+        except Exception:
+            cur_ms = 0
+
+        delay = int(start_ms) - int(cur_ms)
+        if delay < 0:
+            delay = 0
+
+        try:
+            self._log_event(
+                'bump_video_overlay_schedule',
+                video=str(getattr(self, '_current_bump_video_path', '') or ''),
+                vid_ms=int(vid_ms),
+                outro_ms=int(outro_ms),
+                start_ms=int(start_ms),
+                cur_ms=int(cur_ms),
+                delay_ms=int(delay),
+            )
+        except Exception:
+            pass
+
+        try:
+            play_audio = bool(getattr(self, '_bump_video_overlay_play_audio', False))
+        except Exception:
+            play_audio = False
+
+        def _do_show():
+            try:
+                try:
+                    self._log_event('bump_video_overlay_show', video=str(getattr(self, '_current_bump_video_path', '') or ''))
+                except Exception:
+                    pass
+                self._show_bump_video_overlay(text, duration_ms=int(outro_ms), play_outro_audio=bool(play_audio))
+            except Exception:
+                return
+
+        try:
+            self._bump_video_overlay_scheduled = True
+        except Exception:
+            pass
+
+        try:
+            if delay <= 0:
+                QTimer.singleShot(0, _do_show)
+            else:
+                QTimer.singleShot(int(delay), _do_show)
+        except Exception:
+            _do_show()
 
     def _poll_fullscreen_cursor(self):
         # Only needed in fullscreen play mode.
@@ -8135,6 +8436,11 @@ class MainWindow(QMainWindow):
         self._hide_episode_overlay()
         script = bump_item.get('script')
         audio = bump_item.get('audio')
+        video = bump_item.get('video')
+        try:
+            video_inclusive = bool(bump_item.get('video_inclusive', False))
+        except Exception:
+            video_inclusive = False
 
         # Exposure scoring: bumps are transient, but their components accrue exposure.
         try:
@@ -8157,6 +8463,160 @@ class MainWindow(QMainWindow):
 
         # Treat bumps as non-episode playback for sleep timer purposes.
         self._pause_sleep_countdown()
+
+        # Bump-gate: mark that we are inside a bump so play_next() doesn't trigger another bump.
+        try:
+            self._in_bump_playback = True
+        except Exception:
+            pass
+
+        # Reset bump-video state.
+        try:
+            self._current_bump_is_video = False
+            self._current_bump_video_inclusive = False
+            self._current_bump_video_path = None
+            self._post_video_bump_script = None
+            self._bump_video_overlay_text = None
+            self._bump_video_overlay_ms = None
+            self._bump_video_overlay_play_audio = False
+            self._bump_video_overlay_scheduled = False
+        except Exception:
+            pass
+        try:
+            self._hide_bump_video_overlay()
+        except Exception:
+            pass
+
+        # Video bump: play a bump video asset (optionally with inclusive outro overlay).
+        try:
+            vpath = str(video or '').strip()
+        except Exception:
+            vpath = ''
+        if vpath:
+            self._current_bump_is_video = True
+            self._current_bump_video_inclusive = bool(video_inclusive)
+            self._current_bump_video_path = str(vpath)
+
+            # Critical: bump-video inclusive overlay scheduling uses _last_time_pos.
+            # Reset it here so we don't accidentally schedule using the prior episode's
+            # time-pos (which would make the outro appear immediately and then vanish).
+            try:
+                self._last_time_pos = 0.0
+            except Exception:
+                pass
+            try:
+                self.total_duration = 0
+            except Exception:
+                pass
+
+            # Reset EOF watchdog state for bump-video playback.
+            try:
+                self._handled_eof_for_bump_key = None
+            except Exception:
+                pass
+            try:
+                self._play_start_monotonic = time.monotonic()
+                self._played_since_start = False
+            except Exception:
+                pass
+
+            try:
+                self._log_event(
+                    'bump_video_start',
+                    video=str(vpath or ''),
+                    inclusive=bool(video_inclusive),
+                    has_script=bool(script),
+                )
+            except Exception:
+                pass
+
+            # Ensure we're on the normal video surface.
+            try:
+                self.video_stack.setCurrentIndex(0)
+            except Exception:
+                pass
+
+            self.setWindowTitle("Sleepy Shows - [BV]")
+
+            # Reset any lingering FX from a prior bump.
+            self._stop_bump_fx()
+
+            # Reset per-bump audio control state.
+            self._bump_music_cut_active = False
+            self._bump_music_cut_prev_mute = None
+            self._bump_outro_audio_exclusive = False
+
+            # Play bump video.
+            try:
+                target = self._resolve_video_play_target(vpath)
+            except Exception:
+                target = vpath
+            try:
+                self._last_play_target = str(target or '')
+                self._last_play_source_path = str(vpath or '')
+            except Exception:
+                self._last_play_target = None
+                self._last_play_source_path = None
+
+            try:
+                self.player.play(target)
+                self._played_since_start = True
+                try:
+                    self._log_event('play_start', kind='bump_video', source_path=str(vpath or ''), target=str(target or ''), index=int(getattr(self.playlist_manager, 'current_index', -1) or -1))
+                except Exception:
+                    pass
+                self._sync_keep_awake()
+            except Exception:
+                pass
+
+            # Inclusive mode: overlay the outro card during the final N ms of the video.
+            if script and bool(video_inclusive):
+                try:
+                    cards = script.get('cards', []) if isinstance(script, dict) else []
+                except Exception:
+                    cards = []
+                outro_card = None
+                for c in reversed(list(cards or [])):
+                    if isinstance(c, dict) and bool(c.get('is_outro', False)):
+                        outro_card = c
+                        break
+                if outro_card is not None:
+                    try:
+                        self._bump_video_overlay_text = str(outro_card.get('text', '') or '')
+                    except Exception:
+                        self._bump_video_overlay_text = ''
+                    try:
+                        self._bump_video_overlay_ms = int(outro_card.get('duration', 800) or 800)
+                    except Exception:
+                        self._bump_video_overlay_ms = 800
+                    try:
+                        self._bump_video_overlay_play_audio = bool(outro_card.get('outro_audio', False))
+                    except Exception:
+                        self._bump_video_overlay_play_audio = False
+
+                    # If duration is already cached, schedule immediately; otherwise update_duration() will schedule.
+                    try:
+                        dur_ms = self._lookup_bump_video_duration_ms(vpath)
+                    except Exception:
+                        dur_ms = None
+                    if dur_ms is not None:
+                        try:
+                            self._schedule_inclusive_bump_video_overlay(int(dur_ms))
+                        except Exception:
+                            pass
+            elif script and not bool(video_inclusive):
+                # Non-inclusive: run the bump script after the video ends.
+                try:
+                    self._post_video_bump_script = script
+                except Exception:
+                    self._post_video_bump_script = script
+
+            # While this bump is playing, prefetch/stage assets for the next bump.
+            try:
+                QTimer.singleShot(0, self._schedule_prefetch_next_bump_assets)
+            except Exception:
+                pass
+            return
         
         self.video_stack.setCurrentIndex(1) # Bump View
         self.setWindowTitle("Sleepy Shows - [AS]")
@@ -8194,8 +8654,8 @@ class MainWindow(QMainWindow):
 
         Frequency rule:
         - Let N be the number of available interlude/interstitial video files.
-        - Choose a per-bump probability so that over ~100 bumps we'd expect to
-          see about 100/N prerolls (example: N=20 => 5% chance per bump).
+                - Choose a per-bump probability so that over ~100 bumps we'd expect to
+                    see about 2*(100/N) prerolls (example: N=20 => 10% chance per bump).
 
         Cap:
         - Never exceed 80% chance, even for very small N.
@@ -8207,8 +8667,8 @@ class MainWindow(QMainWindow):
         if n <= 0:
             return 0.0
         try:
-            # Example: N=20 => 0.05 (5%).
-            return float(min(0.8, 1.0 / float(n)))
+            # Example: N=20 => 0.10 (10%).
+            return float(min(0.8, 2.0 / float(n)))
         except Exception:
             return 0.0
 
@@ -8532,6 +8992,82 @@ class MainWindow(QMainWindow):
             self._recent_outro_sound_basenames = []
         except Exception:
             pass
+
+    def _schedule_probe_bump_video_durations(self):
+        """Probe bump video durations in background and cache into bump_manager."""
+        try:
+            if bool(getattr(self, '_bump_video_probe_running', False)):
+                return
+        except Exception:
+            pass
+
+        try:
+            vdir = str(getattr(self, 'bump_videos_dir', '') or '').strip()
+        except Exception:
+            vdir = ''
+        if not vdir or not os.path.isdir(vdir):
+            return
+
+        self._bump_video_probe_running = True
+
+        def _worker():
+            bm = getattr(getattr(self, 'playlist_manager', None), 'bump_manager', None)
+            try:
+                if bm is not None:
+                    bm.scan_bump_videos(
+                        vdir,
+                        recursive=True,
+                        max_files=10000,
+                        max_depth=None,
+                        time_budget_s=None,
+                        probe_durations=True,
+                    )
+            finally:
+                def _done():
+                    try:
+                        self._bump_video_probe_running = False
+                    except Exception:
+                        pass
+                try:
+                    QTimer.singleShot(0, _done)
+                except Exception:
+                    _done()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _lookup_bump_video_duration_ms(self, path: str) -> int | None:
+        try:
+            p = str(path or '').strip()
+        except Exception:
+            p = ''
+        if not p:
+            return None
+
+        bm = getattr(getattr(self, 'playlist_manager', None), 'bump_manager', None)
+        if bm is None:
+            return None
+
+        try:
+            ap = os.path.abspath(p)
+        except Exception:
+            ap = p
+        try:
+            k = bm._norm_path_key(ap)
+        except Exception:
+            k = ap
+        if not k:
+            return None
+        try:
+            v = (getattr(bm, 'video_durations_ms', {}) or {}).get(k)
+        except Exception:
+            v = None
+        if v is None:
+            return None
+        try:
+            vv = int(v)
+        except Exception:
+            return None
+        return vv if vv > 0 else None
 
     def _list_outro_sounds_cached(self):
         try:
@@ -8858,7 +9394,7 @@ class MainWindow(QMainWindow):
         self._bump_fx_active = False
         self._bump_fx_policy = None
 
-    def _play_outro_audio(self):
+    def _play_outro_audio(self, *, duration_ms: int | None = None):
         path = None
         try:
             path = str(getattr(self, '_current_bump_outro_audio_path', None) or '').strip()
@@ -8913,7 +9449,14 @@ class MainWindow(QMainWindow):
         self._bump_fx_active = True
         self._bump_fx_policy = 'ms'
         try:
-            self._bump_fx_stop_timer.start(800)
+            dms = None
+            try:
+                dms = int(duration_ms) if duration_ms is not None else None
+            except Exception:
+                dms = None
+            if dms is None or dms <= 0:
+                dms = 800
+            self._bump_fx_stop_timer.start(int(dms))
         except Exception:
             pass
 
@@ -9069,7 +9612,7 @@ class MainWindow(QMainWindow):
              self.lbl_bump_text.setText(card.get('text', ''))
              self.lbl_bump_text.show()
              if bool(card.get('outro_audio', False)):
-                 self._play_outro_audio()
+                 self._play_outro_audio(duration_ms=int(duration))
          elif ctype == 'pause':
              try:
                  self._bump_safe_vpad_ratio = 0.15
@@ -9267,8 +9810,14 @@ class MainWindow(QMainWindow):
         except Exception:
             was_in_bump_view = False
 
-        # If we were playing bump audio, cut it off cleanly.
-        if was_in_bump_view:
+        was_bump = False
+        try:
+            was_bump = bool(was_in_bump_view) or bool(getattr(self, '_in_bump_playback', False))
+        except Exception:
+            was_bump = bool(was_in_bump_view)
+
+        # If we were playing a bump (audio or video), cut it off cleanly.
+        if was_bump:
             try:
                 self.player.stop()
             except Exception:
@@ -9278,6 +9827,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._sync_keep_awake()
+
+        try:
+            self._hide_bump_video_overlay()
+        except Exception:
+            pass
 
         # Stop any active FX and restore bump music mute.
         self._stop_bump_fx()
@@ -9297,6 +9851,16 @@ class MainWindow(QMainWindow):
         self._bump_music_cut_prev_mute = None
         self._bump_outro_audio_exclusive = False
         self._current_bump_outro_audio_path = None
+
+        # Clear bump state flags.
+        try:
+            self._in_bump_playback = False
+            self._current_bump_is_video = False
+            self._current_bump_video_inclusive = False
+            self._current_bump_video_path = None
+            self._post_video_bump_script = None
+        except Exception:
+            pass
 
         self.current_bump_script = None
         try:
@@ -9444,6 +10008,19 @@ class MainWindow(QMainWindow):
     def play_next(self):
         pm = self.playlist_manager
 
+        # One-shot bypass used when a bump has just ended and we want to advance
+        # without immediately triggering the global bump gate again.
+        bypass_bump_gate_once = False
+        try:
+            bypass_bump_gate_once = bool(getattr(self, '_bypass_bump_gate_once', False))
+        except Exception:
+            bypass_bump_gate_once = False
+        if bypass_bump_gate_once:
+            try:
+                self._bypass_bump_gate_once = False
+            except Exception:
+                pass
+
         suppress_ui = False
         try:
             suppress_ui = self._should_suppress_auto_nav_ui()
@@ -9503,7 +10080,12 @@ class MainWindow(QMainWindow):
             pass
 
         # Global bump gate: any forward move plays a bump first when enabled.
-        if self.bumps_enabled and self.video_stack.currentIndex() != 1:
+        if (
+            self.bumps_enabled
+            and (not bypass_bump_gate_once)
+            and self.video_stack.currentIndex() != 1
+            and not bool(getattr(self, '_in_bump_playback', False))
+        ):
             bump_item = None
             try:
                 bump_item = pm.bump_manager.get_random_bump()
@@ -9553,6 +10135,105 @@ class MainWindow(QMainWindow):
         try:
             if self.video_stack.currentIndex() == 1 and self.current_bump_script:
                 return
+        except Exception:
+            pass
+
+        # Video bump EOF handling.
+        try:
+            if bool(getattr(self, '_in_bump_playback', False)) and bool(getattr(self, '_current_bump_is_video', False)):
+                # Non-inclusive: after video ends, run the bump script as a normal bump view.
+                post_script = getattr(self, '_post_video_bump_script', None)
+                inclusive = bool(getattr(self, '_current_bump_video_inclusive', False))
+                if not inclusive:
+                    cards = None
+                    try:
+                        if isinstance(post_script, dict):
+                            cards = post_script.get('cards', [])
+                        elif isinstance(post_script, list):
+                            cards = post_script
+                    except Exception:
+                        cards = None
+
+                if (not inclusive) and isinstance(cards, list) and cards:
+                    try:
+                        self._post_video_bump_script = None
+                    except Exception:
+                        pass
+                    try:
+                        self.video_stack.setCurrentIndex(1)
+                    except Exception:
+                        pass
+                    try:
+                        self.setWindowTitle("Sleepy Shows - [AS]")
+                    except Exception:
+                        pass
+                    try:
+                        self.current_bump_script = list(cards)
+                        self.current_card_index = 0
+                        try:
+                            self._log_event('bump_video_eof', action='start_post_script')
+                        except Exception:
+                            pass
+                        self.advance_bump_card()
+                        return
+                    except Exception:
+                        # If bump script fails, fall through to normal advance.
+                        pass
+
+                try:
+                    if (not inclusive) and (not cards):
+                        self._log_event('bump_video_eof', action='no_post_script_cards')
+                except Exception:
+                    pass
+
+                # Inclusive (or no post-script): bump is complete at video EOF.
+                try:
+                    self._hide_bump_video_overlay()
+                except Exception:
+                    pass
+
+                try:
+                    self._log_event('bump_video_eof', action='complete')
+                except Exception:
+                    pass
+
+                # Clear bump state before advancing.
+                try:
+                    self._in_bump_playback = False
+                    self._current_bump_is_video = False
+                    self._current_bump_video_inclusive = False
+                    self._current_bump_video_path = None
+                    self._post_video_bump_script = None
+                except Exception:
+                    pass
+
+                # Honor bump-gated pending next index first.
+                pending = getattr(self, '_pending_next_index', None)
+                if pending is not None:
+                    idx = int(pending)
+                    record_history = bool(getattr(self, '_pending_next_record_history', True))
+                    self._pending_next_index = None
+                    self._pending_next_record_history = True
+                    try:
+                        self.play_index(idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=True)
+                    except Exception:
+                        pass
+                    return
+
+                # No explicit pending index: advance, but do NOT immediately trigger
+                # another bump gate. Also, do not switch away from the video surface
+                # here; on Linux/X11 hiding the mpv native window can cause mpv to exit
+                # ("window destroyed").
+                self._advancing_from_bump_end = True
+                try:
+                    try:
+                        self._bypass_bump_gate_once = True
+                    except Exception:
+                        pass
+                    self.play_next()
+                    return
+                finally:
+                    self._advancing_from_bump_end = False
         except Exception:
             pass
 
@@ -9715,6 +10396,55 @@ class MainWindow(QMainWindow):
             pass
         self._sync_keep_awake()
 
+        # Bump-video reliability: mpv often reports missing/failed loads via end-file
+        # reason=error (or similar) and does NOT emit playbackFinished.
+        # Treat any non-EOF end-file as "finished" for bump videos so we can still
+        # show the outro/post-script and/or advance past the bump gate.
+        try:
+            if r and r.lower() != 'eof':
+                if bool(getattr(self, '_in_bump_playback', False)) and bool(getattr(self, '_current_bump_is_video', False)):
+                    try:
+                        vpath = str(getattr(self, '_current_bump_video_path', '') or '').strip()
+                    except Exception:
+                        vpath = ''
+
+                    try:
+                        self._log_event('bump_video_end_file', reason=str(r), video=str(vpath or ''), target=str(target or ''))
+                    except Exception:
+                        pass
+
+                    # One warning per failed target per run.
+                    try:
+                        key = str(target or vpath or '').strip()
+                        last = getattr(self, '_bump_video_error_last_dialog_target', None)
+                        if key and last != key:
+                            self._bump_video_error_last_dialog_target = key
+                            try:
+                                QMessageBox.warning(
+                                    self,
+                                    'Bump Video Failed',
+                                    (
+                                        "Sleepy Shows couldn't play the bump video.\n\n"
+                                        f"Reason: {str(r)}\n"
+                                        f"Video: {vpath or '(unknown)'}\n\n"
+                                        f"Debug log: {getattr(self, '_playback_log_path', '')}"
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    try:
+                        QTimer.singleShot(0, self.on_playback_finished)
+                    except Exception:
+                        try:
+                            self.on_playback_finished()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         # Episode title overlay behavior:
         # - Windowed: shown briefly on episode start (see play_index)
         # - Fullscreen: shown only while controls are visible (see show_controls/hide_controls)
@@ -9790,13 +10520,35 @@ class MainWindow(QMainWindow):
             if not self.playlist_manager.current_playlist:
                 return
 
+            # Bump-video playback isn't tied to playlist indices. Track EOF separately.
+            is_bump_video = False
+            try:
+                is_bump_video = bool(getattr(self, '_in_bump_playback', False)) and bool(getattr(self, '_current_bump_is_video', False))
+            except Exception:
+                is_bump_video = False
+
             idx = self.playlist_manager.current_index
-            if idx is None or idx < 0:
+            if (idx is None or idx < 0) and (not is_bump_video):
                 return
 
-            # Only handle EOF once per index.
-            if self._handled_eof_for_index == idx:
-                return
+            if not is_bump_video:
+                # Only handle EOF once per index.
+                if self._handled_eof_for_index == idx:
+                    return
+            else:
+                try:
+                    vpath = str(getattr(self, '_current_bump_video_path', '') or '').strip()
+                except Exception:
+                    vpath = ''
+                try:
+                    key = (str(vpath), float(getattr(self, '_play_start_monotonic', 0.0) or 0.0))
+                except Exception:
+                    key = (str(vpath), 0.0)
+                try:
+                    if getattr(self, '_handled_eof_for_bump_key', None) == key:
+                        return
+                except Exception:
+                    pass
 
             # Avoid firing immediately after starting a file.
             if self._play_start_monotonic is not None:
@@ -9846,7 +10598,13 @@ class MainWindow(QMainWindow):
                 should_advance = True
 
             if should_advance:
-                self._handled_eof_for_index = idx
+                if not is_bump_video:
+                    self._handled_eof_for_index = idx
+                else:
+                    try:
+                        self._handled_eof_for_bump_key = key
+                    except Exception:
+                        pass
                 QTimer.singleShot(0, self.on_playback_finished)
         except Exception:
             return
@@ -9854,6 +10612,38 @@ class MainWindow(QMainWindow):
     def update_duration(self, duration):
         self.total_duration = duration
         self.update_time_label(0, duration) # Reset current? or keep
+
+        # Inclusive bump-video outro alignment: schedule overlay once we know the video length.
+        try:
+            if bool(getattr(self, '_current_bump_is_video', False)) and bool(getattr(self, '_current_bump_video_inclusive', False)):
+                vpath = str(getattr(self, '_current_bump_video_path', '') or '').strip()
+                if vpath:
+                    dur_ms = None
+                    try:
+                        dur_ms = int(round(float(duration) * 1000.0)) if duration is not None else None
+                    except Exception:
+                        dur_ms = None
+                    if dur_ms is not None and dur_ms > 0:
+                        # Cache it for future starts.
+                        try:
+                            bm = getattr(getattr(self, 'playlist_manager', None), 'bump_manager', None)
+                            if bm is not None:
+                                try:
+                                    ap = os.path.abspath(vpath)
+                                except Exception:
+                                    ap = vpath
+                                k = bm._norm_path_key(ap)
+                                if k and (getattr(bm, 'video_durations_ms', None) is not None):
+                                    bm.video_durations_ms[k] = int(dur_ms)
+                        except Exception:
+                            pass
+
+                        try:
+                            self._schedule_inclusive_bump_video_overlay(int(dur_ms))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     def update_time_label(self, current, total):
         def fmt(s):

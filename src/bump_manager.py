@@ -4,6 +4,8 @@ import re
 import shlex
 import math
 import time
+import subprocess
+import json
 
 try:
     from mutagen import File as _mutagen_file
@@ -32,6 +34,13 @@ class BumpManager:
 
         # Base folder for bump audio FX. Scripts reference sounds by filename only.
         self.bump_audio_fx_dir = None
+
+        # Base folder for bump video assets. Scripts reference videos by filename only.
+        self.bump_videos_dir = None
+
+        # Optional cache of exact video durations (ms) keyed by normalized absolute path.
+        # Filled by main.py during startup probing.
+        self.video_durations_ms = {}
 
         # Card timing model: duration is derived from character count.
         # Tuned so that:
@@ -78,15 +87,18 @@ class BumpManager:
 
         # Unified bump queue (complete bumps: script + chosen music + chosen outro).
         self._bump_queue = []  # list[dict]
-        self._bump_queue_size = 24
+        # 0 means "auto" (build as many complete bumps as feasible).
+        self._bump_queue_size = 0
 
         # Exposure score tracking for bump components.
         # Complete bumps are transient; persistent scores live on components.
         # - scripts: {script_key: float}
         # - music:   {normalized_path: float}
+        # - videos:  {normalized_path: float}
         # - outro:   {normalized_path: float}
         self.script_exposure_scores = {}
         self.music_exposure_scores = {}
+        self.video_exposure_scores = {}
         self.outro_exposure_scores = {}
 
         # Install-time exposure seeds for certain bump music tracks.
@@ -110,6 +122,9 @@ class BumpManager:
         self._recent_script_indices = []   # list[int]
         self._recent_music_basenames = []  # list[str] lower
 
+        # Video spacing (for bump videos).
+        self._recent_video_basenames = []  # list[str] lower
+
         # Outro spacing (if outro_sounds is populated).
         self._outro_queue = []  # list[int] indices into outro_sounds
         self._recent_outro_basenames = []  # list[str] lower
@@ -132,6 +147,7 @@ class BumpManager:
 
         self._audio_exts = ('.mp3', '.flac', '.wav', '.ogg', '.m4a', '.aac', '.opus', '.webm', '.mp4')
         self._image_exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+        self._video_exts = ('.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v')
 
         # Bump target cap for music fit. Even if music is longer than this, scripts
         # will not be stretched to fill it.
@@ -330,6 +346,15 @@ class BumpManager:
                 except Exception:
                     self.music_exposure_scores[mk] = float(d)
 
+        video = bump_item.get('video')
+        if video:
+            vk = self._norm_path_key(str(video))
+            if vk:
+                try:
+                    self.video_exposure_scores[vk] = float(self.video_exposure_scores.get(vk, 0.0) or 0.0) + float(d)
+                except Exception:
+                    self.video_exposure_scores[vk] = float(d)
+
         outro = bump_item.get('outro_audio_path')
         if outro:
             ok = self._norm_path_key(str(outro))
@@ -345,10 +370,11 @@ class BumpManager:
             return {
                 'scripts': dict(self.script_exposure_scores or {}),
                 'music': dict(self.music_exposure_scores or {}),
+                'videos': dict(self.video_exposure_scores or {}),
                 'outro': dict(self.outro_exposure_scores or {}),
             }
         except Exception:
-            return {'scripts': {}, 'music': {}, 'outro': {}}
+            return {'scripts': {}, 'music': {}, 'videos': {}, 'outro': {}}
 
     def set_exposure_state(self, state: dict):
         """Restore exposure scores from a persisted snapshot (best-effort)."""
@@ -374,9 +400,25 @@ class BumpManager:
                     out[kk] = vv
             return out
 
-        self.script_exposure_scores = _clean_map(state.get('scripts', {}), norm_paths=False)
-        self.music_exposure_scores = _clean_map(state.get('music', {}), norm_paths=True)
-        self.outro_exposure_scores = _clean_map(state.get('outro', {}), norm_paths=True)
+        try:
+            self.script_exposure_scores = _clean_map(state.get('scripts'), norm_paths=False)
+        except Exception:
+            self.script_exposure_scores = {}
+
+        try:
+            self.music_exposure_scores = _clean_map(state.get('music'), norm_paths=True)
+        except Exception:
+            self.music_exposure_scores = {}
+
+        try:
+            self.video_exposure_scores = _clean_map(state.get('videos'), norm_paths=True)
+        except Exception:
+            self.video_exposure_scores = {}
+
+        try:
+            self.outro_exposure_scores = _clean_map(state.get('outro'), norm_paths=True)
+        except Exception:
+            self.outro_exposure_scores = {}
 
     def _rebuild_outro_queue(self):
         self._outro_queue = self._build_queue_with_recent_exclusion(
@@ -926,7 +968,11 @@ class BumpManager:
         )
 
     def _rebuild_bump_queue(self):
-        """Build a queue of complete bump items (script + selected music + outro).
+        """Build a queue of complete bump items.
+
+        Supports two bump types:
+        - Music bumps: script + selected music track (+ optional outro audio)
+        - Video bumps: script + selected video file (+ optional outro audio)
 
         New strategy:
         - Complete bumps are transient and assembled during queue generation.
@@ -935,18 +981,60 @@ class BumpManager:
         """
         self._bump_queue = []
 
-        if not self.bump_scripts or not self.music_files:
+        if not self.bump_scripts:
             return
 
-        # Bottleneck-based cap.
-        max_n = min(int(len(self.bump_scripts)), int(len(self.music_files)))
+        video_script_indices = []
+        audio_script_indices = []
+        for i, s0 in enumerate(list(self.bump_scripts or [])):
+            if not isinstance(s0, dict):
+                continue
+            vinfo = s0.get('video')
+            is_video = False
+            try:
+                is_video = isinstance(vinfo, dict) and bool(str(vinfo.get('path') or '').strip())
+            except Exception:
+                is_video = False
+            if is_video:
+                video_script_indices.append(int(i))
+            else:
+                audio_script_indices.append(int(i))
+
+        has_video = bool(video_script_indices)
+        has_music = bool(self.music_files)
+
+        # Nothing eligible.
+        if (not has_video) and (not has_music or not audio_script_indices):
+            return
+
+        # Cap by configured target and available sources.
+        try:
+            target_cap = int(getattr(self, '_bump_queue_size', 0) or 0)
+        except Exception:
+            target_cap = 0
+
+        max_audio = 0
+        if has_music and audio_script_indices:
+            # Allow reusing bump music across the queue (with spacing penalties),
+            # so we can cover far more scripts than the raw number of music files.
+            max_audio = int(len(audio_script_indices))
+        max_video = int(len(video_script_indices))
+        max_possible = int(max_audio) + int(max_video)
+        if target_cap <= 0:
+            target_cap = int(max_possible)
+        max_n = min(int(target_cap), int(max_possible))
         if max_n <= 0:
             return
 
         # Update the public-ish size field so debugging/UI can reflect the true cap.
         self._bump_queue_size = int(max_n)
 
-        script_pool = list(range(len(self.bump_scripts)))
+        # Start with all scripts in a single pool; music selection happens only for audio scripts.
+        # If there is no music available, exclude audio scripts entirely.
+        if has_music and audio_script_indices:
+            script_pool = list(video_script_indices) + list(audio_script_indices)
+        else:
+            script_pool = list(video_script_indices)
         music_pool = list(range(len(self.music_files)))
 
         # Precompute which scripts can actually be compressed to fit within the short-bump duration.
@@ -974,6 +1062,7 @@ class BumpManager:
         # queue and across rebuild boundaries.
         temp_script_scores = dict(self.script_exposure_scores or {})
         temp_music_scores = dict(self.music_exposure_scores or {})
+        temp_video_scores = dict(getattr(self, 'video_exposure_scores', {}) or {})
         temp_outro_scores = dict(self.outro_exposure_scores or {})
         temp_music_basename_penalty = {}
 
@@ -1024,21 +1113,46 @@ class BumpManager:
 
             # Prefer scripts that can be compressed to fit the short bump duration.
             # This prevents long (~20s+) scripts from dominating the early queue.
+            # Video bumps are excluded from this rule (they don't target music fit).
             try:
-                timing = s.get('_timing') if isinstance(s, dict) else None
-                if not isinstance(timing, dict):
-                    timing = self._analyze_script_timing(s)
-                    if isinstance(s, dict):
-                        s['_timing'] = dict(timing)
-                can_fit_short = self._can_fit_short_clip(
-                    timing,
-                    target_ms=int(round(float(self._short_bump_s) * 1000.0)),
-                    overage_tolerance=float(short_eps),
-                )
-                if not bool(can_fit_short):
-                    base = float(base) + float(base_penalty)
+                vinfo = s.get('video') if isinstance(s, dict) else None
+                is_video = isinstance(vinfo, dict) and bool(str(vinfo.get('path') or '').strip())
             except Exception:
-                pass
+                is_video = False
+
+            if bool(is_video):
+                # Video bumps also consider the exposure of the referenced video asset.
+                try:
+                    vp = str(vinfo.get('path') or '').strip() if isinstance(vinfo, dict) else ''
+                except Exception:
+                    vp = ''
+                if vp:
+                    try:
+                        vk = self._norm_path_key(vp)
+                    except Exception:
+                        vk = vp
+                    if vk:
+                        try:
+                            base = float(base) + float(temp_video_scores.get(vk, 0.0) or 0.0)
+                        except Exception:
+                            pass
+
+            if not bool(is_video):
+                try:
+                    timing = s.get('_timing') if isinstance(s, dict) else None
+                    if not isinstance(timing, dict):
+                        timing = self._analyze_script_timing(s)
+                        if isinstance(s, dict):
+                            s['_timing'] = dict(timing)
+                    can_fit_short = self._can_fit_short_clip(
+                        timing,
+                        target_ms=int(round(float(self._short_bump_s) * 1000.0)),
+                        overage_tolerance=float(short_eps),
+                    )
+                    if not bool(can_fit_short):
+                        base = float(base) + float(base_penalty)
+                except Exception:
+                    pass
 
             return float(base)
 
@@ -1093,7 +1207,15 @@ class BumpManager:
                     dur_ms = None
             return dur_ms
 
-        used_music_basenames = set()
+        # Avoid near-repeats in a single rebuild, but allow reuse so we can
+        # build a long queue even with a small music library.
+        used_music_basenames_recent = []  # list[str]
+        try:
+            music_spread_n = int(getattr(self, '_recent_spread_n', 8) or 8)
+        except Exception:
+            music_spread_n = 8
+        if music_spread_n <= 0:
+            music_spread_n = 8
 
         def _is_reserved_music_basename(name_lower: str) -> bool:
             """Return True if a basename is reserved for explicit script requests.
@@ -1264,8 +1386,18 @@ class BumpManager:
         # if there are duplicate tracks (e.g. same basename in different folders).
         queue_delta = float(base_penalty) if float(base_penalty) > 0 else 1000.0
 
-        guard = max_n * 4
-        while len(self._bump_queue) < max_n and script_pool and music_pool and guard > 0:
+        guard = max_n * 6
+        # Queue build stats: helps diagnose "why some bumps never appear".
+        stats = {
+            'queue_target': int(max_n),
+            'scripts_total': int(len(self.bump_scripts or [])),
+            'scripts_audio': int(len(audio_script_indices)),
+            'scripts_video': int(len(video_script_indices)),
+            'music_total': int(len(self.music_files or [])),
+            'skipped_audio_no_music_fit': 0,
+            'skipped_audio_missing_or_ineligible': 0,
+        }
+        while len(self._bump_queue) < max_n and script_pool and guard > 0:
             guard -= 1
 
             # If there are any scripts that can fit a 15s clip, enforce that the
@@ -1279,9 +1411,15 @@ class BumpManager:
             except Exception:
                 early_slots = 0
             if early_slots > 0 and short_fit_scripts and int(len(self._bump_queue)) < int(early_slots):
+                # Short-only gate applies to music bumps; never exclude video bumps.
                 filtered = [i for i in candidate_scripts if int(i) in short_fit_scripts]
                 if filtered:
-                    candidate_scripts = filtered
+                    try:
+                        vids = [i for i in candidate_scripts if int(i) in set(video_script_indices)]
+                    except Exception:
+                        vids = []
+                    # Preserve both: all video scripts + short-fit audio scripts.
+                    candidate_scripts = list(dict.fromkeys(list(vids) + list(filtered)))
 
             script_idx = _pick_min_exposure(candidate_scripts, _script_score)
             if script_idx is None:
@@ -1295,11 +1433,85 @@ class BumpManager:
                 script_pool = [i for i in script_pool if int(i) != int(script_idx)]
                 continue
 
+            vinfo = None
+            is_video_bump = False
+            try:
+                vinfo = script.get('video') if isinstance(script, dict) else None
+                is_video_bump = isinstance(vinfo, dict) and bool(str(vinfo.get('path') or '').strip())
+            except Exception:
+                vinfo = None
+                is_video_bump = False
+
+            # --- Video bump: no music selection required. ---
+            if is_video_bump:
+                materialized_script = self._materialize_script_without_music(script)
+                if not materialized_script:
+                    script_pool = [i for i in script_pool if int(i) != int(script_idx)]
+                    continue
+
+                item = {
+                    'type': 'bump',
+                    'script': materialized_script,
+                    'video': str(vinfo.get('path') or ''),
+                    'video_inclusive': bool(vinfo.get('inclusive', False)),
+                }
+                if self._script_needs_outro_audio(script):
+                    outro_path = _pick_outro_by_exposure()
+                    if outro_path:
+                        item['outro_audio_path'] = str(outro_path)
+
+                # Apply temporary exposure penalties.
+                try:
+                    sk = self._script_key(script)
+                    if sk:
+                        temp_script_scores[sk] = float(temp_script_scores.get(sk, 0.0) or 0.0) + float(queue_delta)
+                except Exception:
+                    pass
+                try:
+                    vp = str(vinfo.get('path') or '').strip() if isinstance(vinfo, dict) else ''
+                except Exception:
+                    vp = ''
+                if vp:
+                    try:
+                        vk = self._norm_path_key(vp)
+                    except Exception:
+                        vk = vp
+                    if vk:
+                        try:
+                            temp_video_scores[vk] = float(temp_video_scores.get(vk, 0.0) or 0.0) + float(queue_delta)
+                        except Exception:
+                            temp_video_scores[vk] = float(queue_delta)
+                try:
+                    op = item.get('outro_audio_path')
+                    if op:
+                        ok = self._norm_path_key(str(op))
+                        if ok:
+                            temp_outro_scores[ok] = float(temp_outro_scores.get(ok, 0.0) or 0.0) + float(queue_delta)
+                except Exception:
+                    pass
+
+                self._bump_queue.append(item)
+                script_pool = [i for i in script_pool if int(i) != int(script_idx)]
+                continue
+
+            # --- Music bump: requires music selection. ---
+            if not music_pool:
+                script_pool = [i for i in script_pool if int(i) != int(script_idx)]
+                continue
+
+            # Only disallow the most recently used basenames within this rebuild.
+            disallow_recent = None
+            try:
+                if used_music_basenames_recent:
+                    disallow_recent = set([str(x).lower() for x in used_music_basenames_recent[-int(music_spread_n):] if str(x)])
+            except Exception:
+                disallow_recent = None
+
             music_idx = _select_music_index_for_script(
                 script,
                 music_pool,
                 avoid_basename=last_music_basename,
-                disallow_basenames=used_music_basenames,
+                disallow_basenames=disallow_recent,
             )
             if music_idx is None:
                 # If the avoid rule blocked everything, retry once without it.
@@ -1307,11 +1519,15 @@ class BumpManager:
                     script,
                     music_pool,
                     avoid_basename=None,
-                    disallow_basenames=used_music_basenames,
+                    disallow_basenames=disallow_recent,
                 )
 
             if music_idx is None:
                 # This script can't find any eligible music right now; drop it.
+                try:
+                    stats['skipped_audio_no_music_fit'] = int(stats.get('skipped_audio_no_music_fit', 0) or 0) + 1
+                except Exception:
+                    pass
                 script_pool = [i for i in script_pool if int(i) != int(script_idx)]
                 continue
 
@@ -1328,7 +1544,7 @@ class BumpManager:
                 last_music_basename = None
             try:
                 if last_music_basename:
-                    used_music_basenames.add(str(last_music_basename).lower())
+                    used_music_basenames_recent.append(str(last_music_basename).lower())
             except Exception:
                 pass
 
@@ -1382,7 +1598,17 @@ class BumpManager:
 
             self._bump_queue.append(item)
             script_pool = [i for i in script_pool if int(i) != int(script_idx)]
-            music_pool = [i for i in music_pool if int(i) != int(music_idx)]
+            # Allow reuse of music across the queue; penalties + disallow_recent
+            # provide spacing without artificially capping queue length.
+
+        try:
+            stats['queue_built'] = int(len(self._bump_queue))
+        except Exception:
+            pass
+        try:
+            self._last_bump_queue_stats = dict(stats)
+        except Exception:
+            self._last_bump_queue_stats = None
 
     def get_random_bump(self):
         """
@@ -1405,6 +1631,9 @@ class BumpManager:
                 p = item.get('audio')
                 if p:
                     self._note_recent_music_path(str(p))
+                v = item.get('video')
+                if v:
+                    self._note_recent_video_path(str(v))
                 op = item.get('outro_audio_path')
                 if op:
                     self._note_recent_outro_path(str(op))
@@ -1488,6 +1717,16 @@ class BumpManager:
                 return
             self._recent_music_basenames.append(name)
             self._recent_music_basenames = self._recent_music_basenames[-int(self._recent_spread_n):]
+        except Exception:
+            pass
+
+    def _note_recent_video_path(self, path: str):
+        try:
+            name = os.path.basename(str(path or '')).lower()
+            if not name:
+                return
+            self._recent_video_basenames.append(name)
+            self._recent_video_basenames = self._recent_video_basenames[-int(self._recent_spread_n):]
         except Exception:
             pass
 
@@ -1718,6 +1957,114 @@ class BumpManager:
         except Exception:
             return 'any'
 
+    def _parse_bump_video_pref(self, bump_header):
+        if not bump_header:
+            return None
+
+        # Supports:
+        # - video=clip.mp4
+        # - video="clip name.mp4"
+        # - video=clip name.mp4   (unquoted; best-effort)
+        m = re.search(
+            r'video\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s>]+))',
+            bump_header,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            if (m.group(1) or m.group(2)):
+                value = (m.group(1) or m.group(2) or '').strip()
+                return value or None
+
+            token = (m.group(3) or '').strip()
+            if token:
+                try:
+                    # If the next word is the standalone 'inclusive' flag, keep token.
+                    # Otherwise, unquoted whitespace after the filename is ambiguous (likely a filename with spaces).
+                    trailer = None
+                    try:
+                        s0 = str(bump_header)
+                        mtrail = re.search(r'\bvideo\s*=\s*' + re.escape(token) + r'(?P<rest>[^>]*)', s0, flags=re.IGNORECASE)
+                        if mtrail:
+                            trailer = str(mtrail.group('rest') or '')
+                    except Exception:
+                        trailer = None
+
+                    if trailer:
+                        # Remove quoted segments from trailer.
+                        try:
+                            t = re.sub(r'"[^"]*"|\'[^\']*\'', '', trailer)
+                        except Exception:
+                            t = str(trailer)
+                        # If there's extra stuff and it's not *exactly* the standalone
+                        # inclusive flag, reject (unquoted filenames with spaces are ambiguous).
+                        try:
+                            rest_words = [w for w in re.split(r'\s+', str(t).strip()) if w]
+                        except Exception:
+                            rest_words = []
+
+                        if rest_words:
+                            if not (len(rest_words) == 1 and str(rest_words[0]).lower() == 'inclusive'):
+                                token = ''
+                except Exception:
+                    pass
+            if token:
+                return token
+
+        try:
+            s = str(bump_header)
+            m2 = re.search(r'\bvideo\s*=\s*', s, flags=re.IGNORECASE)
+            if not m2:
+                return None
+            rest = s[m2.end():]
+            rest = re.sub(r'>\s*$', '', rest).strip()
+
+            # If the user wrote: video=clip.mp4 inclusive
+            # treat 'inclusive' as a flag, not part of the filename.
+            try:
+                parts = [p for p in re.split(r'\s+', rest) if p]
+            except Exception:
+                parts = []
+            if len(parts) >= 2:
+                try:
+                    if str(parts[-1]).lower() == 'inclusive':
+                        candidate = " ".join(parts[:-1]).strip()
+                        # Only accept if it's not an unquoted multi-word filename.
+                        if candidate and (' ' not in candidate):
+                            return candidate
+                except Exception:
+                    pass
+
+            # If there are any remaining spaces here, it's an unquoted filename with spaces.
+            # Require quotes for that; otherwise we'd misparse flags/attributes.
+            try:
+                if re.search(r'\s+', rest):
+                    return None
+            except Exception:
+                pass
+
+            # Stop before another attribute like " foo=bar".
+            m3 = re.search(r'\s+\w[\w-]*\s*=', rest)
+            if m3:
+                rest = rest[:m3.start()].strip()
+
+            if (rest.startswith('"') and rest.endswith('"')) or (rest.startswith("'") and rest.endswith("'")):
+                rest = rest[1:-1].strip()
+
+            return rest or None
+        except Exception:
+            return None
+
+    def _parse_bump_inclusive_flag(self, bump_header) -> bool:
+        if not bump_header:
+            return False
+        try:
+            s = str(bump_header)
+            # Remove quoted segments so a quoted word doesn't trigger.
+            s = re.sub(r'"[^"]*"|\'[^\']*\'', '', s)
+            return re.search(r'\binclusive\b', s, flags=re.IGNORECASE) is not None
+        except Exception:
+            return False
+
     def _parse_outro_text(self, outro_tag):
         if not outro_tag:
             return '[sleepy shows]'
@@ -1732,6 +2079,63 @@ class BumpManager:
             s = str(outro_tag).strip()
         except Exception:
             return '[sleepy shows]'
+
+    def _parse_outro_duration_ms(self, outro_tag):
+        """Parse optional outro duration.
+
+        Supported:
+          - <outro>                     -> 800ms (default)
+          - <outro 400ms>               -> 400
+          - <outro "[sleepy]" 0.6s>     -> 600
+          - <outro="[sleepy]" 400>     -> 400 (ms assumed)
+
+        Notes:
+          - Ignores quoted text segments.
+          - Ignores the standalone "audio" argument.
+        """
+        default_ms = 800
+        if not outro_tag:
+            return int(default_ms)
+        try:
+            s = str(outro_tag)
+        except Exception:
+            return int(default_ms)
+
+        try:
+            s2 = re.sub(r'"[^"]*"|\'[^\']*\'', '', s)
+        except Exception:
+            s2 = s
+
+        m = re.match(r'^\s*<\s*outro\b\s*([^>]*)>\s*$', s2, flags=re.IGNORECASE)
+        if not m:
+            return int(default_ms)
+
+        payload = (m.group(1) or '').strip()
+        if not payload:
+            return int(default_ms)
+
+        tokens = [t for t in re.split(r'\s+', payload) if t]
+        best = None
+        for t in tokens:
+            tl = str(t).strip().lower()
+            if not tl or tl == 'audio':
+                continue
+            if tl.startswith('='):
+                tl = tl[1:].strip()
+            tm = re.match(r'^(\d+(?:\.\d+)?)(ms|s)?$', tl)
+            if not tm:
+                continue
+            try:
+                v = float(tm.group(1))
+                unit = (tm.group(2) or 'ms').lower()
+                ms = int(round(v * 1000.0)) if unit == 's' else int(round(v))
+                if ms < 0:
+                    ms = abs(ms)
+                best = int(ms)
+            except Exception:
+                continue
+
+        return int(best) if best is not None else int(default_ms)
 
         # Prefer an explicitly quoted value anywhere in the tag.
         m = re.search(r'"([^"]*)"|\'([^\']*)\'', s)
@@ -1972,6 +2376,48 @@ class BumpManager:
 
         return os.path.normpath(name)
 
+    def _resolve_bump_video_path(self, filename, base_dir=None):
+        name = str(filename or '').strip().strip('"\'')
+        if not name:
+            return ''
+
+        base_name = os.path.basename(name)
+        root, ext = os.path.splitext(base_name)
+        candidates = [name]
+        if not ext:
+            candidates = [root + e for e in self._video_exts]
+
+        vid_dir = str(getattr(self, 'bump_videos_dir', None) or '').strip()
+        if vid_dir:
+            for cand in candidates:
+                candidate = os.path.normpath(os.path.join(vid_dir, cand))
+                if os.path.exists(candidate):
+                    return candidate
+
+            # Refresh-safe fallback: walk the folder if needed.
+            try:
+                for cand in candidates:
+                    hit = self._find_case_insensitive(vid_dir, cand)
+                    if hit and os.path.exists(hit):
+                        return os.path.normpath(hit)
+            except Exception:
+                pass
+
+        if base_dir:
+            for cand in candidates:
+                candidate = os.path.normpath(os.path.join(str(base_dir), cand))
+                if os.path.exists(candidate):
+                    return candidate
+            try:
+                for cand in candidates:
+                    hit = self._find_case_insensitive(str(base_dir), cand)
+                    if hit and os.path.exists(hit):
+                        return os.path.normpath(hit)
+            except Exception:
+                pass
+
+        return os.path.normpath(name)
+
     def _parse_sound_tag(self, sound_tag, *, base_dir=None):
         """Parse a <sound ...> tag.
 
@@ -2151,8 +2597,25 @@ class BumpManager:
             'cards': [],
             'duration': 0,
             'music': self._parse_bump_music_pref(bump_header),
+            'video': None,
             '_script_key': (str(source_key) if source_key else None),
         }
+
+        # Optional bump video header.
+        try:
+            video_name = self._parse_bump_video_pref(bump_header)
+        except Exception:
+            video_name = None
+        if video_name:
+            try:
+                resolved = self._resolve_bump_video_path(video_name, base_dir=base_dir)
+            except Exception:
+                resolved = str(video_name)
+            script['video'] = {
+                'filename': str(video_name),
+                'path': str(resolved),
+                'inclusive': bool(self._parse_bump_inclusive_flag(bump_header)),
+            }
         
         # Split by tags but keep delimiters to process order
         # Regex to find <card>, <outro>, <pause...>
@@ -2382,13 +2845,14 @@ class BumpManager:
                 # Outro tag: show specified text briefly at the end.
                 text = self._parse_outro_text(token_clean)
                 outro_audio = self._parse_outro_audio_flag(token_clean)
-                duration = 800
+                duration = int(self._parse_outro_duration_ms(token_clean))
                 script['cards'].append({
                     'type': 'text',
                     'text': text,
                     'duration': duration,
                     '_duration_mode': 'fixed',
                     'outro_audio': bool(outro_audio),
+                    'is_outro': True,
                 })
                 script['duration'] += duration
                 in_outro = True
@@ -2422,7 +2886,14 @@ class BumpManager:
             script['duration'] = int(timing.get('estimated_ms', 0) or 0)
 
             # Reject scripts that cannot possibly fit under the target cap, even at max scaling.
-            if self._script_can_fit_any_track(timing):
+            # Video bumps don't require music fitting.
+            try:
+                vinfo = script.get('video') if isinstance(script, dict) else None
+                is_video_bump = isinstance(vinfo, dict) and bool(str(vinfo.get('path') or '').strip())
+            except Exception:
+                is_video_bump = False
+
+            if is_video_bump or self._script_can_fit_any_track(timing):
                 self.bump_scripts.append(script)
 
     def scan_music(
@@ -2531,6 +3002,221 @@ class BumpManager:
         except Exception:
             self._music_exposure_seeded_last_changed = False
         self._bump_queue = []
+
+    def scan_bump_videos(
+        self,
+        folder_path,
+        *,
+        recursive: bool = True,
+        max_files: int | None = None,
+        max_depth: int | None = None,
+        time_budget_s: float | None = None,
+        probe_durations: bool = True,
+    ):
+        """Scan for bump video assets and (optionally) probe exact durations.
+
+        Durations are cached into `video_durations_ms` using normalized absolute paths.
+
+        Probing strategy:
+        - Prefer `ffprobe` if available (fast, deterministic).
+        - Fall back to a minimal headless python-mpv probe if ffprobe is missing.
+        """
+        folder_path = str(folder_path or '').strip()
+        if not folder_path or not os.path.isdir(folder_path):
+            return
+
+        try:
+            self.bump_videos_dir = folder_path
+        except Exception:
+            pass
+
+        video_exts = set(getattr(self, '_video_exts', ('.mp4', '.webm', '.mkv', '.mov', '.avi', '.m4v')))
+
+        try:
+            max_files_v = int(max_files) if max_files is not None else None
+            if max_files_v is not None and max_files_v <= 0:
+                max_files_v = None
+        except Exception:
+            max_files_v = None
+
+        try:
+            max_depth_v = int(max_depth) if max_depth is not None else None
+            if max_depth_v is not None and max_depth_v < 0:
+                max_depth_v = None
+        except Exception:
+            max_depth_v = None
+
+        try:
+            budget_v = float(time_budget_s) if time_budget_s is not None else None
+            if budget_v is not None and budget_v <= 0:
+                budget_v = None
+        except Exception:
+            budget_v = None
+
+        start = time.monotonic()
+        scanned = 0
+
+        def _time_exceeded() -> bool:
+            if budget_v is None:
+                return False
+            return (time.monotonic() - start) >= budget_v
+
+        def _ffprobe_duration_ms(path: str) -> int | None:
+            # ffprobe -v error -select_streams v:0 -show_entries format=duration -of json <file>
+            try:
+                res = subprocess.run(
+                    [
+                        'ffprobe',
+                        '-v',
+                        'error',
+                        '-show_entries',
+                        'format=duration',
+                        '-of',
+                        'json',
+                        str(path),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            except Exception:
+                return None
+            if res.returncode != 0:
+                return None
+            try:
+                payload = json.loads(res.stdout or '{}')
+                fmt = payload.get('format') if isinstance(payload, dict) else None
+                dur_s = None
+                if isinstance(fmt, dict):
+                    dur_s = fmt.get('duration')
+                if dur_s is None:
+                    return None
+                dur = float(dur_s)
+                if dur <= 0:
+                    return None
+                return int(round(dur * 1000.0))
+            except Exception:
+                return None
+
+        def _mpv_duration_ms(path: str, *, timeout_s: float = 2.5) -> int | None:
+            # Best-effort headless probe; slower than ffprobe.
+            try:
+                import mpv  # type: ignore
+            except Exception:
+                return None
+
+            player = None
+            try:
+                player = mpv.MPV(
+                    input_default_bindings=False,
+                    input_vo_keyboard=False,
+                    osc=False,
+                    vo='null',
+                    ao='null',
+                )
+                try:
+                    player.keep_open = 'no'
+                except Exception:
+                    pass
+                try:
+                    player.pause = True
+                except Exception:
+                    pass
+                try:
+                    player.play(str(path))
+                except Exception:
+                    return None
+
+                t0 = time.monotonic()
+                while (time.monotonic() - t0) < float(timeout_s):
+                    try:
+                        d = getattr(player, 'duration', None)
+                    except Exception:
+                        d = None
+                    if d is not None:
+                        try:
+                            dur = float(d)
+                            if dur > 0:
+                                return int(round(dur * 1000.0))
+                        except Exception:
+                            pass
+                    time.sleep(0.03)
+                return None
+            finally:
+                try:
+                    if player is not None:
+                        player.terminate()
+                except Exception:
+                    pass
+
+        def _probe_duration_ms(path: str) -> int | None:
+            if not probe_durations:
+                return None
+
+            d = _ffprobe_duration_ms(path)
+            if d is not None:
+                return int(d)
+            return _mpv_duration_ms(path)
+
+        def _note(path: str):
+            nonlocal scanned
+            try:
+                ap = os.path.abspath(str(path))
+            except Exception:
+                ap = str(path)
+            k = self._norm_path_key(ap)
+            if not k:
+                return
+            if k in (self.video_durations_ms or {}):
+                return
+
+            dur_ms = _probe_duration_ms(ap)
+            if dur_ms is not None:
+                try:
+                    self.video_durations_ms[k] = int(dur_ms)
+                except Exception:
+                    self.video_durations_ms[k] = int(dur_ms)
+            scanned += 1
+
+        if not recursive:
+            try:
+                with os.scandir(folder_path) as it:
+                    for entry in it:
+                        if _time_exceeded():
+                            break
+                        if max_files_v is not None and scanned >= max_files_v:
+                            break
+                        try:
+                            if not entry.is_file():
+                                continue
+                            p = entry.path
+                            if os.path.splitext(p)[1].lower() in video_exts:
+                                _note(p)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+        else:
+            base_depth = folder_path.rstrip(os.sep).count(os.sep)
+            for root, dirs, files in os.walk(folder_path):
+                if _time_exceeded():
+                    break
+
+                if max_depth_v is not None:
+                    depth = root.rstrip(os.sep).count(os.sep) - base_depth
+                    if depth >= max_depth_v:
+                        dirs[:] = []
+
+                for f in files:
+                    if _time_exceeded():
+                        break
+                    if max_files_v is not None and scanned >= max_files_v:
+                        dirs[:] = []
+                        break
+                    if os.path.splitext(f)[1].lower() in video_exts:
+                        _note(os.path.join(root, f))
+
 
     def _iter_music_entries(self):
         # Backward compatibility: allow either dict entries or raw paths.

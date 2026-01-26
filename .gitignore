@@ -11,6 +11,9 @@ venv/
 build/
 dist/
 
+# Docs (generated / local)
+docs/
+
 # Tooling caches
 .pytest_cache/
 .mypy_cache/
