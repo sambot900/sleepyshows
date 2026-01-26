@@ -877,6 +877,46 @@ class BumpsModeWidget(QWidget):
         web_files_row.addWidget(self.input_web_files_root, 1)
         layout.addLayout(web_files_row)
 
+        # Global interludes/interstitials folder
+        inter_row = QHBoxLayout()
+        inter_row.setContentsMargins(0, 0, 0, 0)
+        inter_row.setSpacing(10)
+
+        inter_lbl = QLabel("Interludes Folder:")
+        inter_lbl.setStyleSheet("font-size: 16px; color: white;")
+
+        self.input_interludes_dir = QLineEdit()
+        self.input_interludes_dir.setText(str(getattr(self.main_window, '_interstitials_dir', '') or ''))
+        self.input_interludes_dir.setPlaceholderText("Auto-detected: Sleepy Shows Data/TV Vibe/interludes")
+        self.input_interludes_dir.setStyleSheet(
+            "QLineEdit { background: #333; color: white; padding: 6px 10px; border: 1px solid #111; border-radius: 4px; }"
+            "QLineEdit:focus { border: 1px solid #0e1a77; }"
+        )
+
+        def _commit_interludes_dir():
+            try:
+                self.main_window.set_interludes_folder(self.input_interludes_dir.text())
+            except Exception:
+                pass
+            try:
+                self.refresh_status()
+            except Exception:
+                pass
+
+        self.input_interludes_dir.editingFinished.connect(_commit_interludes_dir)
+
+        btn_browse_inter = QPushButton("Browse…")
+        btn_browse_inter.clicked.connect(lambda: self.main_window.choose_interstitial_folder())
+
+        inter_row.addWidget(inter_lbl)
+        inter_row.addWidget(self.input_interludes_dir, 1)
+        inter_row.addWidget(btn_browse_inter)
+        layout.addLayout(inter_row)
+
+        self.lbl_interludes = QLabel("Interludes: (not set)")
+        self.lbl_interludes.setStyleSheet("font-size: 14px; color: #e0e0e0;")
+        layout.addWidget(self.lbl_interludes)
+
         # Auto-config external drive name
         drive_row = QHBoxLayout()
         drive_row.setContentsMargins(0, 0, 0, 0)
@@ -995,6 +1035,22 @@ class BumpsModeWidget(QWidget):
         except Exception:
             pass
 
+        try:
+            inter_dir = str(getattr(self.main_window, '_interstitials_dir', '') or '').strip()
+        except Exception:
+            inter_dir = ''
+        try:
+            inter_n = len(list(getattr(self.main_window.playlist_manager, 'interstitials', []) or []))
+        except Exception:
+            inter_n = 0
+        try:
+            if inter_dir:
+                self.lbl_interludes.setText(f"Interludes: {inter_n}")
+            else:
+                self.lbl_interludes.setText("Interludes: (not set)")
+        except Exception:
+            pass
+
         # Sync toggle state from main window settings.
         try:
             if hasattr(self, 'btn_startup_crickets'):
@@ -1010,6 +1066,8 @@ class BumpsModeWidget(QWidget):
                     str(getattr(self.main_window, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web'
                 )
                 self.lbl_playback_mode.setText("Playback mode: Web" if is_web else "Playback mode: Portable")
+            if hasattr(self, 'input_interludes_dir'):
+                self.input_interludes_dir.setText(str(getattr(self.main_window, '_interstitials_dir', '') or ''))
         except Exception:
             pass
 
@@ -1327,6 +1385,89 @@ def migrate_legacy_playlist_filenames() -> bool:
         return changed
     except Exception:
         return False
+
+
+def migrate_playlists_to_global_interludes(*, playlists_dir: str | None = None) -> int:
+    """Remove obsolete per-playlist interludes fields.
+
+    Interludes/interstitials are now configured globally in user settings.
+    Older playlist JSONs may have persisted these keys:
+    - interlude_folder
+    - interstitial_folder
+
+    This migration strips those keys from playlist files (excluding
+    exposure_scores.json) and returns the number of files modified.
+    """
+    try:
+        base = str(playlists_dir or '').strip()
+    except Exception:
+        base = ''
+    if not base:
+        base = get_local_playlists_dir()
+
+    try:
+        if not base or not os.path.isdir(base):
+            return 0
+    except Exception:
+        return 0
+
+    changed = 0
+    try:
+        names = list(os.listdir(base))
+    except Exception:
+        return 0
+
+    for name in names:
+        try:
+            low = str(name).lower()
+        except Exception:
+            continue
+        if not low.endswith('.json'):
+            continue
+        if low == 'exposure_scores.json':
+            continue
+
+        path = os.path.join(base, str(name))
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        had = False
+        if 'interlude_folder' in data:
+            try:
+                del data['interlude_folder']
+                had = True
+            except Exception:
+                pass
+        if 'interstitial_folder' in data:
+            try:
+                del data['interstitial_folder']
+                had = True
+            except Exception:
+                pass
+
+        if not had:
+            continue
+
+        try:
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+            changed += 1
+        except Exception:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+            continue
+
+    return int(changed)
 
 
 def _windows_iter_drive_roots():
@@ -2869,11 +3010,9 @@ def _write_auto_playlist_json(
 
         # Preserve user settings if the file already existed.
         shuffle_mode = None
-        interstitial_folder = ''
         frequency_settings = None
         try:
             if isinstance(existing, dict):
-                interstitial_folder = existing.get('interstitial_folder', '') or ''
                 shuffle_mode = existing.get('shuffle_mode', None)
                 frequency_settings = existing.get('frequency_settings', None)
                 if shuffle_mode is None:
@@ -2905,7 +3044,6 @@ def _write_auto_playlist_json(
 
         data = {
             'playlist': [{'type': 'video', 'path': p} for p in eps],
-            'interstitial_folder': interstitial_folder,
             'shuffle_default': (shuffle_mode != 'off'),
             'shuffle_mode': shuffle_mode,
             'auto_generated': True,
@@ -3699,6 +3837,16 @@ class EditModeWidget(QWidget):
         self.chk_interstitials = QPushButton("Interludes: OFF")
         self.chk_interstitials.setCheckable(True)
         self.chk_interstitials.toggled.connect(lambda c: self.chk_interstitials.setText(f"Interludes: {'ON' if c else 'OFF'}"))
+        # Interludes only apply when TV Vibes (bumps) are enabled.
+        try:
+            vibes_on = bool(getattr(self.main_window, 'bumps_enabled', False))
+        except Exception:
+            vibes_on = False
+        try:
+            self.chk_interstitials.setEnabled(bool(vibes_on))
+            self.chk_interstitials.setToolTip("Requires TV Vibes")
+        except Exception:
+            pass
         h_gen.addWidget(self.chk_interstitials)
         gen_controls.addLayout(h_gen)
         
@@ -4019,10 +4167,14 @@ class EditModeWidget(QWidget):
 
     def generate_playlist(self):
         # Gather settings from local buttons and call main window
+        try:
+            vibes_on = bool(getattr(self.main_window, 'bumps_enabled', False))
+        except Exception:
+            vibes_on = False
         self.main_window.generate_playlist_logic(
             shuffle_mode=self.shuffle_mode,
-            interstitials=self.chk_interstitials.isChecked(),
-            bumps=self.main_window.bumps_enabled
+            interstitials=(self.chk_interstitials.isChecked() and bool(vibes_on)),
+            bumps=bool(vibes_on)
         )
 
     def cycle_shuffle_mode(self):
@@ -5019,6 +5171,16 @@ class MainWindow(QMainWindow):
                 self._save_user_settings()
         except Exception:
             pass
+
+        # One-time migration: interludes are global-only; strip per-playlist folder keys.
+        try:
+            if not bool(self._settings.get('migrated_playlists_global_interludes_v1', False)):
+                migrate_playlists_to_global_interludes()
+                self._settings['migrated_playlists_global_interludes_v1'] = True
+                # Save even if nothing changed so we don't keep scanning every launch.
+                self._save_user_settings()
+        except Exception:
+            pass
         self.auto_config_volume_label = str(self._settings.get('auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
 
         # Playback topology
@@ -5169,6 +5331,15 @@ class MainWindow(QMainWindow):
             inter_needs_autofix = True
 
         if inter_needs_autofix:
+            # Absolute-path fallback (matches the canonical layout users often quote).
+            try:
+                abs_candidate = os.path.join(os.sep, 'Sleepy Shows Data', 'TV Vibe', 'interludes')
+                if os.path.isdir(abs_candidate):
+                    inter_dir = abs_candidate
+                    inter_needs_autofix = False
+            except Exception:
+                pass
+
             detected_inter = None
             try:
                 if self._is_web_mode():
@@ -5201,6 +5372,10 @@ class MainWindow(QMainWindow):
 
         # Pending bump used for interstitial-before-bump preroll.
         self._pending_bump_item = None
+
+        # Interstitial-before-bump: force prerolls for the first few bumps each launch/session.
+        self._bump_preroll_bumps_seen = 0
+        self._bump_preroll_force_first_n = 3
         
         # Timers
         self.sleep_timer_default_minutes = 180
@@ -7742,6 +7917,24 @@ class MainWindow(QMainWindow):
             self._set_interstitials_folder(folder, persist=True)
             QMessageBox.information(self, "Interludes", f"Found {len(self.playlist_manager.interstitials)} items.")
 
+    def set_interludes_folder(self, folder: str):
+        """Set the global interludes folder (persisted in user settings)."""
+        try:
+            folder = str(folder or '').strip()
+        except Exception:
+            folder = ''
+        if not folder:
+            return
+        try:
+            self._set_interstitials_folder(folder, persist=True)
+        except Exception:
+            return
+        try:
+            if hasattr(self, 'bumps_mode_widget'):
+                self.bumps_mode_widget.refresh_status()
+        except Exception:
+            pass
+
     def _set_interstitials_folder(self, folder: str, *, persist: bool):
         """Scan + set interludes folder, and update the filesystem watcher."""
         try:
@@ -7898,6 +8091,23 @@ class MainWindow(QMainWindow):
     def set_bumps_enabled(self, enabled):
         self.bumps_enabled = bool(enabled)
 
+        # Interludes are only meaningful when TV Vibes is on.
+        try:
+            if hasattr(self, 'edit_mode_widget') and hasattr(self.edit_mode_widget, 'chk_interstitials'):
+                w = self.edit_mode_widget.chk_interstitials
+                try:
+                    w.setEnabled(bool(self.bumps_enabled))
+                except Exception:
+                    pass
+                if not bool(self.bumps_enabled):
+                    # Avoid confusion: if Vibes are OFF, force Interludes OFF.
+                    try:
+                        w.setChecked(False)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def _reload_bump_scripts_for_assets(self):
         """Re-parse bump scripts so <img> and <sound> tags resolve correctly.
 
@@ -7997,6 +8207,22 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Guardrail: Interludes (interstitials) only inject if we have scanned files.
+        # Interludes are a GLOBAL setting (not per-playlist).
+        try:
+            if bool(interstitials) and not list(getattr(self.playlist_manager, 'interstitials', []) or []):
+                folder = str(getattr(self.playlist_manager, 'interstitial_folder', '') or '').strip()
+                hint = (
+                    "Interludes are ON, but no interlude videos were found.\n\n"
+                    "Set the Interludes Folder in Settings (or use 'Set Interludes Folder'), then Generate again.\n"
+                    "Supported video types include .mp4/.mkv/.avi/.webm." 
+                )
+                if folder:
+                    hint = hint + f"\n\nCurrent folder: {folder}"
+                QMessageBox.information(self, "Interludes", hint)
+        except Exception:
+            pass
+
         # Generate playlist contents (injections are decided here).
         self.playlist_manager.generate_playlist(None, False, interstitials, bumps)
         self.playlist_manager.reset_playback_state()
@@ -8038,9 +8264,6 @@ class MainWindow(QMainWindow):
                     item for item in self.playlist_manager.current_playlist
                     if not (isinstance(item, dict) and item.get('type') == 'bump')
                 ],
-                # Prefer new naming but keep backward compatibility.
-                'interlude_folder': self.playlist_manager.interstitial_folder,
-                'interstitial_folder': self.playlist_manager.interstitial_folder,
                 # Backward-compatible boolean (standard shuffle == True)
                 'shuffle_default': (self.playlist_manager.shuffle_mode != 'off'),
                 # Preferred persisted value
@@ -8135,27 +8358,6 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 
-                folder = None
-                if 'interlude_folder' in data:
-                    folder = data.get('interlude_folder')
-                elif 'interstitial_folder' in data:
-                    folder = data.get('interstitial_folder')
-
-                if folder:
-                    try:
-                        if self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
-                            folder = self._path_to_web_files_path(str(folder))
-                    except Exception:
-                        # Fall back to raw stored value.
-                        try:
-                            folder = data.get('interlude_folder') or data.get('interstitial_folder')
-                        except Exception:
-                            folder = folder
-                    try:
-                        self._set_interstitials_folder(folder, persist=False)
-                    except Exception:
-                        pass
-                    
                 self.playlist_manager.current_playlist = data.get('playlist', [])
                 self.playlist_manager.reset_playback_state()
 
@@ -8217,26 +8419,6 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-                folder = None
-                if 'interlude_folder' in data:
-                    folder = data.get('interlude_folder')
-                elif 'interstitial_folder' in data:
-                    folder = data.get('interstitial_folder')
-
-                if folder:
-                    try:
-                        if self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
-                            folder = self._path_to_web_files_path(str(folder))
-                    except Exception:
-                        try:
-                            folder = data.get('interlude_folder') or data.get('interstitial_folder')
-                        except Exception:
-                            folder = folder
-                    try:
-                        self._set_interstitials_folder(folder, persist=False)
-                    except Exception:
-                        pass
-
                 self.playlist_manager.current_playlist = data.get('playlist', [])
                 self.playlist_manager.reset_playback_state()
 
@@ -8283,8 +8465,6 @@ class MainWindow(QMainWindow):
                 item for item in self.playlist_manager.current_playlist
                 if not (isinstance(item, dict) and item.get('type') == 'bump')
             ]
-            data['interlude_folder'] = self.playlist_manager.interstitial_folder
-            data['interstitial_folder'] = self.playlist_manager.interstitial_folder
             data['shuffle_default'] = (self.playlist_manager.shuffle_mode != 'off')
             data['shuffle_mode'] = self.playlist_manager.shuffle_mode
         except Exception:
@@ -8790,8 +8970,8 @@ class MainWindow(QMainWindow):
 
         Frequency rule:
         - Let N be the number of available interlude/interstitial video files.
-                - Choose a per-bump probability so that over ~100 bumps we'd expect to
-                    see about 2*(100/N) prerolls (example: N=20 => 10% chance per bump).
+            - Choose a per-bump probability so that over ~100 bumps we'd expect to
+                see about 4*(100/N) prerolls (example: N=20 => 20% chance per bump).
 
         Cap:
         - Never exceed 80% chance, even for very small N.
@@ -8804,7 +8984,7 @@ class MainWindow(QMainWindow):
             return 0.0
         try:
             # Example: N=20 => 0.10 (10%).
-            return float(min(0.8, 2.0 / float(n)))
+            return float(min(0.8, 4.0 / float(n)))
         except Exception:
             return 0.0
 
@@ -8880,6 +9060,21 @@ class MainWindow(QMainWindow):
 
     def _play_bump_with_optional_interstitial(self, bump_item: dict):
         """Play an interstitial before a bump (best-effort) when TV Vibes is on."""
+        # Track bump ordinal so we can force prerolls early in the session.
+        bump_ordinal = None
+        try:
+            bump_ordinal = int(getattr(self, '_bump_preroll_bumps_seen', 0) or 0) + 1
+            self._bump_preroll_bumps_seen = int(bump_ordinal)
+        except Exception:
+            bump_ordinal = None
+
+        force_preroll = False
+        try:
+            n_force = int(getattr(self, '_bump_preroll_force_first_n', 0) or 0)
+            force_preroll = (bump_ordinal is not None) and (bump_ordinal <= n_force)
+        except Exception:
+            force_preroll = False
+
         # Interstitials only play when TV Vibes (bumps) are enabled.
         if not bool(getattr(self, 'bumps_enabled', False)):
             return self.play_bump(bump_item)
@@ -8905,18 +9100,19 @@ class MainWindow(QMainWindow):
         if not inters:
             return self.play_bump(bump_item)
 
-        try:
-            p = float(self._interstitial_chance_per_bump())
-        except Exception:
-            p = 0.0
-        if p <= 0.0:
-            return self.play_bump(bump_item)
-
-        try:
-            if random.random() >= p:
+        if not force_preroll:
+            try:
+                p = float(self._interstitial_chance_per_bump())
+            except Exception:
+                p = 0.0
+            if p <= 0.0:
                 return self.play_bump(bump_item)
-        except Exception:
-            return self.play_bump(bump_item)
+
+            try:
+                if random.random() >= p:
+                    return self.play_bump(bump_item)
+            except Exception:
+                return self.play_bump(bump_item)
 
         inter_path = None
         try:

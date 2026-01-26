@@ -1,10 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 
+import os
+import sys
+
+
+entry_script = os.path.join('src', 'main.py')
+
+binaries = []
+if sys.platform.startswith('linux'):
+    # Linux-only runtime dependency (bundled so the frozen app works on systems
+    # without the matching lib installed).
+    binaries.append((os.path.join('libs', 'libxcb-cursor.so.0'), '.'))
+
+icon_files = None
+if sys.platform.startswith('win'):
+    icon_path = os.path.join('assets', 'sleepy-ico.ico')
+    if os.path.exists(icon_path):
+        icon_files = [icon_path]
+
+
 a = Analysis(
-    ['src\\main.py'],
+    [entry_script],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=[('assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
@@ -32,7 +51,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\sleepy-ico.ico'],
+    icon=icon_files,
 )
 coll = COLLECT(
     exe,
