@@ -8744,6 +8744,13 @@ class MainWindow(QMainWindow):
             self.show_controls()
 
     def play_bump(self, bump_item):
+        # Safety: if a prior interstitial preroll left a pending bump behind,
+        # clear it now so future prerolls don't get blocked.
+        try:
+            self._pending_bump_item = None
+        except Exception:
+            pass
+
         # Bumps are not episodes; always hide the episode title overlay.
         self._hide_episode_overlay()
         script = bump_item.get('script')
@@ -10439,6 +10446,45 @@ class MainWindow(QMainWindow):
         try:
             if self.video_stack.currentIndex() == 1 and self.current_bump_script:
                 return
+        except Exception:
+            pass
+
+        # Audio-only bump EOF handling (no script controlling progression).
+        # If we don't clear bump state here, `_in_bump_playback` can stay True and
+        # effectively disable future interlude prerolls.
+        try:
+            if bool(getattr(self, '_in_bump_playback', False)) and not bool(getattr(self, '_current_bump_is_video', False)):
+                try:
+                    self._in_bump_playback = False
+                    self.current_bump_script = None
+                    self.current_card_index = 0
+                except Exception:
+                    pass
+
+                # Honor bump-gated pending next index first.
+                pending = getattr(self, '_pending_next_index', None)
+                if pending is not None:
+                    idx = int(pending)
+                    record_history = bool(getattr(self, '_pending_next_record_history', True))
+                    self._pending_next_index = None
+                    self._pending_next_record_history = True
+                    try:
+                        self.play_index(idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=True)
+                    except Exception:
+                        pass
+                    return
+
+                # No explicit pending index: advance, but do NOT immediately trigger another bump gate.
+                self._advancing_from_bump_end = True
+                try:
+                    try:
+                        self._bypass_bump_gate_once = True
+                    except Exception:
+                        pass
+                    self.play_next()
+                    return
+                finally:
+                    self._advancing_from_bump_end = False
         except Exception:
             pass
 
