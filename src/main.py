@@ -2282,8 +2282,12 @@ def auto_detect_tv_vibe_interstitials_dir(volume_label='T7'):
     return None
 
 
-def _scan_episode_files(folder_path):
-    """Return naturally sorted full paths of video files under folder_path."""
+def _scan_episode_files(folder_path, *, use_cache: bool = True):
+    """Return naturally sorted full paths of video files under folder_path.
+
+    Note: cache is helpful for slow network scans, but must be bypassable so
+    portable/external-drive mode can detect deletions and rebuild stale playlists.
+    """
     results = []
     if not folder_path or not os.path.isdir(folder_path):
         # Try loading from static manifest (for network paths)
@@ -2300,7 +2304,7 @@ def _scan_episode_files(folder_path):
         pass
     
     # Try to load from cache (valid for 24 hours)
-    if os.path.exists(cache_file):
+    if bool(use_cache) and os.path.exists(cache_file):
         try:
             cache_age = time.time() - os.path.getmtime(cache_file)
             if cache_age < 86400:  # 24 hours
@@ -2327,11 +2331,12 @@ def _scan_episode_files(folder_path):
         return []
 
     # Save to cache
-    try:
-        with open(cache_file, 'w') as f:
-            json.dump({'folder': folder_path, 'files': results}, f)
-    except Exception:
-        pass
+    if bool(use_cache):
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump({'folder': folder_path, 'files': results}, f)
+        except Exception:
+            pass
 
     return results
 
@@ -2417,6 +2422,18 @@ def _write_auto_playlist_json(
                 return 0
             return 0
 
+        def _norm_path_key(p: str) -> str:
+            try:
+                s = str(p or '').strip()
+            except Exception:
+                s = ''
+            if not s:
+                return ''
+            try:
+                return os.path.normcase(os.path.normpath(s))
+            except Exception:
+                return s
+
         def _default_frequency_settings_for(playlist_filename: str, episode_paths: list[str]) -> dict:
             name = str(playlist_filename or '').lower()
             episode_paths = [str(p) for p in (episode_paths or []) if p]
@@ -2467,6 +2484,169 @@ def _write_auto_playlist_json(
                 if isinstance(v, dict) and v:
                     return True
             return False
+
+        def _extract_video_paths(existing_data: dict | None) -> list[str]:
+            out: list[str] = []
+            if not isinstance(existing_data, dict):
+                return out
+            try:
+                for it in list(existing_data.get('playlist', []) or []):
+                    if isinstance(it, dict) and it.get('type', 'video') == 'video':
+                        p = str(it.get('path') or '').strip()
+                        if p:
+                            out.append(p)
+            except Exception:
+                return []
+            return out
+
+        def _playlist_needs_rebuild(existing_data: dict | None, source_folder: str) -> bool:
+            """Return True if existing playlist differs from on-disk source folder."""
+            if not isinstance(existing_data, dict):
+                return True
+
+            src = str(source_folder or '').strip()
+            if not src or not os.path.isdir(src):
+                return True
+
+            playlist_paths = _extract_video_paths(existing_data)
+            if not playlist_paths:
+                return True
+
+            # Fresh scan (portable correctness over cached speed).
+            disk_paths = _scan_episode_files(src, use_cache=False)
+            if not disk_paths:
+                return True
+
+            disk_set = {_norm_path_key(p) for p in disk_paths if p}
+            playlist_set: set[str] = set()
+
+            missing = 0
+            checked = 0
+            for p in playlist_paths:
+                checked += 1
+                # Relative paths are considered stale in portable mode.
+                try:
+                    if not os.path.isabs(p):
+                        missing += 1
+                        continue
+                except Exception:
+                    missing += 1
+                    continue
+
+                k = _norm_path_key(p)
+                playlist_set.add(k)
+                if k not in disk_set:
+                    missing += 1
+
+            if missing > 0:
+                return True
+
+            # If on-disk has additional episodes not in playlist, rebuild.
+            if len(disk_set - playlist_set) > 0:
+                return True
+
+            return False
+
+        def _retarget_frequency_settings(
+            fs: dict | None,
+            *,
+            old_source_folder: str,
+            new_episode_folder: str,
+            new_episode_paths: list[str],
+        ) -> dict | None:
+            if not isinstance(fs, dict):
+                return None
+
+            new_paths = [str(p) for p in (new_episode_paths or []) if p]
+            new_key_set = {_norm_path_key(p) for p in new_paths}
+
+            def _best_match_for_old_path(old_path: str) -> str | None:
+                op = str(old_path or '').strip()
+                if not op:
+                    return None
+
+                # 1) If it already matches one of the new paths, keep it.
+                if _norm_path_key(op) in new_key_set:
+                    # Preserve exact new-path casing by looking it up.
+                    nk = _norm_path_key(op)
+                    for p in new_paths:
+                        if _norm_path_key(p) == nk:
+                            return p
+                    return op
+
+                # 2) If it was under the old source, translate relative to new source.
+                try:
+                    old_src = str(old_source_folder or '').strip()
+                    new_src = str(new_episode_folder or '').strip()
+                except Exception:
+                    old_src = ''
+                    new_src = ''
+
+                if old_src and new_src:
+                    try:
+                        common = os.path.commonpath([os.path.normpath(old_src), os.path.normpath(op)])
+                    except Exception:
+                        common = ''
+                    if common and _norm_path_key(common) == _norm_path_key(old_src):
+                        try:
+                            rel = os.path.relpath(op, old_src)
+                            candidate = os.path.normpath(os.path.join(new_src, rel))
+                            if _norm_path_key(candidate) in new_key_set:
+                                for p in new_paths:
+                                    if _norm_path_key(p) == _norm_path_key(candidate):
+                                        return p
+                                return candidate
+                        except Exception:
+                            pass
+
+                # 3) Basename match fallback (best-effort).
+                try:
+                    base = os.path.basename(op).lower()
+                except Exception:
+                    base = ''
+                if not base:
+                    return None
+
+                matches = []
+                for p in new_paths:
+                    try:
+                        if os.path.basename(p).lower() == base:
+                            matches.append(p)
+                    except Exception:
+                        continue
+
+                if len(matches) == 1:
+                    return matches[0]
+                if len(matches) > 1:
+                    try:
+                        matches.sort(key=lambda p: natural_sort_key(os.path.basename(p)) + natural_sort_key(p))
+                    except Exception:
+                        pass
+                    return matches[0]
+
+                return None
+
+            def _retarget_path_map(m: object) -> dict:
+                if not isinstance(m, dict):
+                    return {}
+                out: dict = {}
+                for k, v in list(m.items()):
+                    try:
+                        nk = _best_match_for_old_path(str(k))
+                        if not nk:
+                            continue
+                        out[nk] = float(v)
+                    except Exception:
+                        continue
+                return out
+
+            out = {
+                'episode_offsets': _retarget_path_map(fs.get('episode_offsets', {})),
+                'season_offsets': dict(fs.get('season_offsets', {}) or {}),
+                'episode_factors': _retarget_path_map(fs.get('episode_factors', {})),
+                'season_factors': dict(fs.get('season_factors', {}) or {}),
+            }
+            return out
 
         def _playlist_paths_match_source(existing_data: dict | None, source_folder: str) -> bool:
             """Return True if the existing playlist's episode paths appear rooted in source_folder.
@@ -2525,15 +2705,34 @@ def _write_auto_playlist_json(
             # treat the playlist as stale.
             return not (checked > 0 and mismatched >= checked)
 
-        # If the existing playlist still points at a valid folder and its episode paths
-        # match that folder, don't touch it, except to backfill frequency settings.
+        # If the existing playlist still points at a valid folder and matches on-disk
+        # files, don't touch it, except to backfill missing frequency settings.
         try:
             existing_source = (existing or {}).get('source_folder', '')
-            if (
+            keep_existing = bool(
                 existing_source
                 and os.path.isdir(existing_source)
                 and _playlist_paths_match_source(existing, existing_source)
-            ):
+            )
+
+            # If auto-detect found a different folder, treat the playlist as stale.
+            if keep_existing:
+                try:
+                    if _norm_path_key(existing_source) != _norm_path_key(episode_folder):
+                        keep_existing = False
+                except Exception:
+                    keep_existing = False
+
+            # Portable correctness: ensure the playlist still matches local files.
+            # In Web mode we intentionally avoid expensive scans.
+            if keep_existing and (not bool(prefer_existing_playlist_paths)):
+                try:
+                    if _playlist_needs_rebuild(existing, existing_source):
+                        keep_existing = False
+                except Exception:
+                    keep_existing = False
+
+            if keep_existing:
                 try:
                     existing_fs = (existing or {}).get('frequency_settings', None)
                 except Exception:
@@ -2584,7 +2783,8 @@ def _write_auto_playlist_json(
 
         # Scan the detected episode folder when we don't have reusable entries.
         if not eps:
-            eps = _scan_episode_files(episode_folder)
+            # Portable mode: bypass cache to detect deletions.
+            eps = _scan_episode_files(episode_folder, use_cache=bool(prefer_existing_playlist_paths))
             if not eps:
                 return False
 
@@ -2605,6 +2805,21 @@ def _write_auto_playlist_json(
 
         if shuffle_mode not in ('off', 'standard', 'season'):
             shuffle_mode = default_shuffle_mode
+
+        # Preserve/retarget user frequency settings when paths changed.
+        try:
+            if isinstance(existing, dict) and isinstance(frequency_settings, dict):
+                old_src = str(existing.get('source_folder', '') or '')
+                retargeted = _retarget_frequency_settings(
+                    frequency_settings,
+                    old_source_folder=old_src,
+                    new_episode_folder=str(episode_folder or ''),
+                    new_episode_paths=eps,
+                )
+                if isinstance(retargeted, dict) and _has_any_frequency_settings(retargeted):
+                    frequency_settings = retargeted
+        except Exception:
+            pass
 
         if not _has_any_frequency_settings(frequency_settings):
             frequency_settings = _default_frequency_settings_for(playlist_filename, eps)
@@ -4740,6 +4955,14 @@ class MainWindow(QMainWindow):
         except Exception:
             has_portable_drive = False
         self.playback_mode = 'portable' if has_portable_drive else 'web'
+
+        # Startup fix: in Portable mode, proactively auto-config so playlists are
+        # validated against the external drive and rebuilt if stale.
+        try:
+            if self.playback_mode == 'portable':
+                QTimer.singleShot(0, self._try_auto_populate_library)
+        except Exception:
+            pass
 
         # Persist the effective mode so UI + next launch match reality.
         # (If the drive comes/goes, this will flip accordingly on next launch.)
@@ -7427,6 +7650,47 @@ class MainWindow(QMainWindow):
                 result = playlist_io.load_playlist_json(str(playlist_source))
                 data = result.data
 
+                # Portable-mode correctness: if this is an auto-generated playlist
+                # and the external-drive files have changed (deletions/additions),
+                # rebuild it against the current on-disk folder before loading.
+                try:
+                    is_portable = (str(getattr(self, 'playback_mode', 'portable') or 'portable').strip().lower() == 'portable')
+                except Exception:
+                    is_portable = False
+
+                if is_portable:
+                    try:
+                        auto_generated = bool((data or {}).get('auto_generated', False))
+                    except Exception:
+                        auto_generated = False
+                    try:
+                        src_folder = str((data or {}).get('source_folder', '') or '').strip()
+                    except Exception:
+                        src_folder = ''
+
+                    if auto_generated and src_folder and os.path.isdir(src_folder):
+                        try:
+                            pl_name = os.path.basename(str(playlist_source))
+                        except Exception:
+                            pl_name = ''
+                        if pl_name:
+                            try:
+                                updated = _write_auto_playlist_json(
+                                    pl_name,
+                                    src_folder,
+                                    default_shuffle_mode='standard',
+                                    prefer_existing_playlist_paths=False,
+                                )
+                            except Exception:
+                                updated = False
+
+                            if updated:
+                                try:
+                                    result = playlist_io.load_playlist_json(str(playlist_source))
+                                    data = result.data
+                                except Exception:
+                                    pass
+
                 self.current_playlist_filename = filename
 
                 try:
@@ -7928,8 +8192,13 @@ class MainWindow(QMainWindow):
     def _interstitial_chance_per_bump(self) -> float:
         """Chance that a bump gets an interstitial preroll.
 
-        Rule requested: 1/N where N is number of interstitials.
-        Example: 20 interstitials => 5% chance.
+        Frequency rule:
+        - Let N be the number of available interlude/interstitial video files.
+        - Choose a per-bump probability so that over ~100 bumps we'd expect to
+          see about 100/N prerolls (example: N=20 => 5% chance per bump).
+
+        Cap:
+        - Never exceed 80% chance, even for very small N.
         """
         try:
             n = int(len(getattr(self.playlist_manager, 'interstitials', []) or []))
@@ -7938,7 +8207,8 @@ class MainWindow(QMainWindow):
         if n <= 0:
             return 0.0
         try:
-            return float(min(1.0, 1.0 / float(n)))
+            # Example: N=20 => 0.05 (5%).
+            return float(min(0.8, 1.0 / float(n)))
         except Exception:
             return 0.0
 
