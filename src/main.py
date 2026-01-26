@@ -5372,10 +5372,6 @@ class MainWindow(QMainWindow):
 
         # Pending bump used for interstitial-before-bump preroll.
         self._pending_bump_item = None
-
-        # Interstitial-before-bump: force prerolls for the first few bumps each launch/session.
-        self._bump_preroll_bumps_seen = 0
-        self._bump_preroll_force_first_n = 3
         
         # Timers
         self.sleep_timer_default_minutes = 180
@@ -9059,21 +9055,11 @@ class MainWindow(QMainWindow):
         return True
 
     def _play_bump_with_optional_interstitial(self, bump_item: dict):
-        """Play an interstitial before a bump (best-effort) when TV Vibes is on."""
-        # Track bump ordinal so we can force prerolls early in the session.
-        bump_ordinal = None
-        try:
-            bump_ordinal = int(getattr(self, '_bump_preroll_bumps_seen', 0) or 0) + 1
-            self._bump_preroll_bumps_seen = int(bump_ordinal)
-        except Exception:
-            bump_ordinal = None
+        """Play an interstitial before a bump (best-effort) when TV Vibes is on.
 
-        force_preroll = False
-        try:
-            n_force = int(getattr(self, '_bump_preroll_force_first_n', 0) or 0)
-            force_preroll = (bump_ordinal is not None) and (bump_ordinal <= n_force)
-        except Exception:
-            force_preroll = False
+        When TV Vibes is enabled and interludes exist, we always try to play an
+        interlude before each bump.
+        """
 
         # Interstitials only play when TV Vibes (bumps) are enabled.
         if not bool(getattr(self, 'bumps_enabled', False)):
@@ -9099,20 +9085,6 @@ class MainWindow(QMainWindow):
             inters = []
         if not inters:
             return self.play_bump(bump_item)
-
-        if not force_preroll:
-            try:
-                p = float(self._interstitial_chance_per_bump())
-            except Exception:
-                p = 0.0
-            if p <= 0.0:
-                return self.play_bump(bump_item)
-
-            try:
-                if random.random() >= p:
-                    return self.play_bump(bump_item)
-            except Exception:
-                return self.play_bump(bump_item)
 
         inter_path = None
         try:
