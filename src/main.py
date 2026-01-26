@@ -9072,9 +9072,9 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Don't try to preroll while already in bump view.
+        # If a bump is actively playing, don't try to interrupt it with a preroll.
         try:
-            if self.video_stack.currentIndex() == 1:
+            if bool(getattr(self, '_in_bump_playback', False)):
                 return self.play_bump(bump_item)
         except Exception:
             pass
