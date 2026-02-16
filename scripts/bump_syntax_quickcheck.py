@@ -112,6 +112,7 @@ Image tag on first line (used to get dropped).
     assert outro_card.get('type') == 'text'
     assert outro_card.get('duration') == 800
     assert outro_card.get('outro_audio') is True
+    assert str(outro_card.get('text') or '').strip() == '[sleepy shows]'
 
     print('OK')
 

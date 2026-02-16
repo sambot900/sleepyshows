@@ -2066,8 +2066,9 @@ class BumpManager:
             return False
 
     def _parse_outro_text(self, outro_tag):
+        default_text = '[sleepy shows]'
         if not outro_tag:
-            return '[sleepy shows]'
+            return str(default_text)
 
         # Supports:
         # - <outro>
@@ -2075,10 +2076,53 @@ class BumpManager:
         # - <outro="[sleepy shows]" audio>
         # - <outro='[sleepy shows]'>
         # - <outro=[sleepy shows]>
+        # - <outro "[sleepy shows]" 0.6s>
         try:
             s = str(outro_tag).strip()
         except Exception:
-            return '[sleepy shows]'
+            return str(default_text)
+
+        # Prefer an explicitly quoted value anywhere in the tag.
+        try:
+            m = re.search(r'"([^"]*)"|\'([^\']*)\'', s)
+        except Exception:
+            m = None
+        if m:
+            try:
+                value = (m.group(1) or m.group(2) or '').strip()
+            except Exception:
+                value = ''
+            return value or str(default_text)
+
+        # Fallback: take the payload inside the tag and strip known trailing args.
+        m2 = None
+        try:
+            m2 = re.match(r'^\s*<\s*outro\b\s*([^>]*)>\s*$', s, flags=re.IGNORECASE)
+        except Exception:
+            m2 = None
+        if not m2:
+            return str(default_text)
+
+        payload = (m2.group(1) or '').strip()
+        if not payload:
+            return str(default_text)
+
+        if payload.startswith('='):
+            payload = payload[1:].strip()
+
+        # Remove a standalone trailing "audio" argument.
+        try:
+            payload = re.sub(r'\s+audio\s*$', '', payload, flags=re.IGNORECASE).strip()
+        except Exception:
+            payload = payload.strip()
+
+        # Remove a trailing duration token (e.g. "400ms", "0.6s", "400").
+        try:
+            payload = re.sub(r'\s+\d+(?:\.\d+)?\s*(?:ms|s)?\s*$', '', payload, flags=re.IGNORECASE).strip()
+        except Exception:
+            payload = payload.strip()
+
+        return payload or str(default_text)
 
     def _parse_outro_duration_ms(self, outro_tag):
         """Parse optional outro duration.
@@ -2136,25 +2180,6 @@ class BumpManager:
                 continue
 
         return int(best) if best is not None else int(default_ms)
-
-        # Prefer an explicitly quoted value anywhere in the tag.
-        m = re.search(r'"([^"]*)"|\'([^\']*)\'', s)
-        if m:
-            value = (m.group(1) or m.group(2) or '').strip()
-            return value or '[sleepy shows]'
-
-        # Fallback: take anything after the tag name (and optional '=') up to '>'.
-        try:
-            inner = re.sub(r'^\s*<\s*outro\b', '', s, flags=re.IGNORECASE)
-            inner = re.sub(r'>\s*$', '', inner)
-            inner = inner.strip()
-            if inner.startswith('='):
-                inner = inner[1:].strip()
-            # Remove trailing standalone 'audio' arg if present.
-            inner = re.sub(r'\s+audio\s*$', '', inner, flags=re.IGNORECASE).strip()
-            return inner or '[sleepy shows]'
-        except Exception:
-            return '[sleepy shows]'
 
     def _parse_outro_audio_flag(self, outro_tag):
         """Return True if the <outro ...> tag includes an 'audio' argument.

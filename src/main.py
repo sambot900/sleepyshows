@@ -530,6 +530,14 @@ def _get_user_config_dir() -> str:
         return os.path.join(home, ".config", "SleepyShows")
 
 
+def _get_resume_state_path() -> str:
+    try:
+        return os.path.join(_get_user_config_dir(), 'resume_state.json')
+    except Exception:
+        home = os.path.expanduser('~')
+        return os.path.join(home, '.config', 'SleepyShows', 'resume_state.json')
+
+
 def _append_startup_geometry_log(window: QMainWindow):
     try:
         settings_path = _get_user_settings_path()
@@ -4523,7 +4531,7 @@ class PlayModeWidget(QWidget):
         self.btn_prev.setIconSize(QSize(32, 32))
         self.btn_prev.setFixedSize(100, button_height)
         self.btn_prev.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
-        self.btn_prev.clicked.connect(self.main_window.play_previous)
+        self.btn_prev.clicked.connect(self.main_window.skip_to_previous_episode)
         playback_layout.addWidget(self.btn_prev)
         
         # Static play/pause icon button (doesn't change dynamically)
@@ -4541,7 +4549,7 @@ class PlayModeWidget(QWidget):
         self.btn_next.setIconSize(QSize(32, 32))
         self.btn_next.setFixedSize(100, button_height)
         self.btn_next.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
-        self.btn_next.clicked.connect(self.main_window.play_next)
+        self.btn_next.clicked.connect(self.main_window.skip_to_next_episode)
         playback_layout.addWidget(self.btn_next)
         
         self.btn_seek_fwd = TriStrokeButton("+20s")
@@ -5442,6 +5450,23 @@ class MainWindow(QMainWindow):
         self._last_stop_reason = None
         self._last_stop_reason_at = None
 
+        # Resume/recovery: persist the generated episode queue + position locally so we
+        # can recover from transient media loss (e.g., USB disconnect) and resume across restarts.
+        self._resume_state_path = _get_resume_state_path()
+        self._resume_state_save_interval_s = 10.0
+        self._resume_state_last_save_mono = 0.0
+        self._resume_last_payload = None
+
+        self._resume_recover_timer = QTimer(self)
+        self._resume_recover_timer.setInterval(2000)
+        self._resume_recover_timer.timeout.connect(self._attempt_missing_media_recovery)
+        self._resume_recover_target = None
+        self._resume_recover_started_mono = None
+        self._resume_recover_attempts = 0
+
+        # Load any prior resume state now; prompt later once UI is ready.
+        self._resume_loaded_state = self._load_resume_state()
+
         # Best-effort cross-platform sleep/idle inhibitor while actively playing.
         self._keep_awake = KeepAwakeInhibitor()
         self._keep_awake_active = False
@@ -5456,6 +5481,12 @@ class MainWindow(QMainWindow):
         self.playback_watchdog.setInterval(500)
         self.playback_watchdog.timeout.connect(self._check_playback_end)
         self.playback_watchdog.start()
+
+        # Offer resume after startup settles.
+        try:
+            QTimer.singleShot(0, self._maybe_offer_resume_from_disk)
+        except Exception:
+            pass
         
         # Failsafe timer for fullscreen
         self.failsafe_timer = QTimer(self)
@@ -5810,6 +5841,463 @@ class MainWindow(QMainWindow):
             os.replace(tmp_path, self._settings_path)
         except Exception:
             return
+
+    def _load_resume_state(self) -> dict:
+        try:
+            path = str(getattr(self, '_resume_state_path', '') or '').strip()
+        except Exception:
+            path = ''
+        if not path:
+            return {}
+        try:
+            if not os.path.exists(path):
+                return {}
+        except Exception:
+            return {}
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_resume_state(self, payload: dict) -> bool:
+        try:
+            path = str(getattr(self, '_resume_state_path', '') or '').strip()
+        except Exception:
+            path = ''
+        if not path:
+            return False
+
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except Exception:
+            pass
+
+        try:
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp, path)
+            return True
+        except Exception:
+            return False
+
+    def _capture_resume_state(self) -> dict:
+        pm = getattr(self, 'playlist_manager', None)
+        playlist_items = []
+        queue_keys = []
+        current_episode_key = None
+        current_episode_path = None
+
+        try:
+            if pm is not None:
+                # Persist a bump-free representation of the working playlist.
+                for it in list(getattr(pm, 'current_playlist', []) or []):
+                    if isinstance(it, dict):
+                        t = str(it.get('type', 'video') or 'video')
+                        if t == 'bump':
+                            continue
+                        p = str(it.get('path', '') or '').strip()
+                        if not p:
+                            continue
+                        playlist_items.append({'type': t, 'path': p})
+                    elif isinstance(it, str):
+                        p = str(it).strip()
+                        if p:
+                            playlist_items.append({'type': 'video', 'path': p})
+        except Exception:
+            playlist_items = []
+
+        try:
+            if pm is not None:
+                queue_keys = pm.export_episode_queue_keys()
+        except Exception:
+            queue_keys = []
+
+        try:
+            idx = int(getattr(pm, 'current_index', -1) or -1) if pm is not None else -1
+        except Exception:
+            idx = -1
+        if idx >= 0 and pm is not None:
+            try:
+                item = pm.current_playlist[idx]
+            except Exception:
+                item = None
+            try:
+                if item is not None and pm.is_episode_item(item):
+                    p = str(pm._episode_path_for_index(idx) or '').strip()
+                    current_episode_path = p or None
+                    k = pm._norm_path_key(p)
+                    current_episode_key = str(k) if k else None
+            except Exception:
+                pass
+
+        # Best-effort time position (prefer signal-fed cache).
+        pos_s = None
+        try:
+            pos_s = self._last_time_pos
+        except Exception:
+            pos_s = None
+        if pos_s is None:
+            try:
+                if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                    pos_s = getattr(self.player.mpv, 'time_pos', None)
+            except Exception:
+                pos_s = None
+
+        dur_s = None
+        try:
+            dur_s = self.total_duration
+        except Exception:
+            dur_s = None
+        if not dur_s:
+            try:
+                if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                    dur_s = getattr(self.player.mpv, 'duration', None)
+            except Exception:
+                dur_s = None
+
+        try:
+            playlist_filename = getattr(self, 'current_playlist_filename', None)
+        except Exception:
+            playlist_filename = None
+
+        try:
+            target = str(getattr(self, '_last_play_target', '') or '').strip() or None
+        except Exception:
+            target = None
+        try:
+            source_path = str(getattr(self, '_last_play_source_path', '') or '').strip() or None
+        except Exception:
+            source_path = None
+
+        try:
+            active = bool(self._is_actively_playing())
+        except Exception:
+            active = False
+
+        payload = {
+            'version': 1,
+            'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            'active_playback': bool(active),
+            'playback_mode': str(getattr(self, 'playback_mode', 'portable') or 'portable'),
+            'shuffle_mode': str(getattr(pm, 'shuffle_mode', 'off') or 'off') if pm is not None else 'off',
+            'playlist_filename': playlist_filename,
+            'playlist_items': playlist_items,
+            'current_index': int(idx),
+            'current_episode_key': current_episode_key,
+            'current_episode_path': current_episode_path,
+            'queue_episode_keys': list(queue_keys or []),
+            'time_pos_s': float(pos_s) if pos_s is not None else None,
+            'duration_s': float(dur_s) if dur_s is not None else None,
+            'last_play_target': target,
+            'last_play_source_path': source_path,
+            'last_stop_reason': getattr(self, '_last_stop_reason', None),
+        }
+        return payload
+
+    def _persist_resume_state(self, *, force: bool = False, reason: str = '') -> None:
+        try:
+            now = float(time.monotonic())
+        except Exception:
+            now = 0.0
+
+        try:
+            last = float(getattr(self, '_resume_state_last_save_mono', 0.0) or 0.0)
+        except Exception:
+            last = 0.0
+
+        if (not force) and last and now and (now - last) < float(getattr(self, '_resume_state_save_interval_s', 10.0) or 10.0):
+            return
+
+        try:
+            payload = self._capture_resume_state()
+        except Exception:
+            return
+
+        # Skip pointless writes when nothing is loaded.
+        try:
+            has_playlist = bool((payload or {}).get('playlist_items'))
+            has_target = bool((payload or {}).get('last_play_target'))
+            if not has_playlist and not has_target:
+                return
+        except Exception:
+            pass
+
+        try:
+            if reason:
+                payload['save_reason'] = str(reason)
+        except Exception:
+            pass
+
+        ok = False
+        try:
+            ok = bool(self._write_resume_state(payload))
+        except Exception:
+            ok = False
+        if ok:
+            try:
+                self._resume_state_last_save_mono = float(now)
+            except Exception:
+                pass
+            try:
+                self._resume_last_payload = payload
+            except Exception:
+                pass
+
+    def _maybe_offer_resume_from_disk(self):
+        # Only offer if we're idle (not already playing something).
+        try:
+            if self._is_actively_playing():
+                return
+        except Exception:
+            pass
+
+        st = {}
+        try:
+            st = dict(getattr(self, '_resume_loaded_state', {}) or {})
+        except Exception:
+            st = {}
+        if not st:
+            return
+
+        try:
+            # Require at least a target or a playlist to restore.
+            if not st.get('last_play_target') and not st.get('playlist_items') and not st.get('playlist_filename'):
+                return
+        except Exception:
+            return
+
+        # If the target exists, we can resume immediately. If it doesn't, user can still
+        # accept and we'll wait/retry (useful for USB reconnect).
+        target = str(st.get('last_play_target') or '').strip()
+        pos_s = st.get('time_pos_s', None)
+        try:
+            pos_s = float(pos_s) if pos_s is not None else None
+        except Exception:
+            pos_s = None
+
+        msg = "Resume last playback?"
+        detail = ""
+        try:
+            if target:
+                detail = f"\n\nFile: {target}"
+        except Exception:
+            detail = ""
+        try:
+            if pos_s is not None and pos_s > 0:
+                m, s = divmod(int(pos_s), 60)
+                h, m = divmod(m, 60)
+                ts = f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+                detail = detail + f"\nResume at: {ts}"
+        except Exception:
+            pass
+
+        try:
+            resp = QMessageBox.question(self, 'Resume Playback', msg + detail, QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        except Exception:
+            return
+
+        if resp != QMessageBox.Yes:
+            # User said no; delete the resume file so it doesn't keep prompting.
+            try:
+                rp = str(getattr(self, '_resume_state_path', '') or '').strip()
+                if rp and os.path.exists(rp):
+                    os.remove(rp)
+            except Exception:
+                pass
+            try:
+                self._log_event('resume_discarded')
+            except Exception:
+                pass
+            return
+
+        try:
+            self._log_event('resume_accepted')
+        except Exception:
+            pass
+        try:
+            self._apply_resume_state(st)
+        except Exception:
+            return
+
+    def _apply_resume_state(self, st: dict):
+        pm = getattr(self, 'playlist_manager', None)
+        if pm is None:
+            return
+
+        # 1) Restore playlist contents (prefer loading from file).
+        filename = str(st.get('playlist_filename') or '').strip()
+        if filename and os.path.exists(filename):
+            try:
+                self.load_playlist(filename, auto_play=False)
+            except Exception:
+                pass
+        else:
+            items = list(st.get('playlist_items') or [])
+            if items:
+                try:
+                    pm.current_playlist = items
+                except Exception:
+                    pm.current_playlist = []
+                try:
+                    pm.reset_playback_state()
+                except Exception:
+                    pass
+                try:
+                    mode = str(st.get('shuffle_mode') or getattr(pm, 'shuffle_mode', 'off') or 'off')
+                    self.set_shuffle_mode(mode, update_ui=True)
+                except Exception:
+                    pass
+
+        # 2) Restore queue (best-effort).
+        try:
+            pm.restore_episode_queue_from_keys(list(st.get('queue_episode_keys') or []))
+        except Exception:
+            pass
+
+        # 3) Pick the episode index to resume.
+        idx = -1
+        try:
+            k = str(st.get('current_episode_key') or '').strip()
+            if k:
+                idx = pm.index_for_episode_key(k)
+        except Exception:
+            idx = -1
+        if idx < 0:
+            try:
+                idx = int(st.get('current_index', -1) or -1)
+            except Exception:
+                idx = -1
+
+        if idx < 0:
+            return
+
+        # Resume playback without bump gating.
+        try:
+            self.play_index(int(idx), record_history=False, bypass_bump_gate=True, suppress_ui=False)
+        except Exception:
+            return
+
+        # Seek after playback has had a moment to load.
+        try:
+            pos_s = st.get('time_pos_s', None)
+            pos_s = float(pos_s) if pos_s is not None else None
+        except Exception:
+            pos_s = None
+        if pos_s is not None and pos_s > 0:
+            seek_to = max(0.0, float(pos_s) - 3.0)
+            try:
+                QTimer.singleShot(350, lambda: self.player.seek(seek_to))
+            except Exception:
+                try:
+                    self.player.seek(seek_to)
+                except Exception:
+                    pass
+
+    def _maybe_start_missing_media_recovery(self, *, reason: str):
+        # Only start recovery if the current target path is missing.
+        try:
+            target = str(getattr(self, '_last_play_target', '') or '').strip()
+        except Exception:
+            target = ''
+        if not target:
+            return
+
+        missing = False
+        try:
+            missing = (not os.path.exists(target))
+        except Exception:
+            missing = False
+        if not missing:
+            return
+
+        try:
+            self._log_event('media_missing', reason=str(reason or ''), target=str(target))
+        except Exception:
+            pass
+
+        # Persist state immediately so we resume from as close as possible.
+        try:
+            self._persist_resume_state(force=True, reason=f'media_missing:{reason}')
+        except Exception:
+            pass
+
+        # Start/restart the recovery loop.
+        try:
+            self._resume_recover_target = target
+            self._resume_recover_started_mono = float(time.monotonic())
+            self._resume_recover_attempts = 0
+            if not self._resume_recover_timer.isActive():
+                self._resume_recover_timer.start()
+        except Exception:
+            pass
+
+    def _attempt_missing_media_recovery(self):
+        # Stop after a while to avoid infinite polling.
+        try:
+            started = float(getattr(self, '_resume_recover_started_mono', 0.0) or 0.0)
+            if started and (float(time.monotonic()) - started) > 600.0:
+                self._resume_recover_timer.stop()
+                return
+        except Exception:
+            pass
+
+        try:
+            target = str(getattr(self, '_resume_recover_target', '') or '').strip()
+        except Exception:
+            target = ''
+        if not target:
+            try:
+                self._resume_recover_timer.stop()
+            except Exception:
+                pass
+            return
+
+        try:
+            self._resume_recover_attempts = int(getattr(self, '_resume_recover_attempts', 0) or 0) + 1
+        except Exception:
+            pass
+
+        try:
+            if not os.path.exists(target):
+                return
+        except Exception:
+            return
+
+        # Target is back. Try to resume playback.
+        try:
+            self._log_event('media_reappeared', target=str(target), attempts=int(getattr(self, '_resume_recover_attempts', 0) or 0))
+        except Exception:
+            pass
+
+        try:
+            self._resume_recover_timer.stop()
+        except Exception:
+            pass
+
+        st = None
+        try:
+            st = getattr(self, '_resume_last_payload', None)
+        except Exception:
+            st = None
+        if not isinstance(st, dict):
+            try:
+                st = self._load_resume_state()
+            except Exception:
+                st = None
+        if not isinstance(st, dict):
+            st = {}
+
+        try:
+            self._apply_resume_state(st)
+        except Exception:
+            # Fallback: at least try to replay the file.
+            try:
+                self.player.play(target)
+            except Exception:
+                pass
 
     def set_startup_crickets_enabled(self, enabled: bool):
         self.startup_crickets_enabled = bool(enabled)
@@ -8223,6 +8711,11 @@ class MainWindow(QMainWindow):
         self.playlist_manager.generate_playlist(None, False, interstitials, bumps)
         self.playlist_manager.reset_playback_state()
         self.set_shuffle_mode(shuffle_mode)
+
+        try:
+            self._persist_resume_state(force=True, reason='generate_playlist')
+        except Exception:
+            pass
         
         self.edit_mode_widget.refresh_playlist_list()
         
@@ -8368,6 +8861,11 @@ class MainWindow(QMainWindow):
                 # Keep current_index at -1 until the user starts playback (or auto_play starts it).
                 self.playlist_manager.current_index = -1
                 self.playlist_manager.rebuild_queue(current_index=self.playlist_manager.current_index)
+
+                try:
+                    self._persist_resume_state(force=True, reason='load_playlist')
+                except Exception:
+                    pass
                 
                 self.edit_mode_widget.refresh_playlist_list()
                 self.play_mode_widget.refresh_episode_list()
@@ -8426,6 +8924,11 @@ class MainWindow(QMainWindow):
 
                 self.playlist_manager.current_index = -1
                 self.playlist_manager.rebuild_queue(current_index=self.playlist_manager.current_index)
+
+                try:
+                    self._persist_resume_state(force=True, reason='load_playlist_editor')
+                except Exception:
+                    pass
 
                 self.edit_mode_widget.refresh_playlist_list()
                 try:
@@ -10307,6 +10810,17 @@ class MainWindow(QMainWindow):
             self._pending_bump_item = None
         except Exception:
             pass
+
+        try:
+            if hasattr(self, '_resume_recover_timer'):
+                self._resume_recover_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            self._persist_resume_state(force=True, reason='stop_playback')
+        except Exception:
+            pass
         self.player.stop()
         try:
             self._set_stop_reason('stop_playback')
@@ -10411,6 +10925,133 @@ class MainWindow(QMainWindow):
                 return
 
         self.play_index(next_idx, record_history=record_history, suppress_ui=bool(suppress_ui))
+
+    def _fallback_previous_episode_index(self) -> int:
+        pm = getattr(self, 'playlist_manager', None)
+        if pm is None:
+            return -1
+        try:
+            anchor = pm._anchor_episode_index(getattr(pm, 'current_index', -1))
+        except Exception:
+            anchor = -1
+        if anchor < 0:
+            return -1
+        # Best-effort chronological previous episode.
+        try:
+            ordered = pm._chronological_episode_indices()
+        except Exception:
+            ordered = []
+        if not ordered or anchor not in ordered:
+            return -1
+        pos = ordered.index(anchor)
+        if pos <= 0:
+            return -1
+        return int(ordered[pos - 1])
+
+    def skip_to_next_episode(self):
+        """Manual Next: always skip to the next episode (no interludes/bumps).
+
+        Interludes/bumps only play during natural EOF auto-advance.
+        """
+        pm = getattr(self, 'playlist_manager', None)
+        if pm is None:
+            return
+
+        # Manual forward navigation mid-episode counts as a skip/cut-off.
+        try:
+            self._maybe_apply_episode_skip_penalty()
+        except Exception:
+            pass
+
+        # If we were in bump playback or a bump-gated transition, cancel it.
+        try:
+            self._pending_next_index = None
+            self._pending_next_record_history = True
+        except Exception:
+            pass
+        try:
+            self.stop_bump_playback()
+        except Exception:
+            pass
+
+        next_idx = -1
+        # If user had navigated back, honor forward history first (episode-only).
+        try:
+            next_idx = pm.step_forward_in_history_to_episode()
+        except Exception:
+            next_idx = -1
+
+        if next_idx == -1:
+            try:
+                next_idx = pm.get_next_episode_index_episode_only(current_index=getattr(pm, 'current_index', -1))
+            except Exception:
+                next_idx = -1
+
+        if next_idx == -1:
+            try:
+                self._set_stop_reason('end_of_playlist')
+            except Exception:
+                pass
+            try:
+                self.stop_playback()
+            except Exception:
+                pass
+            return
+
+        # Manual skip should not trigger bump-gating.
+        try:
+            self.play_index(int(next_idx), record_history=True, bypass_bump_gate=True, suppress_ui=False)
+        except Exception:
+            return
+
+    def skip_to_previous_episode(self):
+        """Manual Previous: always go to the previous episode (no interludes/bumps)."""
+        pm = getattr(self, 'playlist_manager', None)
+        if pm is None:
+            return
+
+        # First press goes to start of current episode if we're not near the beginning.
+        try:
+            pos = self._last_time_pos
+            if pos is None and hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                pos = getattr(self.player.mpv, 'time_pos', None)
+            if pos is not None and float(pos) > 3.0:
+                self.player.seek(0)
+                return
+        except Exception:
+            pass
+
+        # If we were in bump playback or a bump-gated transition, cancel it.
+        try:
+            self._pending_next_index = None
+            self._pending_next_record_history = True
+        except Exception:
+            pass
+        try:
+            self.stop_bump_playback()
+        except Exception:
+            pass
+
+        prev_idx = -1
+        try:
+            prev_idx = pm.step_back_in_history_to_episode()
+        except Exception:
+            prev_idx = -1
+
+        if prev_idx == -1:
+            try:
+                prev_idx = int(self._fallback_previous_episode_index())
+            except Exception:
+                prev_idx = -1
+
+        if prev_idx == -1:
+            return
+
+        # History navigation should not append new history entries.
+        try:
+            self.play_index(int(prev_idx), record_history=False, bypass_bump_gate=True, suppress_ui=False)
+        except Exception:
+            return
 
     def play_previous(self):
         # 1) First press goes to start of current episode if we're not near the beginning.
@@ -10625,6 +11266,18 @@ class MainWindow(QMainWindow):
             pass
         self._sync_keep_awake()
 
+        try:
+            self._persist_resume_state(force=True, reason='player_error')
+        except Exception:
+            pass
+
+        # If this looks like a transient media disappearance (e.g., USB disconnect),
+        # start a best-effort recovery loop that waits for the file to reappear.
+        try:
+            self._maybe_start_missing_media_recovery(reason='player_error')
+        except Exception:
+            pass
+
         # In packaged builds, stdout/stderr isn't visible. Show a helpful, non-spammy
         # dialog when playback fails so users understand what's wrong.
         try:
@@ -10718,6 +11371,12 @@ class MainWindow(QMainWindow):
             self._log_event('paused', paused=bool(paused))
         except Exception:
             pass
+
+        try:
+            if bool(paused):
+                self._persist_resume_state(force=True, reason='paused')
+        except Exception:
+            pass
         self._sync_keep_awake()
 
     def on_mpv_end_file_reason(self, reason: str):
@@ -10742,6 +11401,18 @@ class MainWindow(QMainWindow):
         try:
             if r and r.lower() != 'eof':
                 self._set_stop_reason(f'mpv_end_file:{r}')
+        except Exception:
+            pass
+
+        try:
+            if r and r.lower() != 'eof':
+                self._persist_resume_state(force=True, reason=f'mpv_end_file:{r}')
+        except Exception:
+            pass
+
+        try:
+            if r and r.lower() != 'eof':
+                self._maybe_start_missing_media_recovery(reason=f'mpv_end_file:{r}')
         except Exception:
             pass
         self._sync_keep_awake()
@@ -10837,6 +11508,11 @@ class MainWindow(QMainWindow):
             self._resume_sleep_countdown_if_needed()
 
         self._last_time_pos = time_pos
+
+        try:
+            self._persist_resume_state(force=False, reason='time_pos')
+        except Exception:
+            pass
 
         if not self.is_seeking and self.total_duration > 0:
             dur = float(self.total_duration)
@@ -10963,6 +11639,11 @@ class MainWindow(QMainWindow):
         self.total_duration = duration
         self.update_time_label(0, duration) # Reset current? or keep
 
+        try:
+            self._persist_resume_state(force=False, reason='duration')
+        except Exception:
+            pass
+
         # Inclusive bump-video outro alignment: schedule overlay once we know the video length.
         try:
             if bool(getattr(self, '_current_bump_is_video', False)) and bool(getattr(self, '_current_bump_video_inclusive', False)):
@@ -11017,6 +11698,17 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         try:
             self._log_event('app_close')
+        except Exception:
+            pass
+
+        try:
+            self._persist_resume_state(force=True, reason='app_close')
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, '_resume_recover_timer'):
+                self._resume_recover_timer.stop()
         except Exception:
             pass
         try:

@@ -845,6 +845,159 @@ class PlaylistManager:
         self.playback_history_pos += 1
         return self.playback_history[self.playback_history_pos]
 
+    def step_back_in_history_to_episode(self) -> int:
+        """Step backward in playback history to the previous *episode* item."""
+        try:
+            if not self.playback_history:
+                return -1
+        except Exception:
+            return -1
+
+        try:
+            pos = int(getattr(self, 'playback_history_pos', -1))
+        except Exception:
+            pos = -1
+        if pos <= 0:
+            pos = 0
+
+        j = pos - 1
+        while j >= 0:
+            try:
+                idx = int(self.playback_history[j])
+            except Exception:
+                j -= 1
+                continue
+            try:
+                if 0 <= idx < len(self.current_playlist) and self.is_episode_item(self.current_playlist[idx]):
+                    self.playback_history_pos = int(j)
+                    return int(idx)
+            except Exception:
+                pass
+            j -= 1
+
+        # If we didn't find any episode earlier, clamp to the beginning.
+        try:
+            self.playback_history_pos = 0
+        except Exception:
+            pass
+        return -1
+
+    def step_forward_in_history_to_episode(self) -> int:
+        """Step forward in playback history to the next *episode* item."""
+        try:
+            if not self.playback_history:
+                return -1
+        except Exception:
+            return -1
+
+        try:
+            pos = int(getattr(self, 'playback_history_pos', -1))
+        except Exception:
+            pos = -1
+
+        j = pos + 1
+        while j < len(self.playback_history):
+            try:
+                idx = int(self.playback_history[j])
+            except Exception:
+                j += 1
+                continue
+            try:
+                if 0 <= idx < len(self.current_playlist) and self.is_episode_item(self.current_playlist[idx]):
+                    self.playback_history_pos = int(j)
+                    return int(idx)
+            except Exception:
+                pass
+            j += 1
+
+        # Clamp to end.
+        try:
+            self.playback_history_pos = len(self.playback_history) - 1
+        except Exception:
+            pass
+        return -1
+
+    def _anchor_episode_index(self, current_index: int | None = None) -> int:
+        """Return the nearest episode index at or before current_index."""
+        if current_index is None:
+            current_index = getattr(self, 'current_index', -1)
+        try:
+            i = int(current_index)
+        except Exception:
+            i = -1
+
+        if i < 0:
+            return -1
+
+        try:
+            if 0 <= i < len(self.current_playlist) and self.is_episode_item(self.current_playlist[i]):
+                return int(i)
+        except Exception:
+            pass
+
+        j = i
+        while j >= 0:
+            try:
+                if self.is_episode_item(self.current_playlist[j]):
+                    return int(j)
+            except Exception:
+                pass
+            j -= 1
+        return -1
+
+    def get_next_episode_index_episode_only(self, current_index: int | None = None) -> int:
+        """Return the next episode index, skipping any interstitial/bump items."""
+        if not self.current_playlist:
+            return -1
+
+        anchor = self._anchor_episode_index(current_index=current_index)
+
+        # Multipart KOTH rule: in shuffle mode, if the current episode ends with "(1)",
+        # force the next chronological episode once.
+        try:
+            if anchor >= 0 and self.shuffle_mode in ('standard', 'season') and self._forced_next_episode_index is None:
+                cur_path = self._episode_path_for_index(anchor)
+                if self._is_koth_playlist() and self._is_part1_episode(cur_path):
+                    forced = self._next_chronological_episode_index_after(anchor)
+                    if forced != -1 and forced != anchor:
+                        if forced in self.play_queue:
+                            self.play_queue = [i for i in self.play_queue if i != forced]
+                        return int(forced)
+        except Exception:
+            pass
+
+        # If we have a pending forced next episode (set by other flows), honor it.
+        if self._forced_next_episode_index is not None:
+            try:
+                forced = int(self._forced_next_episode_index)
+            except Exception:
+                forced = -1
+            self._forced_next_episode_index = None
+            if forced in self.play_queue:
+                try:
+                    self.play_queue = [i for i in self.play_queue if i != forced]
+                except Exception:
+                    pass
+            if 0 <= forced < len(self.current_playlist):
+                try:
+                    if self.is_episode_item(self.current_playlist[forced]):
+                        return int(forced)
+                except Exception:
+                    pass
+
+        if not self.play_queue:
+            try:
+                self.rebuild_queue(current_index=anchor)
+            except Exception:
+                self.rebuild_queue(current_index=None)
+        if not self.play_queue:
+            return -1
+
+        try:
+            return int(self.play_queue.pop(0))
+        except Exception:
+            return -1
+
     def _recent_episode_indices(self, current_index=None, count=2):
         recent = []
 
@@ -985,6 +1138,75 @@ class PlaylistManager:
 
         # Exposure-based queueing makes recent-avoidance unnecessary; keep the queue deterministic.
         self.play_queue = list(order)
+
+    def export_episode_queue_keys(self) -> list[str]:
+        """Export the upcoming episode queue as stable normalized path keys.
+
+        We intentionally persist keys (derived from episode paths) rather than raw
+        indices so a restored queue can survive playlist rebuilds that insert or
+        remove non-episode items.
+        """
+        out: list[str] = []
+        try:
+            q = list(getattr(self, 'play_queue', []) or [])
+        except Exception:
+            q = []
+
+        for idx in q:
+            try:
+                i = int(idx)
+            except Exception:
+                continue
+            try:
+                p = self._episode_path_for_index(i)
+            except Exception:
+                p = ''
+            k = self._norm_path_key(p)
+            if k:
+                out.append(str(k))
+        return out
+
+    def index_for_episode_key(self, key: str) -> int:
+        """Return the current playlist index for a normalized episode key."""
+        k = str(key or '').strip()
+        if not k:
+            return -1
+        try:
+            for i, it in enumerate(list(getattr(self, 'current_playlist', []) or [])):
+                try:
+                    if not self.is_episode_item(it):
+                        continue
+                except Exception:
+                    continue
+                try:
+                    p = self._episode_path_for_index(i)
+                except Exception:
+                    p = ''
+                if self._norm_path_key(p) == k:
+                    return int(i)
+        except Exception:
+            return -1
+        return -1
+
+    def restore_episode_queue_from_keys(self, keys: list[str] | None) -> int:
+        """Restore the upcoming episode queue from a list of normalized keys.
+
+        Returns the number of queue entries restored.
+        """
+        ks = list(keys or [])
+        restored: list[int] = []
+        for k in ks:
+            try:
+                idx = self.index_for_episode_key(str(k))
+            except Exception:
+                idx = -1
+            if idx >= 0:
+                restored.append(int(idx))
+        try:
+            self.play_queue = restored
+        except Exception:
+            return 0
+        return int(len(restored))
 
     def set_shuffle_mode(self, mode, current_index=None, rebuild=True):
         # Backward-compat: bool True means standard shuffle, False means off.

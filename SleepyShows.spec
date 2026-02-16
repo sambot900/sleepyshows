@@ -13,11 +13,11 @@ if sys.platform.startswith('linux'):
     # without the matching lib installed).
     binaries.append((os.path.join('libs', 'libxcb-cursor.so.0'), '.'))
 
-icon_files = None
+icon_file = None
 if sys.platform.startswith('win'):
     icon_path = os.path.join('assets', 'sleepy-ico.ico')
     if os.path.exists(icon_path):
-        icon_files = [icon_path]
+        icon_file = icon_path
 
 
 a = Analysis(
@@ -51,7 +51,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=icon_files,
+    icon=icon_file,
 )
 coll = COLLECT(
     exe,
