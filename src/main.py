@@ -5464,8 +5464,24 @@ class MainWindow(QMainWindow):
         self._resume_recover_started_mono = None
         self._resume_recover_attempts = 0
 
-        # Load any prior resume state now; prompt later once UI is ready.
+        # Load any prior resume state now.
+        # We intentionally do NOT prompt at startup; instead, we auto-resume
+        # only when the user starts the same show/playlist again.
         self._resume_loaded_state = self._load_resume_state()
+
+        # Auto-resume is armed when a playlist is loaded, and only triggers on the
+        # first manual/auto play for that playlist (and only for the default start index).
+        self._pending_auto_resume_state = None
+        self._pending_auto_resume_playlist = None
+
+        # Missing-media resiliency: mpv can hang on a gray frame during transient
+        # disconnects without emitting a useful error. Track playback progress and
+        # enter recovery if playback stalls and the file disappears.
+        self._time_pos_last_update_mono = 0.0
+        self._time_pos_last_progress_mono = 0.0
+        self._time_pos_last_value = None
+        self._missing_media_waiting_for_target = None
+        self._missing_media_stall_timeout_s = 2.5
 
         # Best-effort cross-platform sleep/idle inhibitor while actively playing.
         self._keep_awake = KeepAwakeInhibitor()
@@ -5482,11 +5498,7 @@ class MainWindow(QMainWindow):
         self.playback_watchdog.timeout.connect(self._check_playback_end)
         self.playback_watchdog.start()
 
-        # Offer resume after startup settles.
-        try:
-            QTimer.singleShot(0, self._maybe_offer_resume_from_disk)
-        except Exception:
-            pass
+        # No startup resume prompt (see note above).
         
         # Failsafe timer for fullscreen
         self.failsafe_timer = QTimer(self)
@@ -6196,6 +6208,161 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+    def _norm_match_path(self, p: str) -> str:
+        try:
+            s = str(p or '').strip()
+        except Exception:
+            s = ''
+        if not s:
+            return ''
+        try:
+            s = os.path.expanduser(s)
+        except Exception:
+            pass
+        try:
+            s = os.path.abspath(s)
+        except Exception:
+            pass
+        try:
+            s = os.path.realpath(s)
+        except Exception:
+            pass
+        try:
+            if sys.platform.startswith('win'):
+                s = os.path.normcase(s)
+        except Exception:
+            pass
+        return s
+
+    def _arm_auto_resume_for_playlist(self, playlist_source: str) -> None:
+        # Clear any prior pending resume.
+        try:
+            self._pending_auto_resume_state = None
+            self._pending_auto_resume_playlist = None
+        except Exception:
+            pass
+
+        try:
+            st = self._load_resume_state()
+        except Exception:
+            st = {}
+        if not isinstance(st, dict) or not st:
+            return
+
+        try:
+            st_pl = self._norm_match_path(str(st.get('playlist_filename') or ''))
+            cur_pl = self._norm_match_path(str(playlist_source or ''))
+        except Exception:
+            st_pl = ''
+            cur_pl = ''
+        if not st_pl or not cur_pl or st_pl != cur_pl:
+            return
+
+        # Require at least an episode identifier or a target.
+        try:
+            if not st.get('current_episode_key') and not st.get('last_play_target'):
+                return
+        except Exception:
+            return
+
+        try:
+            self._pending_auto_resume_state = st
+            self._pending_auto_resume_playlist = cur_pl
+        except Exception:
+            pass
+
+    def _predict_default_start_index(self) -> int:
+        pm = getattr(self, 'playlist_manager', None)
+        if pm is None:
+            return 0
+        try:
+            if str(getattr(pm, 'shuffle_mode', 'off') or 'off') == 'off':
+                return 0
+        except Exception:
+            return 0
+        try:
+            q = list(getattr(pm, 'play_queue', []) or [])
+            if q:
+                return int(q[0])
+        except Exception:
+            pass
+        return 0
+
+    def _maybe_auto_resume_on_first_play(self, requested_index: int) -> bool:
+        st = getattr(self, '_pending_auto_resume_state', None)
+        if not isinstance(st, dict) or not st:
+            return False
+
+        pm = getattr(self, 'playlist_manager', None)
+        try:
+            # Only trigger before anything has started for this playlist.
+            if pm is not None and int(getattr(pm, 'current_index', -1) or -1) != -1:
+                self._pending_auto_resume_state = None
+                self._pending_auto_resume_playlist = None
+                return False
+        except Exception:
+            pass
+
+        try:
+            default_idx = int(self._predict_default_start_index())
+        except Exception:
+            default_idx = 0
+
+        # If the user intentionally clicked some other episode, don't override.
+        if int(requested_index) != int(default_idx):
+            try:
+                self._pending_auto_resume_state = None
+                self._pending_auto_resume_playlist = None
+            except Exception:
+                pass
+            return False
+
+        # Apply and clear.
+        try:
+            self._pending_auto_resume_state = None
+            self._pending_auto_resume_playlist = None
+        except Exception:
+            pass
+
+        try:
+            self._log_event('resume_auto', playlist=str(st.get('playlist_filename') or ''))
+        except Exception:
+            pass
+
+        try:
+            self._apply_resume_state(st)
+            return True
+        except Exception:
+            return False
+
+    def _maybe_auto_resume_for_target(self, target_path: str) -> bool:
+        try:
+            st = self._load_resume_state()
+        except Exception:
+            st = {}
+        if not isinstance(st, dict) or not st:
+            return False
+
+        try:
+            want = self._norm_match_path(str(target_path or ''))
+            got = self._norm_match_path(str(st.get('last_play_source_path') or st.get('last_play_target') or ''))
+        except Exception:
+            want = ''
+            got = ''
+        if not want or not got or want != got:
+            return False
+
+        try:
+            self._log_event('resume_auto_single', target=str(target_path or ''))
+        except Exception:
+            pass
+
+        try:
+            self._apply_resume_state(st)
+            return True
+        except Exception:
+            return False
+
     def _maybe_start_missing_media_recovery(self, *, reason: str):
         # Only start recovery if the current target path is missing.
         try:
@@ -6224,6 +6391,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Immediately stop mpv to avoid a permanent gray screen/hang while the
+        # drive is unplugged, and show a brief on-screen status.
+        try:
+            self._enter_missing_media_wait_state(target, reason=str(reason or ''))
+        except Exception:
+            pass
+
         # Start/restart the recovery loop.
         try:
             self._resume_recover_target = target
@@ -6231,6 +6405,46 @@ class MainWindow(QMainWindow):
             self._resume_recover_attempts = 0
             if not self._resume_recover_timer.isActive():
                 self._resume_recover_timer.start()
+        except Exception:
+            pass
+
+    def _enter_missing_media_wait_state(self, target: str, reason: str = '') -> None:
+        try:
+            t = str(target or '').strip()
+        except Exception:
+            t = ''
+        if not t:
+            return
+
+        try:
+            if getattr(self, '_missing_media_waiting_for_target', None) == t:
+                return
+        except Exception:
+            pass
+
+        try:
+            self._missing_media_waiting_for_target = t
+        except Exception:
+            pass
+
+        # Stop any bump state so we don't get stuck behind a bump gate.
+        try:
+            self.stop_bump_playback()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'player') and self.player:
+                self.player.stop()
+        except Exception:
+            pass
+
+        # mpv OSD is the most reliable overlay over the native video surface.
+        try:
+            msg = "Media disconnected — waiting for reconnect"
+            if reason:
+                msg = msg + f" ({reason})"
+            self._show_mpv_osd_text(msg, duration_ms=2500)
         except Exception:
             pass
 
@@ -6274,6 +6488,16 @@ class MainWindow(QMainWindow):
 
         try:
             self._resume_recover_timer.stop()
+        except Exception:
+            pass
+
+        try:
+            self._missing_media_waiting_for_target = None
+        except Exception:
+            pass
+
+        try:
+            self._show_mpv_osd_text("Media reconnected — resuming", duration_ms=2000)
         except Exception:
             pass
 
@@ -8862,6 +9086,13 @@ class MainWindow(QMainWindow):
                 self.playlist_manager.current_index = -1
                 self.playlist_manager.rebuild_queue(current_index=self.playlist_manager.current_index)
 
+                # Arm auto-resume for this playlist (no prompts). It triggers only
+                # when the user starts playback for the default start index.
+                try:
+                    self._arm_auto_resume_for_playlist(str(playlist_source or ''))
+                except Exception:
+                    pass
+
                 try:
                     self._persist_resume_state(force=True, reason='load_playlist')
                 except Exception:
@@ -9059,6 +9290,14 @@ class MainWindow(QMainWindow):
             self.edit_mode_widget.refresh_playlist_list()
             self.play_mode_widget.refresh_episode_list()
             self.set_mode(1) # Switch to play
+
+            # Auto-resume if this is the same single-file target.
+            try:
+                if self._maybe_auto_resume_for_target(str(path)):
+                    return
+            except Exception:
+                pass
+
             self.play_index(0)
 
             if self.play_mode_widget.sidebar_visible:
@@ -9079,6 +9318,16 @@ class MainWindow(QMainWindow):
 
     def play_index(self, index, record_history=True, bypass_bump_gate=False, *, suppress_ui: bool = False):
         pm = self.playlist_manager
+
+        # If the user is starting the same show again, silently resume from disk
+        # for the default start index (no prompts).
+        try:
+            if not bypass_bump_gate:
+                if self._maybe_auto_resume_on_first_play(int(index)):
+                    return
+        except Exception:
+            pass
+
         try:
             suppress_ui = bool(suppress_ui) or self._should_suppress_auto_nav_ui()
         except Exception:
@@ -9133,6 +9382,15 @@ class MainWindow(QMainWindow):
 
             # Reset EOF watchdog state for the new track.
             self._handled_eof_for_index = None
+
+            # Reset progress/stall timers for the new track.
+            try:
+                now = float(time.monotonic())
+                self._time_pos_last_update_mono = now
+                self._time_pos_last_progress_mono = now
+                self._time_pos_last_value = None
+            except Exception:
+                pass
             self._play_start_monotonic = time.monotonic()
             self._played_since_start = False
 
@@ -11509,6 +11767,31 @@ class MainWindow(QMainWindow):
 
         self._last_time_pos = time_pos
 
+        # Progress tracking for missing-media stall detection.
+        try:
+            now = float(time.monotonic())
+            self._time_pos_last_update_mono = now
+        except Exception:
+            now = 0.0
+        try:
+            prev = getattr(self, '_time_pos_last_value', None)
+        except Exception:
+            prev = None
+        try:
+            cur = float(time_pos) if time_pos is not None else None
+        except Exception:
+            cur = None
+        try:
+            self._time_pos_last_value = cur
+        except Exception:
+            pass
+        try:
+            if now and cur is not None:
+                if prev is None or abs(float(cur) - float(prev)) >= 0.25:
+                    self._time_pos_last_progress_mono = now
+        except Exception:
+            pass
+
         try:
             self._persist_resume_state(force=False, reason='time_pos')
         except Exception:
@@ -11582,6 +11865,31 @@ class MainWindow(QMainWindow):
                     return
 
             mpv = self.player.mpv
+
+            # Missing-media stall detection: if playback appears to be active but
+            # time-pos isn't advancing and the current target disappeared, enter
+            # recovery immediately (avoid permanent gray screen).
+            try:
+                # Don't interfere while we are already waiting for reconnect.
+                if getattr(self, '_missing_media_waiting_for_target', None):
+                    pass
+                else:
+                    core_idle_now = bool(getattr(mpv, 'core_idle', False))
+                    paused_now = bool(getattr(mpv, 'pause', True))
+                    if (not core_idle_now) and (not paused_now) and (not is_bump_video):
+                        last_prog = float(getattr(self, '_time_pos_last_progress_mono', 0.0) or 0.0)
+                        if last_prog:
+                            stall_s = float(time.monotonic()) - last_prog
+                            if stall_s > float(getattr(self, '_missing_media_stall_timeout_s', 2.5) or 2.5):
+                                target = str(getattr(self, '_last_play_target', '') or '').strip()
+                                if target:
+                                    try:
+                                        if not os.path.exists(target):
+                                            self._maybe_start_missing_media_recovery(reason='watchdog_stall')
+                                    except Exception:
+                                        pass
+            except Exception:
+                pass
 
             # Prefer mpv's eof flag if available.
             eof_reached = False
