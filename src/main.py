@@ -15,6 +15,7 @@ import datetime
 
 from bump_state import BumpState
 from sleep_timer import SleepTimerController
+from missing_media_recovery import MissingMediaRecovery
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QFileDialog, QTreeWidget, 
@@ -5453,12 +5454,8 @@ class MainWindow(QMainWindow):
         self._resume_state_last_save_mono = 0.0
         self._resume_last_payload = None
 
-        self._resume_recover_timer = QTimer(self)
-        self._resume_recover_timer.setInterval(2000)
-        self._resume_recover_timer.timeout.connect(self._attempt_missing_media_recovery)
-        self._resume_recover_target = None
-        self._resume_recover_started_mono = None
-        self._resume_recover_attempts = 0
+        self.missing_media_recovery = MissingMediaRecovery(self)
+        self.missing_media_recovery.recovered.connect(self._apply_resume_state)
 
         # Load any prior resume state now.
         # We intentionally do NOT prompt at startup; instead, we auto-resume
@@ -5476,7 +5473,6 @@ class MainWindow(QMainWindow):
         self._time_pos_last_update_mono = 0.0
         self._time_pos_last_progress_mono = 0.0
         self._time_pos_last_value = None
-        self._missing_media_waiting_for_target = None
         self._missing_media_stall_timeout_s = 2.5
 
         # Best-effort cross-platform sleep/idle inhibitor while actively playing.
@@ -6361,164 +6357,13 @@ class MainWindow(QMainWindow):
             return False
 
     def _maybe_start_missing_media_recovery(self, *, reason: str):
-        # Only start recovery if the current target path is missing.
-        try:
-            target = str(getattr(self, '_last_play_target', '') or '').strip()
-        except Exception:
-            target = ''
-        if not target:
-            return
-
-        missing = False
-        try:
-            missing = (not os.path.exists(target))
-        except Exception:
-            missing = False
-        if not missing:
-            return
-
-        try:
-            self._log_event('media_missing', reason=str(reason or ''), target=str(target))
-        except Exception:
-            pass
-
-        # Persist state immediately so we resume from as close as possible.
-        try:
-            self._persist_resume_state(force=True, reason=f'media_missing:{reason}')
-        except Exception:
-            pass
-
-        # Immediately stop mpv to avoid a permanent gray screen/hang while the
-        # drive is unplugged, and show a brief on-screen status.
-        try:
-            self._enter_missing_media_wait_state(target, reason=str(reason or ''))
-        except Exception:
-            pass
-
-        # Start/restart the recovery loop.
-        try:
-            self._resume_recover_target = target
-            self._resume_recover_started_mono = float(time.monotonic())
-            self._resume_recover_attempts = 0
-            if not self._resume_recover_timer.isActive():
-                self._resume_recover_timer.start()
-        except Exception:
-            pass
+        self.missing_media_recovery.start(reason=reason)
 
     def _enter_missing_media_wait_state(self, target: str, reason: str = '') -> None:
-        try:
-            t = str(target or '').strip()
-        except Exception:
-            t = ''
-        if not t:
-            return
-
-        try:
-            if getattr(self, '_missing_media_waiting_for_target', None) == t:
-                return
-        except Exception:
-            pass
-
-        try:
-            self._missing_media_waiting_for_target = t
-        except Exception:
-            pass
-
-        # Stop any bump state so we don't get stuck behind a bump gate.
-        try:
-            self.stop_bump_playback()
-        except Exception:
-            pass
-
-        try:
-            if hasattr(self, 'player') and self.player:
-                self.player.stop()
-        except Exception:
-            pass
-
-        # mpv OSD is the most reliable overlay over the native video surface.
-        try:
-            msg = "Media disconnected — waiting for reconnect"
-            if reason:
-                msg = msg + f" ({reason})"
-            self._show_mpv_osd_text(msg, duration_ms=2500)
-        except Exception:
-            pass
+        self.missing_media_recovery._enter_wait_state(target, reason=reason)
 
     def _attempt_missing_media_recovery(self):
-        # Stop after a while to avoid infinite polling.
-        try:
-            started = float(getattr(self, '_resume_recover_started_mono', 0.0) or 0.0)
-            if started and (float(time.monotonic()) - started) > 600.0:
-                self._resume_recover_timer.stop()
-                return
-        except Exception:
-            pass
-
-        try:
-            target = str(getattr(self, '_resume_recover_target', '') or '').strip()
-        except Exception:
-            target = ''
-        if not target:
-            try:
-                self._resume_recover_timer.stop()
-            except Exception:
-                pass
-            return
-
-        try:
-            self._resume_recover_attempts = int(getattr(self, '_resume_recover_attempts', 0) or 0) + 1
-        except Exception:
-            pass
-
-        try:
-            if not os.path.exists(target):
-                return
-        except Exception:
-            return
-
-        # Target is back. Try to resume playback.
-        try:
-            self._log_event('media_reappeared', target=str(target), attempts=int(getattr(self, '_resume_recover_attempts', 0) or 0))
-        except Exception:
-            pass
-
-        try:
-            self._resume_recover_timer.stop()
-        except Exception:
-            pass
-
-        try:
-            self._missing_media_waiting_for_target = None
-        except Exception:
-            pass
-
-        try:
-            self._show_mpv_osd_text("Media reconnected — resuming", duration_ms=2000)
-        except Exception:
-            pass
-
-        st = None
-        try:
-            st = getattr(self, '_resume_last_payload', None)
-        except Exception:
-            st = None
-        if not isinstance(st, dict):
-            try:
-                st = self._load_resume_state()
-            except Exception:
-                st = None
-        if not isinstance(st, dict):
-            st = {}
-
-        try:
-            self._apply_resume_state(st)
-        except Exception:
-            # Fallback: at least try to replay the file.
-            try:
-                self.player.play(target)
-            except Exception:
-                pass
+        self.missing_media_recovery._attempt()
 
     def set_startup_crickets_enabled(self, enabled: bool):
         self.startup_crickets_enabled = bool(enabled)
@@ -10968,8 +10813,7 @@ class MainWindow(QMainWindow):
             pass
 
         try:
-            if hasattr(self, '_resume_recover_timer'):
-                self._resume_recover_timer.stop()
+            self.missing_media_recovery.stop()
         except Exception:
             pass
 
@@ -11772,7 +11616,7 @@ class MainWindow(QMainWindow):
             # recovery immediately (avoid permanent gray screen).
             try:
                 # Don't interfere while we are already waiting for reconnect.
-                if getattr(self, '_missing_media_waiting_for_target', None):
+                if self.missing_media_recovery.is_waiting:
                     pass
                 else:
                     core_idle_now = bool(getattr(mpv, 'core_idle', False))
@@ -11920,8 +11764,7 @@ class MainWindow(QMainWindow):
             pass
 
         try:
-            if hasattr(self, '_resume_recover_timer'):
-                self._resume_recover_timer.stop()
+            self.missing_media_recovery.stop()
         except Exception:
             pass
         try:
