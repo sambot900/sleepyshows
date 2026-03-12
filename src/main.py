@@ -14,6 +14,7 @@ import threading
 import datetime
 
 from bump_state import BumpState
+from sleep_timer import SleepTimerController
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QFileDialog, QTreeWidget, 
@@ -5383,19 +5384,9 @@ class MainWindow(QMainWindow):
         # Pending bump used for interstitial-before-bump preroll.
         self._pending_bump_item = None
         
-        # Timers
-        self.sleep_timer_default_minutes = 180
-        # Single source of truth for timer duration
-        self.current_sleep_minutes = self.sleep_timer_default_minutes
-        # Manual flag to ensure UI sync reliably (do not rely on QTimer.isActive())
-        self.sleep_timer_active = False
-
-        # Sleep timer countdown is paused unless a show is actively playing.
-        self.sleep_remaining_ms = 0
-        self._sleep_last_tick = None
-        self.sleep_countdown_timer = QTimer(self)
-        self.sleep_countdown_timer.setInterval(1000)
-        self.sleep_countdown_timer.timeout.connect(self._on_sleep_countdown_tick)
+        # Sleep timer — all state and tick logic lives in the controller.
+        self.sleep_timer = SleepTimerController(self, default_minutes=180)
+        self.sleep_timer.expired.connect(self.on_sleep_timer)
         
         # Mouse Hover Timer
         self.hover_timer = QTimer(self)
@@ -8348,151 +8339,46 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
-    def _ensure_sleep_status_label(self):
-        if hasattr(self, 'lbl_sleep_status') and self.lbl_sleep_status is not None:
-            return
+    # ------------------------------------------------------------------
+    # Sleep timer — proxy properties and delegation wrappers
+    # All state and tick logic live in self.sleep_timer (SleepTimerController).
+    # ------------------------------------------------------------------
 
-        self.lbl_sleep_status = QLabel("")
-        self.lbl_sleep_status.setStyleSheet("color: white; padding-right: 10px;")
-        self.statusBar().addPermanentWidget(self.lbl_sleep_status)
+    @property
+    def sleep_timer_active(self) -> bool:
+        return self.sleep_timer.active
+
+    @property
+    def sleep_timer_default_minutes(self) -> int:
+        return self.sleep_timer.default_minutes
+
+    @property
+    def current_sleep_minutes(self) -> int:
+        return self.sleep_timer.current_minutes
+
+    def _ensure_sleep_status_label(self):
+        self.sleep_timer._ensure_status_label()
 
     def _is_show_playing(self):
-        try:
-            if not hasattr(self, 'player') or not self.player or not self.player.mpv:
-                return False
-            mpv = self.player.mpv
-            paused = bool(getattr(mpv, 'pause', True))
-            core_idle = bool(getattr(mpv, 'core_idle', True))
-            # Keep this consistent with existing UI logic (show_controls/hide_controls).
-            return (not paused) and (not core_idle)
-        except Exception:
-            return False
+        return self.sleep_timer._is_show_playing()
 
     def _sleep_remaining_minutes(self):
-        if not self.sleep_timer_active or self.sleep_remaining_ms <= 0:
-            return 0
-        # Show remaining as minutes (ceiling)
-        return max(1, int((self.sleep_remaining_ms + 59999) // 60000))
+        return self.sleep_timer.remaining_minutes()
 
     def _update_sleep_timer_ui(self):
-        self._ensure_sleep_status_label()
-
-        if not self.sleep_timer_active:
-            self.lbl_sleep_status.setText("")
-            if hasattr(self, 'play_mode_widget') and hasattr(self.play_mode_widget, 'btn_sleep_timer'):
-                self.play_mode_widget.btn_sleep_timer.setText("SLEEP\nOFF")
-            return
-
-        remaining_min = self._sleep_remaining_minutes()
-        self.lbl_sleep_status.setText(f"Sleep in {remaining_min}m")
-        if hasattr(self, 'play_mode_widget') and hasattr(self.play_mode_widget, 'btn_sleep_timer'):
-            self.play_mode_widget.btn_sleep_timer.setText(f"SLEEP\n{remaining_min}m")
+        self.sleep_timer._update_ui()
 
     def _pause_sleep_countdown(self):
-        self._sleep_last_tick = None
-        if self.sleep_countdown_timer.isActive():
-            self.sleep_countdown_timer.stop()
+        self.sleep_timer.pause()
 
     def _resume_sleep_countdown_if_needed(self):
-        if not self.sleep_timer_active or self.sleep_remaining_ms <= 0:
-            self._pause_sleep_countdown()
-            return
-        if not self._is_show_playing():
-            self._pause_sleep_countdown()
-            return
-        if not self.sleep_countdown_timer.isActive():
-            self._sleep_last_tick = time.monotonic()
-            self.sleep_countdown_timer.start()
-
-    def _on_sleep_countdown_tick(self):
-        if not self.sleep_timer_active:
-            self._pause_sleep_countdown()
-            self._update_sleep_timer_ui()
-            return
-
-        if not self._is_show_playing():
-            self._pause_sleep_countdown()
-            self._update_sleep_timer_ui()
-            return
-
-        now = time.monotonic()
-        if self._sleep_last_tick is None:
-            self._sleep_last_tick = now
-            self._update_sleep_timer_ui()
-            return
-
-        elapsed_ms = int((now - self._sleep_last_tick) * 1000)
-        self._sleep_last_tick = now
-        if elapsed_ms <= 0:
-            self._update_sleep_timer_ui()
-            return
-
-        self.sleep_remaining_ms = max(0, int(self.sleep_remaining_ms) - elapsed_ms)
-        self._update_sleep_timer_ui()
-        if self.sleep_remaining_ms <= 0:
-            self.on_sleep_timer()
+        self.sleep_timer.resume_if_needed()
 
     def start_sleep_timer(self, minutes):
-        try:
-            minutes = int(minutes) if minutes is not None else 0
-            if minutes <= 0:
-                minutes = int(getattr(self, 'sleep_timer_default_minutes', 180))
-
-            self.current_sleep_minutes = minutes
-            self.sleep_timer_active = True
-
-            # Exposure scoring: sleep timer ON enables diminishing episode deltas.
-            try:
-                self.playlist_manager.set_sleep_timer_active_for_exposure(True)
-            except Exception:
-                pass
-            self.sleep_remaining_ms = int(minutes * 60 * 1000)
-            self._sleep_last_tick = None
-            
-            print(f"DEBUG: Start Timer {minutes}m")
-
-            self._update_sleep_timer_ui()
-
-            # Nullify any prior countdown and restart from the new duration.
-            self._pause_sleep_countdown()
-            self._resume_sleep_countdown_if_needed()
-            
-            # Immediate sync of menu state
-            self.update_sleep_menu_state()
-
-            # Sync Welcome Screen Toggle (if started from Menu)
-            if hasattr(self, 'welcome_screen'):
-                if not self.welcome_screen.is_sleep_on:
-                     self.welcome_screen.is_sleep_on = True
-                     self.welcome_screen.update_checkbox(self.welcome_screen.btn_sleep_check, True)
-        except Exception as e:
-            print(f"Error starting timer: {e}")
+        self.sleep_timer.start(minutes)
 
     def cancel_sleep_timer(self):
-        try:
-            self.sleep_timer_active = False
-
-            # Exposure scoring: sleep timer OFF => constant episode deltas.
-            try:
-                self.playlist_manager.set_sleep_timer_active_for_exposure(False)
-            except Exception:
-                pass
-            self.sleep_remaining_ms = 0
-            self._pause_sleep_countdown()
-            self._update_sleep_timer_ui()
-            
-            # Immediate sync
-            self.update_sleep_menu_state()
-            
-            if hasattr(self, 'welcome_screen'):
-                if self.welcome_screen.is_sleep_on:
-                     self.welcome_screen.is_sleep_on = False
-                     self.welcome_screen.update_checkbox(self.welcome_screen.btn_sleep_check, False)
-        except Exception as e:
-            print(f"Error cancelling timer: {e}")
-            if hasattr(self, 'welcome_screen') and self.welcome_screen.is_sleep_on:
-                self.welcome_screen.is_sleep_on = False
-                self.welcome_screen.update_checkbox(self.welcome_screen.btn_sleep_check, False)
+        self.sleep_timer.cancel()
 
     def set_mode(self, index):
         self.mode_stack.setCurrentIndex(index)
