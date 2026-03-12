@@ -1070,52 +1070,13 @@ class PlaylistManager:
             self.play_queue = []
             return
 
-        def _ep_score(i: int) -> float:
-            try:
-                path = self._episode_path_for_index(i)
-                key = self._norm_path_key(path)
-            except Exception:
-                path = ''
-                key = ''
-            try:
-                base = float(self.episode_exposure_scores.get(key, 0.0) or 0.0)
-            except Exception:
-                base = 0.0
-
-            # Additive offsets (episode + season).
-            try:
-                off = float(self._effective_episode_offset(path))
-            except Exception:
-                off = 0.0
-
-            # Factor should influence queue selection by considering the imminent score change
-            # that would be applied if this item is played next.
-            try:
-                factor = float(self._effective_episode_factor(path))
-            except Exception:
-                factor = 1.0
-            try:
-                projected = float(self._exposure_delta_for_next_play('episode')) * float(factor)
-            except Exception:
-                projected = 0.0
-
-            return float(base + off + projected)
-
         def _order_by_exposure(indices):
-            # Stable-ish: group by score, shuffle within same-score buckets.
-            buckets = {}
-            for i in list(indices or []):
-                try:
-                    s = round(float(_ep_score(int(i))), 6)
-                except Exception:
-                    s = 0.0
-                buckets.setdefault(s, []).append(int(i))
-            out = []
-            for s in sorted(buckets.keys()):
-                b = buckets[s]
-                random.shuffle(b)
-                out.extend(b)
-            return out
+            # Shuffle-bag: every episode appears exactly once per cycle.
+            # Pure random ordering prevents extreme accumulated-score spreads
+            # from permanently gating certain episodes at the tail.
+            items = list(indices or [])
+            random.shuffle(items)
+            return items
 
         # Build a full cycle order (excluding the current episode from the upcoming queue).
         if self.shuffle_mode == 'season':
@@ -1124,29 +1085,9 @@ class PlaylistManager:
                 season = self._season_key_from_path(self._episode_path_for_index(idx))
                 season_map.setdefault(season, []).append(idx)
 
-            # Order seasons by their least-exposed episode (ties randomized).
-            season_keys = list(season_map.keys())
-            season_scores = []
-            for s in season_keys:
-                eps = season_map.get(s) or []
-                try:
-                    sc = min([_ep_score(i) for i in eps]) if eps else 0.0
-                except Exception:
-                    sc = 0.0
-                season_scores.append((round(float(sc), 6), s))
-
-            # Sort by exposure, randomize ties.
-            season_scores.sort(key=lambda t: t[0])
-            ordered_seasons = []
-            j = 0
-            while j < len(season_scores):
-                k = j
-                while k < len(season_scores) and season_scores[k][0] == season_scores[j][0]:
-                    k += 1
-                chunk = [s for (_sc, s) in season_scores[j:k]]
-                random.shuffle(chunk)
-                ordered_seasons.extend(chunk)
-                j = k
+            # Randomize season order so no season is permanently first or last.
+            ordered_seasons = list(season_map.keys())
+            random.shuffle(ordered_seasons)
 
             order = []
             for season in ordered_seasons:
@@ -1170,7 +1111,14 @@ class PlaylistManager:
         if current_index is not None and current_index in order:
             order = [i for i in order if i != current_index]
 
-        # Exposure-based queueing makes recent-avoidance unnecessary; keep the queue deterministic.
+        # Push recently-played episodes away from the head of the new cycle
+        # to avoid back-to-back repeats across cycle boundaries.
+        recent = set(self._recent_episode_indices(current_index=current_index, count=2))
+        if recent:
+            head = [i for i in order if i not in recent]
+            tail = [i for i in order if i in recent]
+            order = head + tail
+
         self.play_queue = list(order)
 
     def export_episode_queue_keys(self) -> list[str]:
