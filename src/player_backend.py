@@ -34,21 +34,15 @@ class MpvPlayer(QWidget):
         # into dist/SleepyShows; dev runs may have it in repo root or scripts/.
 
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        candidates = []
-
-        # 1) Next to the running executable (PyInstaller dist, or venv python)
-        try:
-            candidates.append(os.path.dirname(sys.executable))
-        except Exception:
-            pass
+        candidates = [
+            # 1) Next to the running executable (PyInstaller dist, or venv python)
+            os.path.dirname(sys.executable),
+        ]
 
         # 2) PyInstaller temporary extraction folder
-        try:
-            meipass = getattr(sys, '_MEIPASS', None)
-            if meipass:
-                candidates.append(str(meipass))
-        except Exception:
-            pass
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            candidates.append(str(meipass))
 
         # 3) Common repo locations
         candidates.extend([
@@ -63,15 +57,12 @@ class MpvPlayer(QWidget):
         dll_names = ('libmpv-2.dll', 'mpv-2.dll', 'mpv-1.dll')
         usable_dirs = []
         for d in candidates:
-            try:
-                if not d or not os.path.isdir(d):
-                    continue
-                for dll_name in dll_names:
-                    if os.path.isfile(os.path.join(d, dll_name)):
-                        usable_dirs.append(d)
-                        break
-            except Exception:
+            if not d or not os.path.isdir(d):
                 continue
+            for dll_name in dll_names:
+                if os.path.isfile(os.path.join(d, dll_name)):
+                    usable_dirs.append(d)
+                    break
 
         # Prepend to PATH as well. python-mpv (and/or ctypes.util.find_library)
         # may inspect PATH directly when locating mpv-*.dll.
@@ -116,10 +107,7 @@ class MpvPlayer(QWidget):
 
     @Slot(str)
     def _emit_end_file_reason(self, reason: str):
-        try:
-            self.endFileReason.emit(str(reason or ''))
-        except Exception:
-            return
+        self.endFileReason.emit(str(reason or ''))
 
     @Slot()
     def _emit_mouse_moved(self):
@@ -164,29 +152,12 @@ class MpvPlayer(QWidget):
                 )
 
             # Video scaling defaults: fill available widget while keeping aspect ratio.
-            # ("Reasonably maintaining" aspect means no stretching; letterboxing is OK.)
-            try:
-                self.mpv.keepaspect = True
-            except Exception:
-                pass
-            # Ensure OSD is enabled so commands like `show-text` can display.
-            try:
-                self.mpv.osd_level = 1
-            except Exception:
-                pass
-            try:
-                self.mpv.panscan = 0.0
-            except Exception:
-                pass
-            try:
-                self.mpv.video_unscaled = False
-            except Exception:
-                pass
+            self.mpv.keepaspect = True
+            self.mpv.osd_level = 1
+            self.mpv.panscan = 0.0
+            self.mpv.video_unscaled = False
 
-            try:
-                wid = int(self.winId())
-            except Exception:
-                wid = 0
+            wid = int(self.winId())
             if wid:
                 self.mpv.wid = wid
             
@@ -201,63 +172,69 @@ class MpvPlayer(QWidget):
 
             @self.mpv.on_key_press('MOUSE_BTN0_DBL')
             def mouse_dbl_click_handler():
-                try:
-                    QMetaObject.invokeMethod(self, "_emit_fullscreen_requested", Qt.QueuedConnection)
-                except Exception:
-                    pass
+                QMetaObject.invokeMethod(self, "_emit_fullscreen_requested", Qt.QueuedConnection)
 
             # Fullscreen toggle is handled by the Windows native message hook in main.py.
 
             @self.mpv.on_key_press('ESC')
             def esc_key_handler():
-                try:
-                    QMetaObject.invokeMethod(self, "_emit_escape_pressed", Qt.QueuedConnection)
-                except Exception:
-                    pass
+                QMetaObject.invokeMethod(self, "_emit_escape_pressed", Qt.QueuedConnection)
 
-            # Setup event callbacks
+            # Property observers — these fire on mpv's thread, so use
+            # QMetaObject.invokeMethod to marshal onto the Qt thread.
             @self.mpv.property_observer('time-pos')
             def time_observer(_name, value):
                 if value is not None:
-                    try:
-                        QMetaObject.invokeMethod(self, "_emit_position", Qt.QueuedConnection, Q_ARG(float, float(value)))
-                    except Exception:
-                        pass
+                    QMetaObject.invokeMethod(self, "_emit_position", Qt.QueuedConnection, Q_ARG(float, float(value)))
 
             @self.mpv.property_observer('duration')
             def duration_observer(_name, value):
                 if value is not None:
-                    try:
-                        QMetaObject.invokeMethod(self, "_emit_duration", Qt.QueuedConnection, Q_ARG(float, float(value)))
-                    except Exception:
-                        pass
+                    QMetaObject.invokeMethod(self, "_emit_duration", Qt.QueuedConnection, Q_ARG(float, float(value)))
 
             @self.mpv.property_observer('pause')
             def pause_observer(_name, value):
-                try:
-                    QMetaObject.invokeMethod(self, "_emit_paused", Qt.QueuedConnection, Q_ARG(bool, bool(value if value is not None else False)))
-                except Exception:
-                    pass
+                QMetaObject.invokeMethod(self, "_emit_paused", Qt.QueuedConnection, Q_ARG(bool, bool(value if value is not None else False)))
 
-            # NOTE: We use property observer for mouse position to detect hover
             @self.mpv.property_observer('mouse-pos')
             def mouse_pos_observer(_name, value):
-                 try:
-                     QMetaObject.invokeMethod(self, "_emit_mouse_moved", Qt.QueuedConnection)
-                 except Exception:
-                     pass
+                QMetaObject.invokeMethod(self, "_emit_mouse_moved", Qt.QueuedConnection)
 
             @self.mpv.event_callback('end-file')
             def end_file_callback(event):
                 try:
-                    props = event.get('event_props', {}) if isinstance(event, dict) else {}
-                    reason = props.get('reason')
-                    # Normalize to a readable string.
-                    if isinstance(reason, int):
-                        # Older bindings sometimes surface eof as 0.
-                        reason_str = 'eof' if reason == 0 else str(reason)
-                    else:
+                    reason_str = ''
+
+                    # python-mpv 1.x passes an MpvEvent ctypes struct, not a dict.
+                    # Use as_dict() to get a proper dict with reason as bytes/str.
+                    try:
+                        d = event.as_dict() if hasattr(event, 'as_dict') else None
+                    except Exception:
+                        d = None
+
+                    if isinstance(d, dict):
+                        reason = d.get('reason', '')
+                        # as_dict() returns bytes on python-mpv 1.x
+                        if isinstance(reason, bytes):
+                            reason = reason.decode('utf-8', errors='replace')
                         reason_str = str(reason or '')
+                    else:
+                        # Fallback: try ctypes data field (MpvEventEndFile.reason is int)
+                        try:
+                            data = event.data if hasattr(event, 'data') else None
+                            if data is not None and hasattr(data, 'reason'):
+                                r_int = int(data.reason)
+                                reason_str = 'eof' if r_int == 0 else str(r_int)
+                        except Exception:
+                            pass
+
+                        # Legacy fallback: older builds may pass a dict directly
+                        if not reason_str and isinstance(event, dict):
+                            reason = event.get('event_props', {}).get('reason', '')
+                            if isinstance(reason, int):
+                                reason_str = 'eof' if reason == 0 else str(reason)
+                            else:
+                                reason_str = str(reason or '')
 
                     try:
                         QMetaObject.invokeMethod(
@@ -297,23 +274,14 @@ class MpvPlayer(QWidget):
             # toggles on Windows), the underlying native window handle can be
             # recreated. If mpv keeps an old wid, subsequent loadfile/play calls
             # can result in audio-only playback or a gray screen.
-            try:
-                wid = int(self.winId())
-            except Exception:
-                wid = 0
+            wid = int(self.winId())
             if wid:
-                try:
-                    self.mpv.wid = wid
-                except Exception:
-                    pass
+                self.mpv.wid = wid
             try:
                 self.mpv.play(filepath)
                 self.mpv.pause = False
             except Exception as e:
-                try:
-                    self.errorOccurred.emit(f"MPV play failed: {e}")
-                except Exception:
-                    pass
+                self.errorOccurred.emit(f"MPV play failed: {e}")
 
     def pause(self):
         if self.mpv:
@@ -374,46 +342,32 @@ class MpvAudioPlayer:
     def _init_mpv(self):
         try:
             import mpv
-            # vo=null ensures no video output; input bindings disabled to avoid stealing keys.
             self.mpv = mpv.MPV(
                 input_default_bindings=False,
                 input_vo_keyboard=False,
                 osc=False,
                 vo='null',
             )
-            try:
-                # Ensure we never try to render a video track.
-                self.mpv.vid = 'no'
-            except Exception:
-                pass
+            self.mpv.vid = 'no'
         except Exception:
             self.mpv = None
 
     def play(self, filepath):
         if self.mpv:
-            try:
-                self.mpv.play(filepath)
-                self.mpv.pause = False
-            except Exception:
-                return
+            self.mpv.play(filepath)
+            self.mpv.pause = False
 
     def stop(self):
         if self.mpv:
-            try:
-                self.mpv.stop()
-            except Exception:
-                return
+            self.mpv.stop()
 
     def set_volume(self, volume):
         if self.mpv:
-            try:
-                self.mpv.volume = volume
-            except Exception:
-                return
+            self.mpv.volume = volume
 
     def shutdown(self):
         if self.mpv:
             try:
                 self.mpv.terminate()
             except Exception:
-                return
+                pass

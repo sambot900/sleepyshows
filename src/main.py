@@ -11930,6 +11930,10 @@ class MainWindow(QMainWindow):
                 should_advance = True
             elif self._played_since_start and pos_at_end and (core_idle or paused):
                 should_advance = True
+            # Bump-video load failure: mpv goes idle with no duration/position and
+            # eof_reached stays None. Detect this so we don't get stuck forever.
+            elif is_bump_video and core_idle and not dur and (pos is None or pos == 0) and self._played_since_start:
+                should_advance = True
 
             if should_advance:
                 if not is_bump_video:
