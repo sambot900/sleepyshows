@@ -13,6 +13,8 @@ import tempfile
 import threading
 import datetime
 
+from bump_state import BumpState
+
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QFileDialog, QTreeWidget, 
                                QTreeWidgetItem, QSplitter, QLabel, QSlider, QTabWidget,
@@ -5423,6 +5425,9 @@ class MainWindow(QMainWindow):
         self.bump_timer.timeout.connect(self.advance_bump_card)
         self.current_bump_script = None
         self.current_card_index = 0
+        self._bump_state = BumpState.IDLE
+        self._in_bump_playback = False
+        self._current_bump_is_video = False
 
         # When bumps are enabled, forward navigation detours through a bump first.
         # We store the intended next index here while the bump plays.
@@ -5558,6 +5563,7 @@ class MainWindow(QMainWindow):
         self._next_bump_prefetch_images = {}  # next: {original_path: QImage}
         self._next_bump_staged_audio_map = {}  # next: {original_path: staged_path}
         self._next_bump_prefetch_files = set()  # next: set[str] staged paths we created
+        self._bump_prefetch_lock = threading.Lock()
 
         # Optional outro audio (<outro ... audio>): pick a random sound from this folder.
         self._outro_sounds_dir = os.path.join('/media', 'tyler', 'T7', 'Sleepy Shows Data', 'TV Vibe', 'outro sounds')
@@ -9552,6 +9558,7 @@ class MainWindow(QMainWindow):
 
         # Reset bump-video state.
         try:
+            self._bump_state = BumpState.IDLE
             self._current_bump_is_video = False
             self._current_bump_video_inclusive = False
             self._current_bump_video_path = None
@@ -9576,6 +9583,7 @@ class MainWindow(QMainWindow):
             self._current_bump_is_video = True
             self._current_bump_video_inclusive = bool(video_inclusive)
             self._current_bump_video_path = str(vpath)
+            self._bump_state = BumpState.PLAYING_VIDEO_INCLUSIVE if video_inclusive else BumpState.PLAYING_VIDEO
 
             # Critical: bump-video inclusive overlay scheduling uses _last_time_pos.
             # Reset it here so we don't accidentally schedule using the prior episode's
@@ -9721,6 +9729,7 @@ class MainWindow(QMainWindow):
         if script:
             self.current_bump_script = script.get('cards', [])
             self.current_card_index = 0
+            self._bump_state = BumpState.PLAYING_SCRIPT
             self.advance_bump_card()
 
         # While this bump is playing, prefetch/stage assets for the next bump.
@@ -10620,6 +10629,7 @@ class MainWindow(QMainWindow):
          if self.current_card_index >= len(self.current_bump_script):
              self.lbl_bump_text.setText("")
              self.stop_bump_playback()
+             self._bump_state = BumpState.TRANSITIONING
              pending = getattr(self, '_pending_next_index', None)
              if pending is not None:
                  idx = int(pending)
@@ -10684,6 +10694,7 @@ class MainWindow(QMainWindow):
              self.lbl_bump_text.setText(card.get('text', ''))
              self.lbl_bump_text.show()
              if bool(card.get('outro_audio', False)):
+                 self._bump_state = BumpState.SHOWING_OUTRO
                  self._play_outro_audio(duration_ms=int(duration))
          elif ctype == 'pause':
              try:
@@ -10926,6 +10937,7 @@ class MainWindow(QMainWindow):
 
         # Clear bump state flags.
         try:
+            self._bump_state = BumpState.IDLE
             self._in_bump_playback = False
             self._current_bump_is_video = False
             self._current_bump_video_inclusive = False
@@ -11354,6 +11366,7 @@ class MainWindow(QMainWindow):
         try:
             if bool(getattr(self, '_in_bump_playback', False)) and not bool(getattr(self, '_current_bump_is_video', False)):
                 try:
+                    self._bump_state = BumpState.IDLE
                     self._in_bump_playback = False
                     self.current_bump_script = None
                     self.current_card_index = 0
@@ -11419,6 +11432,7 @@ class MainWindow(QMainWindow):
                     try:
                         self.current_bump_script = list(cards)
                         self.current_card_index = 0
+                        self._bump_state = BumpState.PLAYING_SCRIPT
                         try:
                             self._log_event('bump_video_eof', action='start_post_script')
                         except Exception:
@@ -11448,6 +11462,7 @@ class MainWindow(QMainWindow):
 
                 # Clear bump state before advancing.
                 try:
+                    self._bump_state = BumpState.IDLE
                     self._in_bump_playback = False
                     self._current_bump_is_video = False
                     self._current_bump_video_inclusive = False
