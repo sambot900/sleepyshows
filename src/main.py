@@ -7222,7 +7222,17 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            # Hide first to avoid rendering artifacts (stale text bleeding through
+            # the translucent background when switching episodes quickly).
+            self.overlay_label.setVisible(False)
             self.overlay_label.setText(title)
+            # Re-sync geometry to the current video_container size so the label
+            # doesn't appear with a stale width after resize/fullscreen transitions.
+            try:
+                w = self.video_container.width()
+                self.overlay_label.setGeometry(0, 0, w, 60)
+            except Exception:
+                pass
             self.overlay_label.setVisible(True)
             self.overlay_label.raise_()
         except Exception:
@@ -7238,7 +7248,9 @@ class MainWindow(QMainWindow):
             pass
 
     def _sync_episode_overlay_visibility(self):
-        # Fullscreen rule: show overlay only while player controls are visible.
+        # Fullscreen rule: toggle overlay visibility with controls.
+        # This is called on every mouse-move via show_controls / hide_controls,
+        # so it must be lightweight — just flip visibility and sync text.
         try:
             if not self.isFullScreen():
                 return
@@ -7250,10 +7262,28 @@ class MainWindow(QMainWindow):
         except Exception:
             ctrls_visible = False
 
-        if ctrls_visible:
-            self._show_episode_overlay(auto_hide_seconds=None)
-        else:
-            self._hide_episode_overlay()
+        try:
+            if ctrls_visible:
+                # Sync the title text in case the episode changed since the label
+                # was last shown (e.g., navigated while fullscreen).
+                title = self._current_episode_title_for_overlay()
+                if not title:
+                    self._episode_overlay_hide_timer.stop()
+                    self.overlay_label.setVisible(False)
+                    return
+                if self.overlay_label.text() != title:
+                    self.overlay_label.setText(title)
+                # Stop the auto-hide timer so it stays up with the controls.
+                self._episode_overlay_hide_timer.stop()
+                if not self.overlay_label.isVisible():
+                    self.overlay_label.setVisible(True)
+                    self.overlay_label.raise_()
+            else:
+                self._episode_overlay_hide_timer.stop()
+                if self.overlay_label.isVisible():
+                    self.overlay_label.setVisible(False)
+        except Exception:
+            pass
 
     def _hide_bump_video_overlay(self):
         try:
@@ -7878,6 +7908,7 @@ class MainWindow(QMainWindow):
         
         # Inject Video Container into PlayModeWidget
         self.video_stack = QStackedWidget()
+        self.video_stack.setStyleSheet("background-color: #0c0c0c;")
         self.video_stack.addWidget(self.video_container)
         self.video_stack.addWidget(self.bump_widget)
         
@@ -9114,11 +9145,7 @@ class MainWindow(QMainWindow):
 
                 # Only gate real episodes (not interstitials/explicit bump items).
                 if is_episode:
-                    bump_item = None
-                    try:
-                        bump_item = pm.bump_manager.get_next_bump()
-                    except Exception:
-                        bump_item = None
+                    bump_item = self._get_playable_bump(pm)
 
                     # If no eligible bump exists (e.g., no music long enough), just play.
                     if bump_item:
@@ -9255,6 +9282,38 @@ class MainWindow(QMainWindow):
         
         if not suppress_ui:
             self.show_controls()
+
+    # ------------------------------------------------------------------
+    # Bump queue helper: get the next bump that has playable media.
+    # Tries up to MAX_RETRIES bumps from the queue before giving up.
+    # ------------------------------------------------------------------
+    def _get_playable_bump(self, pm, *, _max_retries: int = 5) -> dict | None:
+        """Return the next bump item that has at least one playable component.
+
+        If the first item pulled from the queue is degenerate (no audio, no video,
+        and no script cards), keep trying up to *_max_retries* times so a single
+        bad entry never causes the user to miss a bump entirely.
+        """
+        for _ in range(_max_retries):
+            try:
+                item = pm.bump_manager.get_next_bump()
+            except Exception:
+                item = None
+            if item is None:
+                return None
+            # A bump is playable if it has audio, a video path, or script cards.
+            audio = item.get('audio')
+            video = item.get('video')
+            script = item.get('script')
+            has_cards = bool(isinstance(script, dict) and script.get('cards'))
+            if audio or video or has_cards:
+                return item
+            # Degenerate bump — skip it and try the next one.
+            try:
+                self._log_event('bump_skipped_degenerate', item=repr(item)[:200])
+            except Exception:
+                pass
+        return None
 
     def play_bump(self, bump_item):
         # Safety: if a prior interstitial preroll left a pending bump behind,
@@ -10375,6 +10434,12 @@ class MainWindow(QMainWindow):
          if self.current_card_index >= len(self.current_bump_script):
              self.lbl_bump_text.setText("")
              self.stop_bump_playback()
+             # Switch back to the video surface now so the empty bump widget
+             # (near-black background) is never visible between bump and episode.
+             try:
+                 self.video_stack.setCurrentIndex(0)
+             except Exception:
+                 pass
              self._bump_state = BumpState.TRANSITIONING
              pending = getattr(self, '_pending_next_index', None)
              if pending is not None:
@@ -10384,7 +10449,7 @@ class MainWindow(QMainWindow):
                  self._pending_next_record_history = True
                  self._advancing_from_bump_end = True
                  try:
-                     self.play_index(idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=True)
+                     self.play_index(idx, record_history=record_history, bypass_bump_gate=True)
                  finally:
                      self._advancing_from_bump_end = False
                  return
@@ -10822,8 +10887,18 @@ class MainWindow(QMainWindow):
             self._maybe_apply_episode_skip_penalty()
         except Exception:
             pass
+
+        # Clear all pending bump/transition state so nothing fires after stop.
         try:
             self._pending_bump_item = None
+            self._pending_next_index = None
+            self._pending_next_record_history = True
+        except Exception:
+            pass
+
+        # Full bump cleanup (timers, flags, card text, FX, assets).
+        try:
+            self.stop_bump_playback()
         except Exception:
             pass
 
@@ -11126,7 +11201,7 @@ class MainWindow(QMainWindow):
                     self._pending_next_index = None
                     self._pending_next_record_history = True
                     try:
-                        self.play_index(idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=True)
+                        self.play_index(idx, record_history=record_history, bypass_bump_gate=True)
                     except Exception:
                         pass
                     return
@@ -11224,7 +11299,7 @@ class MainWindow(QMainWindow):
                     self._pending_next_index = None
                     self._pending_next_record_history = True
                     try:
-                        self.play_index(idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=True)
+                        self.play_index(idx, record_history=record_history, bypass_bump_gate=True)
                     except Exception:
                         pass
                     return
@@ -11298,6 +11373,15 @@ class MainWindow(QMainWindow):
 
         # In packaged builds, stdout/stderr isn't visible. Show a helpful, non-spammy
         # dialog when playback fails so users understand what's wrong.
+        # Never show during bump/interstitial playback — those failures are
+        # handled silently by the bump retry logic in on_mpv_end_file_reason.
+        try:
+            if bool(getattr(self, '_in_bump_playback', False)):
+                return
+            if getattr(self, '_pending_bump_item', None) is not None:
+                return
+        except Exception:
+            pass
         try:
             # Only show one dialog per unique target per run.
             target = str(getattr(self, '_last_play_target', '') or '').strip()
@@ -11435,12 +11519,39 @@ class MainWindow(QMainWindow):
             pass
         self._sync_keep_awake()
 
-        # Bump-video reliability: mpv often reports missing/failed loads via end-file
+        # Bump reliability: mpv often reports missing/failed loads via end-file
         # reason=error (or similar) and does NOT emit playbackFinished.
-        # Treat any non-EOF end-file as "finished" for bump videos so we can still
-        # show the outro/post-script and/or advance past the bump gate.
+        # Treat non-EOF, non-stop end-file during bump playback as a bump failure.
+        # Ignore reason='stop' — that's an intentional stop (e.g., switching shows)
+        # and must not trigger retry logic.
         try:
-            if r and r.lower() != 'eof':
+            if r and r.lower() not in ('eof', 'stop') and bool(getattr(self, '_in_bump_playback', False)):
+                if not bool(getattr(self, '_current_bump_is_video', False)):
+                    # Audio-only bump failed: try the next bump from the queue.
+                    try:
+                        self._log_event('bump_audio_end_file', reason=str(r), target=str(target or ''))
+                    except Exception:
+                        pass
+                    self.stop_bump_playback()
+                    try:
+                        self.video_stack.setCurrentIndex(0)
+                    except Exception:
+                        pass
+                    next_bump = self._get_playable_bump(self.playlist_manager)
+                    if next_bump:
+                        try:
+                            self.play_bump(next_bump)
+                        except Exception:
+                            QTimer.singleShot(0, self.on_playback_finished)
+                    else:
+                        # No more bumps available; advance to the episode.
+                        QTimer.singleShot(0, self.on_playback_finished)
+                    return
+        except Exception:
+            pass
+
+        try:
+            if r and r.lower() not in ('eof', 'stop'):
                 if bool(getattr(self, '_in_bump_playback', False)) and bool(getattr(self, '_current_bump_is_video', False)):
                     try:
                         vpath = str(getattr(self, '_current_bump_video_path', '') or '').strip()
@@ -11452,35 +11563,27 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                    # One warning per failed target per run.
+                    # Log the failure silently — never block playback with a dialog.
                     try:
-                        key = str(target or vpath or '').strip()
-                        last = getattr(self, '_bump_video_error_last_dialog_target', None)
-                        if key and last != key:
-                            self._bump_video_error_last_dialog_target = key
-                            try:
-                                QMessageBox.warning(
-                                    self,
-                                    'Bump Video Failed',
-                                    (
-                                        "Sleepy Shows couldn't play the bump video.\n\n"
-                                        f"Reason: {str(r)}\n"
-                                        f"Video: {vpath or '(unknown)'}\n\n"
-                                        f"Debug log: {getattr(self, '_playback_log_path', '')}"
-                                    ),
-                                )
-                            except Exception:
-                                pass
+                        print(f"WARN: bump video failed reason={r} video={vpath or '(unknown)'} target={target}")
                     except Exception:
                         pass
 
+                    # Try the next bump instead of advancing straight to the episode.
+                    self.stop_bump_playback()
                     try:
-                        QTimer.singleShot(0, self.on_playback_finished)
+                        self.video_stack.setCurrentIndex(0)
                     except Exception:
+                        pass
+                    next_bump = self._get_playable_bump(self.playlist_manager)
+                    if next_bump:
                         try:
-                            self.on_playback_finished()
+                            self.play_bump(next_bump)
                         except Exception:
-                            pass
+                            QTimer.singleShot(0, self.on_playback_finished)
+                    else:
+                        QTimer.singleShot(0, self.on_playback_finished)
+                    return
         except Exception:
             pass
 
