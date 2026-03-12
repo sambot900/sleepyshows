@@ -98,6 +98,9 @@ class PlaylistManager:
         # - Interstitials: {normalized_path: float}
         self.interstitial_exposure_scores = {}
 
+        # Play count tracking (distinct from exposure scores).
+        self.episode_play_counts = {}           # {norm_path: int}
+
         # Per-playlist exposure controls (loaded from the playlist JSON).
         # Offsets are additive: effective exposure score is base + offsets.
         # Factors multiply per-play deltas and also influence queue selection via projected delta.
@@ -227,6 +230,31 @@ class PlaylistManager:
 
         # Frequency settings (offsets/factors) are now persisted with playlist JSON only.
 
+        # Play counts: load with one-time migration from exposure scores.
+        play_counts_raw = data.get('play_counts', None)
+        if isinstance(play_counts_raw, dict):
+            counts = {}
+            for k, v in play_counts_raw.items():
+                try:
+                    kk = self._norm_path_key(str(k))
+                    vv = max(0, int(v))
+                except Exception:
+                    continue
+                if kk:
+                    counts[kk] = vv
+            self.episode_play_counts = counts
+        else:
+            # One-time migration: estimate play count from accumulated exposure score.
+            # Assumes average delta ~100 (no sleep timer, factor=1.0).
+            counts = {}
+            for k, v in (self.episode_exposure_scores or {}).items():
+                try:
+                    counts[k] = max(0, round(float(v) / 100.0))
+                except Exception:
+                    pass
+            self.episode_play_counts = counts
+            self._exposure_dirty = True
+
         bump_state = data.get('bump_components', None)
         if isinstance(bump_state, dict):
             try:
@@ -271,6 +299,7 @@ class PlaylistManager:
 
         payload = {
             'episodes': dict(self.episode_exposure_scores or {}),
+            'play_counts': {str(k): int(v) for k, v in (self.episode_play_counts or {}).items()},
             'interstitials': dict(getattr(self, 'interstitial_exposure_scores', {}) or {}),
             'bump_components': dict(bump_state or {}),
         }
@@ -801,6 +830,11 @@ class PlaylistManager:
 
             self._exposure_dirty = True
             self._save_exposure_scores()
+
+            try:
+                self.episode_play_counts[key] = int(self.episode_play_counts.get(key, 0) or 0) + 1
+            except Exception:
+                pass
 
         self.episode_history.append(index)
         # Keep history bounded.

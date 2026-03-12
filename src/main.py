@@ -16,6 +16,7 @@ import datetime
 from bump_state import BumpState
 from sleep_timer import SleepTimerController
 from missing_media_recovery import MissingMediaRecovery
+from play_history_dialog import PlayHistoryDialog
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QFileDialog, QTreeWidget, 
@@ -819,6 +820,10 @@ class BumpsModeWidget(QWidget):
         self.btn_clear_history = QPushButton("Clear Viewing History…")
         self.btn_clear_history.clicked.connect(self.main_window.show_clear_viewing_history_dialog)
         layout.addWidget(self.btn_clear_history)
+
+        self.btn_play_history = QPushButton("View Play History…")
+        self.btn_play_history.clicked.connect(self.main_window.show_play_history_dialog)
+        layout.addWidget(self.btn_play_history)
 
         # --- Sound settings ---
         def add_toggle_row(label_text, initial_checked, on_toggle):
@@ -8942,6 +8947,16 @@ class MainWindow(QMainWindow):
                 json.dump(data, f, indent=2)
         except Exception:
             pass
+
+    def show_play_history_dialog(self):
+        filename = getattr(self, 'current_playlist_filename', None)
+        show_name = ''
+        if filename:
+            show_name = os.path.splitext(os.path.basename(str(filename)))[0]
+        if not show_name:
+            show_name = 'Current Show'
+        dlg = PlayHistoryDialog(self.playlist_manager, show_name, self)
+        dlg.exec()
 
     def show_clear_viewing_history_dialog(self):
         playlists = []
