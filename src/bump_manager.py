@@ -12,6 +12,26 @@ try:
 except Exception:
     _mutagen_file = None
 
+from bump_script_parser import (
+    TimingConfig,
+    normalize_card_text,
+    is_single_line_card,
+    expand_whitespace_tags,
+    card_duration_ms as _parser_card_duration_ms,
+    clamp_card_duration as _parser_clamp_card_duration,
+    parse_bump_music_pref,
+    parse_bump_video_pref,
+    parse_bump_inclusive_flag,
+    parse_outro_text,
+    parse_outro_duration_ms,
+    parse_outro_audio_flag,
+    parse_pause_ms,
+    parse_card_duration_spec,
+    parse_sound_tag as _parser_parse_sound_tag,
+    parse_img_tag as _parser_parse_img_tag,
+    analyze_script_timing as _parser_analyze_script_timing,
+)
+
 
 class BumpManager:
     def __init__(self):
@@ -63,6 +83,20 @@ class BumpManager:
         # New duration estimator control variables (see docs/bump duration strategy.txt).
         # Applied to the output of the readability model.
         self._duration_estimate_scale = 1.0
+
+        # Build the timing config used by the parser module.
+        self._timing_cfg = TimingConfig(
+            ms_per_char=self._ms_per_char,
+            ms_per_char_scale=self._ms_per_char_scale,
+            base_card_ms=self._base_card_ms,
+            one_line_bonus_ms=self._one_line_bonus_ms,
+            min_card_ms=self._min_card_ms,
+            max_card_ms=self._max_card_ms,
+            duration_scale=self._duration_scale,
+            duration_estimate_scale=self._duration_estimate_scale,
+            min_scalable_fraction=0.40,
+        )
+
         # α (alpha): 0 => equalized, 1 => proportional-to-duration, >1 => exaggerated
         self._duration_normalization_exponent = 1.0
         # ε (epsilon): global overage tolerance for music matching
@@ -479,88 +513,11 @@ class BumpManager:
         return False
 
     def _analyze_script_timing(self, script: dict) -> dict:
-        """Compute timing properties for a parsed script template.
-
-        The template contains per-card base durations and duration modes. This
-        analysis produces fixed/scalable aggregates used for music matching.
-        """
-        cards = script.get('cards') if isinstance(script, dict) else None
-        if not isinstance(cards, list) or not cards:
-            return {
-                'fixed_ms': 0,
-                'scalable_orig_ms': 0,
-                'estimated_ms': 0,
-                'min_possible_ms': 0,
-                'scalable_cards': [],
-            }
-
-        fixed_ms = 0
-        scalable_orig_ms = 0
-        min_possible_ms = 0
-        scalable_cards = []  # [{'idx': int, 't': float, 't_min': float, 'delta_ms': int, 'mode': str}]
-
-        min_frac = float(self._min_scalable_fraction)
-
-        for i, c in enumerate(cards):
-            if not isinstance(c, dict):
-                continue
-
-            mode = str(c.get('_duration_mode', 'auto') or 'auto').lower()
-            base_ms = c.get('_base_duration_ms', None)
-            delta_ms = c.get('_delta_ms', 0) or 0
-
-            # Pause and explicit fixed cards are fixed.
-            if mode == 'fixed':
-                try:
-                    fixed_ms += int(c.get('duration', 0) or 0)
-                except Exception:
-                    fixed_ms += 0
-                continue
-
-            # For abs duration override, treat the whole card as fixed.
-            if mode == 'abs':
-                try:
-                    fixed_ms += int(c.get('duration', 0) or 0)
-                except Exception:
-                    fixed_ms += 0
-                continue
-
-            # For delta and auto, the base portion is scalable.
-            try:
-                t = float(base_ms) if base_ms is not None else float(c.get('duration', 0) or 0)
-            except Exception:
-                t = float(c.get('duration', 0) or 0)
-            if t < 0.0:
-                t = 0.0
-            t_min = t * min_frac
-            r_delta = 0
-            try:
-                r_delta = int(delta_ms)
-            except Exception:
-                r_delta = 0
-
-            # Deltas are fixed-time adjustments.
-            fixed_ms += int(r_delta)
-            scalable_orig_ms += int(round(t))
-            min_possible_ms += int(round(t_min))
-            scalable_cards.append({
-                'idx': int(i),
-                't': float(t),
-                't_min': float(t_min),
-                'delta_ms': int(r_delta),
-                'mode': mode,
-            })
-
-        estimated_ms = int(fixed_ms) + int(scalable_orig_ms)
-        min_possible_total_ms = int(fixed_ms) + int(min_possible_ms)
-
-        return {
-            'fixed_ms': int(fixed_ms),
-            'scalable_orig_ms': int(scalable_orig_ms),
-            'estimated_ms': int(estimated_ms),
-            'min_possible_ms': int(min_possible_total_ms),
-            'scalable_cards': scalable_cards,
-        }
+        """Compute timing properties for a parsed script template."""
+        return _parser_analyze_script_timing(
+            script,
+            min_scalable_fraction=self._timing_cfg.min_scalable_fraction,
+        )
 
     def _script_can_fit_any_track(self, timing: dict) -> bool:
         """Return True if this script could possibly fit under the target cap."""
@@ -1731,31 +1688,13 @@ class BumpManager:
             pass
 
     def _normalize_card_text(self, text):
-        # Make whitespace consistent so char counting is stable.
-        return re.sub(r'\s+', ' ', str(text or '')).strip()
+        return normalize_card_text(text)
 
     def _is_single_line_card(self, text):
-        # Treat as single-line if there's 0-1 non-empty lines.
-        raw = str(text or '').strip()
-        if not raw:
-            return True
-        non_empty_lines = [ln for ln in raw.splitlines() if ln.strip()]
-        return len(non_empty_lines) <= 1
+        return is_single_line_card(text)
 
     def _card_duration_ms_for_text(self, text):
-        is_single_line = self._is_single_line_card(text)
-        t = self._normalize_card_text(text)
-        chars = len(t)
-        ms = (self._base_card_ms + (chars * self._ms_per_char * float(self._ms_per_char_scale))) * float(self._duration_scale)
-        if is_single_line:
-            ms += int(self._one_line_bonus_ms)
-        ms = float(ms) * float(self._duration_estimate_scale)
-        ms = int(ms)
-        if ms < self._min_card_ms:
-            ms = self._min_card_ms
-        if ms > self._max_card_ms:
-            ms = self._max_card_ms
-        return ms
+        return _parser_card_duration_ms(text, self._timing_cfg)
 
     def _duration_from_audio_file_ms(self, path: str):
         """Return exact duration in ms via mutagen, or None."""
@@ -1901,406 +1840,34 @@ class BumpManager:
             print(f"Error parsing {filepath}: {e}")
 
     def _parse_bump_music_pref(self, bump_header):
-        if not bump_header:
-            return 'any'
-
-        # Supports:
-        # - music=any
-        # - music=myfile.mp3
-        # - music="my file.mp3"
-        # - music=my file.mp3   (unquoted; best-effort until next key= or tag end)
-        m = re.search(
-            r'music\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s>]+))',
-            bump_header,
-            flags=re.IGNORECASE,
-        )
-        if m:
-            # If the value was quoted, we can trust it.
-            if (m.group(1) or m.group(2)):
-                value = (m.group(1) or m.group(2) or '').strip()
-                if value:
-                    return value
-
-            # If the value was unquoted, it may include spaces (e.g. music=special campfire.mp3).
-            # Only accept the single-token capture if it looks like a complete value.
-            token = (m.group(3) or '').strip()
-            if token:
-                try:
-                    # If there is additional non-attribute text after the token before the tag ends,
-                    # fall back to the space-tolerant parse below.
-                    if re.search(r'\bmusic\s*=\s*' + re.escape(token) + r'\s+[^\s>]', str(bump_header), flags=re.IGNORECASE):
-                        token = ''
-                except Exception:
-                    pass
-            if token:
-                return token
-
-        # Fallback: handle unquoted values with spaces.
-        # Example: <bump music=special campfire.mp3>
-        try:
-            s = str(bump_header)
-            m2 = re.search(r'\bmusic\s*=\s*', s, flags=re.IGNORECASE)
-            if not m2:
-                return 'any'
-            rest = s[m2.end():]
-            rest = re.sub(r'>\s*$', '', rest).strip()
-
-            # Stop before another attribute like " foo=bar".
-            m3 = re.search(r'\s+\w[\w-]*\s*=', rest)
-            if m3:
-                rest = rest[:m3.start()].strip()
-
-            if (rest.startswith('"') and rest.endswith('"')) or (rest.startswith("'") and rest.endswith("'")):
-                rest = rest[1:-1].strip()
-
-            return rest or 'any'
-        except Exception:
-            return 'any'
+        return parse_bump_music_pref(bump_header)
 
     def _parse_bump_video_pref(self, bump_header):
-        if not bump_header:
-            return None
-
-        # Supports:
-        # - video=clip.mp4
-        # - video="clip name.mp4"
-        # - video=clip name.mp4   (unquoted; best-effort)
-        m = re.search(
-            r'video\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s>]+))',
-            bump_header,
-            flags=re.IGNORECASE,
-        )
-        if m:
-            if (m.group(1) or m.group(2)):
-                value = (m.group(1) or m.group(2) or '').strip()
-                return value or None
-
-            token = (m.group(3) or '').strip()
-            if token:
-                try:
-                    # If the next word is the standalone 'inclusive' flag, keep token.
-                    # Otherwise, unquoted whitespace after the filename is ambiguous (likely a filename with spaces).
-                    trailer = None
-                    try:
-                        s0 = str(bump_header)
-                        mtrail = re.search(r'\bvideo\s*=\s*' + re.escape(token) + r'(?P<rest>[^>]*)', s0, flags=re.IGNORECASE)
-                        if mtrail:
-                            trailer = str(mtrail.group('rest') or '')
-                    except Exception:
-                        trailer = None
-
-                    if trailer:
-                        # Remove quoted segments from trailer.
-                        try:
-                            t = re.sub(r'"[^"]*"|\'[^\']*\'', '', trailer)
-                        except Exception:
-                            t = str(trailer)
-                        # If there's extra stuff and it's not *exactly* the standalone
-                        # inclusive flag, reject (unquoted filenames with spaces are ambiguous).
-                        try:
-                            rest_words = [w for w in re.split(r'\s+', str(t).strip()) if w]
-                        except Exception:
-                            rest_words = []
-
-                        if rest_words:
-                            if not (len(rest_words) == 1 and str(rest_words[0]).lower() == 'inclusive'):
-                                token = ''
-                except Exception:
-                    pass
-            if token:
-                return token
-
-        try:
-            s = str(bump_header)
-            m2 = re.search(r'\bvideo\s*=\s*', s, flags=re.IGNORECASE)
-            if not m2:
-                return None
-            rest = s[m2.end():]
-            rest = re.sub(r'>\s*$', '', rest).strip()
-
-            # If the user wrote: video=clip.mp4 inclusive
-            # treat 'inclusive' as a flag, not part of the filename.
-            try:
-                parts = [p for p in re.split(r'\s+', rest) if p]
-            except Exception:
-                parts = []
-            if len(parts) >= 2:
-                try:
-                    if str(parts[-1]).lower() == 'inclusive':
-                        candidate = " ".join(parts[:-1]).strip()
-                        # Only accept if it's not an unquoted multi-word filename.
-                        if candidate and (' ' not in candidate):
-                            return candidate
-                except Exception:
-                    pass
-
-            # If there are any remaining spaces here, it's an unquoted filename with spaces.
-            # Require quotes for that; otherwise we'd misparse flags/attributes.
-            try:
-                if re.search(r'\s+', rest):
-                    return None
-            except Exception:
-                pass
-
-            # Stop before another attribute like " foo=bar".
-            m3 = re.search(r'\s+\w[\w-]*\s*=', rest)
-            if m3:
-                rest = rest[:m3.start()].strip()
-
-            if (rest.startswith('"') and rest.endswith('"')) or (rest.startswith("'") and rest.endswith("'")):
-                rest = rest[1:-1].strip()
-
-            return rest or None
-        except Exception:
-            return None
+        return parse_bump_video_pref(bump_header)
 
     def _parse_bump_inclusive_flag(self, bump_header) -> bool:
-        if not bump_header:
-            return False
-        try:
-            s = str(bump_header)
-            # Remove quoted segments so a quoted word doesn't trigger.
-            s = re.sub(r'"[^"]*"|\'[^\']*\'', '', s)
-            return re.search(r'\binclusive\b', s, flags=re.IGNORECASE) is not None
-        except Exception:
-            return False
+        return parse_bump_inclusive_flag(bump_header)
 
     def _parse_outro_text(self, outro_tag):
-        default_text = '[sleepy shows]'
-        if not outro_tag:
-            return str(default_text)
-
-        # Supports:
-        # - <outro>
-        # - <outro="[sleepy shows]">
-        # - <outro="[sleepy shows]" audio>
-        # - <outro='[sleepy shows]'>
-        # - <outro=[sleepy shows]>
-        # - <outro "[sleepy shows]" 0.6s>
-        try:
-            s = str(outro_tag).strip()
-        except Exception:
-            return str(default_text)
-
-        # Prefer an explicitly quoted value anywhere in the tag.
-        try:
-            m = re.search(r'"([^"]*)"|\'([^\']*)\'', s)
-        except Exception:
-            m = None
-        if m:
-            try:
-                value = (m.group(1) or m.group(2) or '').strip()
-            except Exception:
-                value = ''
-            return value or str(default_text)
-
-        # Fallback: take the payload inside the tag and strip known trailing args.
-        m2 = None
-        try:
-            m2 = re.match(r'^\s*<\s*outro\b\s*([^>]*)>\s*$', s, flags=re.IGNORECASE)
-        except Exception:
-            m2 = None
-        if not m2:
-            return str(default_text)
-
-        payload = (m2.group(1) or '').strip()
-        if not payload:
-            return str(default_text)
-
-        if payload.startswith('='):
-            payload = payload[1:].strip()
-
-        # Remove a standalone trailing "audio" argument.
-        try:
-            payload = re.sub(r'\s+audio\s*$', '', payload, flags=re.IGNORECASE).strip()
-        except Exception:
-            payload = payload.strip()
-
-        # Remove a trailing duration token (e.g. "400ms", "0.6s", "400").
-        try:
-            payload = re.sub(r'\s+\d+(?:\.\d+)?\s*(?:ms|s)?\s*$', '', payload, flags=re.IGNORECASE).strip()
-        except Exception:
-            payload = payload.strip()
-
-        return payload or str(default_text)
+        return parse_outro_text(outro_tag)
 
     def _parse_outro_duration_ms(self, outro_tag):
-        """Parse optional outro duration.
-
-        Supported:
-          - <outro>                     -> 800ms (default)
-          - <outro 400ms>               -> 400
-          - <outro "[sleepy]" 0.6s>     -> 600
-          - <outro="[sleepy]" 400>     -> 400 (ms assumed)
-
-        Notes:
-          - Ignores quoted text segments.
-          - Ignores the standalone "audio" argument.
-        """
-        default_ms = 800
-        if not outro_tag:
-            return int(default_ms)
-        try:
-            s = str(outro_tag)
-        except Exception:
-            return int(default_ms)
-
-        try:
-            s2 = re.sub(r'"[^"]*"|\'[^\']*\'', '', s)
-        except Exception:
-            s2 = s
-
-        m = re.match(r'^\s*<\s*outro\b\s*([^>]*)>\s*$', s2, flags=re.IGNORECASE)
-        if not m:
-            return int(default_ms)
-
-        payload = (m.group(1) or '').strip()
-        if not payload:
-            return int(default_ms)
-
-        tokens = [t for t in re.split(r'\s+', payload) if t]
-        best = None
-        for t in tokens:
-            tl = str(t).strip().lower()
-            if not tl or tl == 'audio':
-                continue
-            if tl.startswith('='):
-                tl = tl[1:].strip()
-            tm = re.match(r'^(\d+(?:\.\d+)?)(ms|s)?$', tl)
-            if not tm:
-                continue
-            try:
-                v = float(tm.group(1))
-                unit = (tm.group(2) or 'ms').lower()
-                ms = int(round(v * 1000.0)) if unit == 's' else int(round(v))
-                if ms < 0:
-                    ms = abs(ms)
-                best = int(ms)
-            except Exception:
-                continue
-
-        return int(best) if best is not None else int(default_ms)
+        return parse_outro_duration_ms(outro_tag)
 
     def _parse_outro_audio_flag(self, outro_tag):
-        """Return True if the <outro ...> tag includes an 'audio' argument.
-
-        Example:
-          <outro="[sleepy shows]" audio>
-        """
-        if not outro_tag:
-            return False
-        try:
-            s = str(outro_tag)
-            # Remove quoted segments so a quoted word "audio" doesn't trigger the flag.
-            s = re.sub(r'"[^"]*"|\'[^\']*\'', '', s)
-            return re.search(r'\baudio\b', s, flags=re.IGNORECASE) is not None
-        except Exception:
-            return False
+        return parse_outro_audio_flag(outro_tag)
 
     def _parse_pause_ms(self, pause_tag):
-        # Supports:
-        # - <pause>
-        # - <pause=1200>
-        # - <pause=1200ms>
-        if not pause_tag:
-            return 1200
-        m = re.search(r'(\d+)', pause_tag)
-        if not m:
-            return 1200
-        try:
-            return int(m.group(1))
-        except Exception:
-            return 1200
+        return parse_pause_ms(pause_tag)
 
     def _parse_card_duration_spec(self, card_tag):
-        """Parse optional duration override from a <card ...> tag.
-
-        Supported:
-          - <card>            -> None (use standard timing)
-          - <card 500ms>      -> ('abs', 500)
-          - <card +500ms>     -> ('delta', +500)
-          - <card -500ms>     -> ('delta', -500)
-
-                We accept optional whitespace and a unit suffix:
-                    - ms (milliseconds)
-                    - s  (seconds)
-
-                If no unit is provided, milliseconds are assumed.
-        """
-        if not card_tag:
-            return None
-        s = str(card_tag).strip()
-        if not s:
-            return None
-
-        # Quickly reject non-card tags.
-        if not re.match(r'^<\s*card\b', s, flags=re.IGNORECASE):
-            return None
-
-        # Extract the inner payload (between 'card' and '>').
-        m = re.match(r'^<\s*card\b\s*([^>]*)>\s*$', s, flags=re.IGNORECASE)
-        if not m:
-            return None
-
-        payload = (m.group(1) or '').strip()
-        if not payload:
-            return None
-
-        # Expect something like "+500ms", "500ms", "5s" (allow spaces).
-        m2 = re.match(r'^([+-]?)\s*(\d+(?:\.\d+)?)\s*(ms|s)?\s*$', payload, flags=re.IGNORECASE)
-        if not m2:
-            return None
-
-        sign = (m2.group(1) or '').strip()
-        num_s = (m2.group(2) or '').strip()
-        unit = (m2.group(3) or '').strip().lower()
-        try:
-            value = float(num_s)
-        except Exception:
-            return None
-
-        if value < 0:
-            value = abs(value)
-
-        # Default unit: ms
-        if unit == 's':
-            ms = int(round(value * 1000.0))
-        else:
-            ms = int(round(value))
-
-        if sign == '+':
-            return ('delta', ms)
-        if sign == '-':
-            return ('delta', -ms)
-        return ('abs', ms)
+        return parse_card_duration_spec(card_tag)
 
     def _expand_whitespace_tags(self, text):
-        r"""Expand explicit whitespace tags in bump scripts.
-
-        - <\s> => space
-        - <\t> => tab
-        - <\n> => newline
-        """
-        if text is None:
-            return ''
-        s = str(text)
-        # Important: these tags include a literal backslash in the script.
-        s = s.replace('<\\s>', ' ')
-        s = s.replace('<\\t>', '\t')
-        s = s.replace('<\\n>', '\n')
-        return s
+        return expand_whitespace_tags(text)
 
     def _clamp_card_duration_ms(self, ms):
-        try:
-            ms = int(ms)
-        except Exception:
-            ms = int(self._min_card_ms)
-
-        if ms < int(self._min_card_ms):
-            ms = int(self._min_card_ms)
-        if ms > int(self._max_card_ms):
-            ms = int(self._max_card_ms)
-        return int(ms)
+        return _parser_clamp_card_duration(ms, self._timing_cfg)
 
     def _resolve_bump_image_path(self, filename, base_dir=None):
         name = str(filename or '').strip().strip('"\'')
@@ -2444,177 +2011,19 @@ class BumpManager:
         return os.path.normpath(name)
 
     def _parse_sound_tag(self, sound_tag, *, base_dir=None):
-        """Parse a <sound ...> tag.
-
-        Supported (order flexible):
-          - <sound file.wav>
-          - <sound file.wav add>
-          - <sound file.wav interrupt>
-                    - <sound file.wav cut>
-          - <sound file.wav duration>
-          - <sound file.wav card>
-          - <sound file.wav 500ms>
-          - <sound file.wav 5s>
-        Defaults:
-          - mix: add
-          - play_for: card
-        """
-        if not sound_tag:
+        """Parse a <sound ...> tag and resolve its file path."""
+        info = _parser_parse_sound_tag(sound_tag)
+        if info is None:
             return None
-
-        m = re.match(r'^<\s*sound\b\s*([^>]*)>\s*$', str(sound_tag).strip(), flags=re.IGNORECASE)
-        if not m:
-            return None
-
-        raw = (m.group(1) or '').strip()
-        if not raw:
-            return None
-
-        try:
-            tokens = shlex.split(raw)
-        except Exception:
-            tokens = [t for t in re.split(r'\s+', raw) if t]
-
-        filename = None
-        mix = 'add'
-        play_for = 'card'  # 'card' | 'duration' | 'ms'
-        ms = None
-
-        for t in tokens:
-            tl = str(t).strip().lower()
-            if not tl:
-                continue
-
-            if tl == 'add':
-                mix = 'add'
-                continue
-            if tl == 'interrupt':
-                mix = 'interrupt'
-                continue
-            if tl == 'cut':
-                mix = 'cut'
-                continue
-
-            if tl == 'duration':
-                play_for = 'duration'
-                ms = None
-                continue
-            if tl == 'card':
-                play_for = 'card'
-                ms = None
-                continue
-
-            tm = re.match(r'^(\d+(?:\.\d+)?)\s*(ms|s)$', tl)
-            if tm:
-                try:
-                    v = float(tm.group(1))
-                    unit = tm.group(2)
-                    ms = int(round(v * 1000.0)) if unit == 's' else int(round(v))
-                    if ms < 0:
-                        ms = abs(ms)
-                    play_for = 'ms'
-                except Exception:
-                    pass
-                continue
-
-            if filename is None:
-                filename = str(t).strip()
-
-        if not filename:
-            return None
-
-        resolved = self._resolve_bump_sound_path(filename, base_dir=base_dir)
-        info = {
-            'filename': str(filename),
-            'path': str(resolved),
-            'mix': str(mix),
-            'play_for': str(play_for),
-        }
-        if play_for == 'ms' and ms is not None:
-            info['ms'] = int(ms)
-
+        info['path'] = str(self._resolve_bump_sound_path(info['filename'], base_dir=base_dir))
         return info
 
     def _parse_img_tag(self, img_tag, *, base_dir=None, full_card_text=None):
-        """Parse an <img ...> tag.
-
-        Supported:
-          - <img filename.png>
-          - <img filename.png lines>
-          - <img filename.png char>
-          - <img filename.png 20%>
-        """
-        if not img_tag:
+        """Parse an <img ...> tag and resolve its file path."""
+        info = _parser_parse_img_tag(img_tag, full_card_text=full_card_text)
+        if info is None:
             return None
-
-        m = re.match(r'^<\s*img\b\s*([^>]*)>\s*$', str(img_tag).strip(), flags=re.IGNORECASE)
-        if not m:
-            return None
-
-        raw = (m.group(1) or '').strip()
-        if not raw:
-            return None
-
-        try:
-            tokens = shlex.split(raw)
-        except Exception:
-            tokens = [t for t in re.split(r'\s+', raw) if t]
-
-        filename = None
-        mode = 'default'
-        percent = None
-
-        for t in tokens:
-            tl = str(t).strip().lower()
-            if not tl:
-                continue
-            if tl == 'lines':
-                mode = 'lines'
-                continue
-            if tl == 'char':
-                mode = 'char'
-                continue
-            pm = re.match(r'^(\d+(?:\.\d+)?)%$', tl)
-            if pm:
-                mode = 'percent'
-                try:
-                    percent = float(pm.group(1))
-                except Exception:
-                    percent = None
-                continue
-            if filename is None:
-                filename = str(t).strip()
-
-        if not filename:
-            return None
-
-        resolved = self._resolve_bump_image_path(filename, base_dir=base_dir)
-        info = {
-            'filename': str(filename),
-            'path': str(resolved),
-            'mode': str(mode),
-        }
-        if percent is not None:
-            info['percent'] = float(percent)
-
-        if mode == 'lines':
-            try:
-                cleaned = str(full_card_text or '')
-                cleaned = re.sub(r'<\s*img\b[^>]*>', '', cleaned, flags=re.IGNORECASE)
-                cleaned = re.sub(r'<\s*sound\b[^>]*>', '', cleaned, flags=re.IGNORECASE)
-                # Count lines including intentional blank lines.
-                # Use split('\n') (not splitlines()) so a trailing newline from a final
-                # explicit blank line is preserved as an empty string element.
-                cleaned = cleaned.replace('\r\n', '\n').replace('\r', '\n')
-                raw_lines = cleaned.split('\n')
-                # If the card is truly empty/whitespace-only, treat it as 0 lines.
-                if str(cleaned).strip() == '':
-                    info['lines_count'] = 0
-                else:
-                    info['lines_count'] = int(len(raw_lines))
-            except Exception:
-                info['lines_count'] = 0
-
+        info['path'] = str(self._resolve_bump_image_path(info['filename'], base_dir=base_dir))
         return info
 
     def _parse_single_bump(self, content, bump_header=None, base_dir=None, source_key=None):
