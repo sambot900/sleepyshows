@@ -1004,6 +1004,21 @@ class BumpsModeWidget(QWidget):
         self.lbl_audio_fx.setStyleSheet("font-size: 14px; color: #e0e0e0;")
         layout.addWidget(self.lbl_audio_fx)
 
+        layout.addSpacing(20)
+
+        # --- Diagnostics ---
+        diag_lbl = QLabel("Diagnostics")
+        diag_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: white;")
+        layout.addWidget(diag_lbl)
+
+        self.btn_export_report = QPushButton("Export Error Report…")
+        self.btn_export_report.clicked.connect(self.main_window.export_error_report)
+        layout.addWidget(self.btn_export_report)
+
+        diag_info = QLabel("Exports a log of playback errors, skipped episodes,\nmedia failures, and bump/interlude diagnostics.")
+        diag_info.setStyleSheet("font-size: 13px; color: #999;")
+        layout.addWidget(diag_info)
+
         layout.addStretch(1)
 
     def refresh_status(self):
@@ -5783,6 +5798,187 @@ class MainWindow(QMainWindow):
             pass
         self._log_event('stop_reason', reason=self._last_stop_reason, **(fields or {}))
 
+    def _generate_error_report(self) -> str:
+        """Parse playback_events.jsonl and generate a human-readable error report."""
+        # Event types that indicate problems or diagnostics worth surfacing.
+        _ERROR_EVENTS = {
+            'player_error', 'mpv_end_file', 'bump_video_end_file',
+            'bump_video_error', 'media_missing', 'media_reappeared',
+            'stop_reason', 'episode_skipped', 'auto_advance', 'bump_gate',
+        }
+
+        lines: list[str] = []
+        lines.append("=" * 64)
+        lines.append("  Sleepy Shows — Error & Diagnostics Report")
+        lines.append(f"  Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("=" * 64)
+        lines.append("")
+
+        # Collect events from log file(s).
+        events: list[dict] = []
+        for path in (self._playback_log_path, self._playback_log_path + '.1'):
+            try:
+                if not os.path.exists(path):
+                    continue
+                with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                    for raw in f:
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            events.append(json.loads(raw))
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        if not events:
+            lines.append("No playback events recorded yet.")
+            return "\n".join(lines)
+
+        # Sort by timestamp.
+        events.sort(key=lambda e: str(e.get('ts', '')))
+
+        # --- Section 1: Errors & Failures ---
+        errors = [e for e in events if e.get('event') in _ERROR_EVENTS]
+        # mpv_end_file with reason 'eof' is normal; filter those out.
+        errors = [e for e in errors
+                  if not (e.get('event') == 'mpv_end_file' and str(e.get('reason', '')).lower() == 'eof')]
+        # stop_reason 'mpv_eof' and 'stop_playback' are normal.
+        errors = [e for e in errors
+                  if not (e.get('event') == 'stop_reason' and str(e.get('reason', '')) in ('mpv_eof', 'stop_playback', None))]
+
+        lines.append(f"ERRORS & WARNINGS  ({len(errors)} events)")
+        lines.append("-" * 48)
+        if not errors:
+            lines.append("  (none)")
+        for ev in errors:
+            ts = ev.get('ts', '?')
+            evt = ev.get('event', '?')
+            detail_parts = []
+            for k, v in ev.items():
+                if k in ('ts', 'event'):
+                    continue
+                if v is None or v == '':
+                    continue
+                detail_parts.append(f"{k}={v}")
+            detail = '  '.join(detail_parts)
+            lines.append(f"  [{ts}] {evt}")
+            if detail:
+                lines.append(f"    {detail}")
+        lines.append("")
+
+        # --- Section 2: Playback timeline (all play_start events) ---
+        play_starts = [e for e in events if e.get('event') == 'play_start']
+        lines.append(f"PLAYBACK TIMELINE  ({len(play_starts)} items played)")
+        lines.append("-" * 48)
+        for ev in play_starts[-100:]:  # Last 100 items
+            ts = ev.get('ts', '?')
+            kind = ev.get('kind', '?')
+            src = ev.get('source_path', '')
+            idx = ev.get('index', '?')
+            name = os.path.basename(str(src)) if src else '(unknown)'
+            lines.append(f"  [{ts}] {kind:24s} idx={idx}  {name}")
+        if len(play_starts) > 100:
+            lines.append(f"  ... ({len(play_starts) - 100} earlier entries omitted)")
+        lines.append("")
+
+        # --- Section 3: Summary statistics ---
+        event_counts: dict[str, int] = {}
+        for ev in events:
+            evt = str(ev.get('event', '?'))
+            event_counts[evt] = event_counts.get(evt, 0) + 1
+
+        lines.append("EVENT SUMMARY")
+        lines.append("-" * 48)
+        for evt, count in sorted(event_counts.items(), key=lambda x: -x[1]):
+            lines.append(f"  {evt:36s} {count:>6}")
+        lines.append("")
+
+        # --- Section 4: Non-EOF end-file reasons (file failures) ---
+        end_files = [e for e in events
+                     if e.get('event') == 'mpv_end_file' and str(e.get('reason', '')).lower() != 'eof']
+        lines.append(f"FILE FAILURES  (non-EOF end-file events: {len(end_files)})")
+        lines.append("-" * 48)
+        if not end_files:
+            lines.append("  (none)")
+        for ev in end_files:
+            ts = ev.get('ts', '?')
+            reason = ev.get('reason', '?')
+            target = ev.get('target', '?')
+            lines.append(f"  [{ts}] reason={reason}  target={os.path.basename(str(target))}")
+        lines.append("")
+
+        # --- Section 5: Episode skips ---
+        skips = [e for e in events if e.get('event') == 'episode_skipped']
+        lines.append(f"EPISODE SKIPS  ({len(skips)} skipped)")
+        lines.append("-" * 48)
+        if not skips:
+            lines.append("  (none)")
+        for ev in skips:
+            ts = ev.get('ts', '?')
+            src = ev.get('source_path', '')
+            pos = ev.get('pos')
+            dur = ev.get('dur')
+            name = os.path.basename(str(src)) if src else '(unknown)'
+            pos_str = f"{float(pos):.1f}s" if pos is not None else '?'
+            dur_str = f"{float(dur):.1f}s" if dur is not None else '?'
+            lines.append(f"  [{ts}] {name}  pos={pos_str}/{dur_str}")
+        lines.append("")
+
+        # --- Section 6: Media disconnects / recoveries ---
+        missing = [e for e in events if e.get('event') in ('media_missing', 'media_reappeared')]
+        lines.append(f"MEDIA DISCONNECTS  ({len(missing)} events)")
+        lines.append("-" * 48)
+        if not missing:
+            lines.append("  (none)")
+        for ev in missing:
+            ts = ev.get('ts', '?')
+            evt = ev.get('event', '?')
+            target = ev.get('target', '')
+            reason = ev.get('reason', '')
+            name = os.path.basename(str(target)) if target else '(unknown)'
+            lines.append(f"  [{ts}] {evt}  {name}  reason={reason}")
+        lines.append("")
+
+        # --- Section 7: Log file info ---
+        lines.append("LOG FILES")
+        lines.append("-" * 48)
+        for p in (self._playback_log_path, self._playback_log_path + '.1'):
+            try:
+                if os.path.exists(p):
+                    sz = os.path.getsize(p)
+                    lines.append(f"  {p}  ({sz:,} bytes)")
+                else:
+                    lines.append(f"  {p}  (not found)")
+            except Exception:
+                lines.append(f"  {p}  (error reading)")
+        lines.append("")
+
+        return "\n".join(lines)
+
+    def export_error_report(self):
+        """Generate and save an error report via file dialog."""
+        try:
+            report = self._generate_error_report()
+        except Exception as exc:
+            QMessageBox.warning(self, 'Error Report', f'Failed to generate report:\n{exc}')
+            return
+
+        default_name = f"sleepyshows_report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Error Report', default_name,
+            'Text Files (*.txt);;All Files (*)')
+        if not path:
+            return
+
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(report)
+            QMessageBox.information(self, 'Error Report', f'Report saved to:\n{path}')
+        except Exception as exc:
+            QMessageBox.warning(self, 'Error Report', f'Failed to save report:\n{exc}')
+
     def _is_actively_playing(self) -> bool:
         try:
             if not hasattr(self, 'player') or not self.player or not getattr(self.player, 'mpv', None):
@@ -9647,6 +9843,15 @@ class MainWindow(QMainWindow):
         if not bool(getattr(self, 'bumps_enabled', False)):
             return self.play_bump(bump_item)
 
+        # If an interstitial just finished playing (playlist item), it already
+        # served as the break. Skip the preroll to avoid back-to-back interludes.
+        try:
+            if bool(getattr(self, '_skip_next_preroll_interstitial', False)):
+                self._skip_next_preroll_interstitial = False
+                return self.play_bump(bump_item)
+        except Exception:
+            pass
+
         # Don't stack prerolls.
         try:
             if getattr(self, '_pending_bump_item', None) is not None:
@@ -10880,6 +11085,15 @@ class MainWindow(QMainWindow):
             self._skip_penalty_applied_for_start = start_key
         except Exception:
             pass
+
+        try:
+            ep_path = pm._episode_path_for_index(idx)
+            self._log_event('episode_skipped', index=int(idx), source_path=str(ep_path or ''),
+                            pos=float(pos) if pos is not None else None,
+                            dur=float(dur) if dur is not None else None)
+        except Exception:
+            pass
+
         return bool(delta)
 
     def stop_playback(self):
@@ -10994,6 +11208,18 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # If the next item is an interstitial, play it directly — interstitials
+        # serve as the break themselves and should NOT be preceded by a bump gate.
+        # Without this, the sequence becomes Interlude→Bump→Interstitial→Interlude
+        # →Bump→Episode instead of the intended Interstitial→Bump→Episode.
+        try:
+            next_item = pm.current_playlist[next_idx]
+            if isinstance(next_item, dict) and next_item.get('type') == 'interstitial':
+                self.play_index(next_idx, record_history=record_history, bypass_bump_gate=True, suppress_ui=bool(suppress_ui))
+                return
+        except Exception:
+            pass
+
         # Global bump gate: any forward move plays a bump first when enabled.
         if (
             self.bumps_enabled
@@ -11010,6 +11236,11 @@ class MainWindow(QMainWindow):
             if bump_item:
                 self._pending_next_index = int(next_idx)
                 self._pending_next_record_history = bool(record_history)
+                try:
+                    self._log_event('bump_gate', pending_index=int(next_idx),
+                                    has_preroll=not bool(getattr(self, '_skip_next_preroll_interstitial', False)))
+                except Exception:
+                    pass
                 self.stop_bump_playback()
                 self._play_bump_with_optional_interstitial(bump_item)
                 return
@@ -11338,6 +11569,21 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+        # If the current item was an interstitial, a bump already played before it,
+        # so skip the interlude preroll on the upcoming bump gate to avoid
+        # Interstitial → Interlude → Bump → Episode redundancy.
+        try:
+            pm = self.playlist_manager
+            cur_idx = getattr(pm, 'current_index', -1)
+            if 0 <= cur_idx < len(pm.current_playlist):
+                cur_item = pm.current_playlist[cur_idx]
+                if isinstance(cur_item, dict) and cur_item.get('type') == 'interstitial':
+                    self._skip_next_preroll_interstitial = True
+                    self._log_event('auto_advance', from_kind='interstitial', index=int(cur_idx),
+                                    skip_preroll=True)
+        except Exception:
+            pass
+
         # Auto advance
         try:
             self._set_stop_reason('mpv_eof')
@@ -11352,6 +11598,15 @@ class MainWindow(QMainWindow):
 
     def on_player_error(self, msg):
         print(f"Player Error: {msg}")
+
+        try:
+            target = str(getattr(self, '_last_play_target', '') or '')
+            src = str(getattr(self, '_last_play_source_path', '') or '')
+            idx = int(getattr(self.playlist_manager, 'current_index', -1))
+            self._log_event('player_error', message=str(msg or ''), target=target,
+                            source_path=src, index=idx)
+        except Exception:
+            pass
 
         try:
             self._set_stop_reason('player_error', message=str(msg or ''))

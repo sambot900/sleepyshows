@@ -14,6 +14,16 @@
 - New implementations must reuse existing patterns (exposure scoring, shuffle-bag queues, signal/slot wiring) before introducing new ones.
 - Use `rg` (ripgrep) instead of `grep` for all terminal searches.
 
+## Cross-Platform Compatibility
+
+- All code must work on both **Windows 11** and **Linux**. Primary testing happens on Windows; request Linux testing explicitly when needed.
+- Use `os.path` (`join`, `basename`, `exists`, etc.) for all path construction — never hardcode `/` or `\\` separators.
+- Use platform-aware config directories (`%APPDATA%\SleepyShows\` on Windows, `~/.config/SleepyShows/` on Linux) via the existing `_get_user_config_dir()` helper.
+- File I/O must specify `encoding='utf-8'` explicitly; Windows defaults to the system codepage otherwise.
+- Guard platform-specific code (e.g., DLL loading, `ctypes` calls, `caffeinate`) behind `sys.platform` / `platform.system()` checks.
+- Qt/PySide6 abstractions handle most UI differences, but watch for: native window embedding (`wid`), DPI scaling, and font rendering differences.
+- When a feature touches mpv, path resolution, or keep-awake, verify the approach works on both platforms before merging.
+
 ## Stack
 
 | Layer | Choice |
