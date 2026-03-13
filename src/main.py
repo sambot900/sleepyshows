@@ -5083,8 +5083,8 @@ class MainWindow(QMainWindow):
         # Note: do not use cursor position (it can be on another monitor).
         self._startup_w_ratio = 0.65
         self._startup_h_ratio = 0.75
-        self._startup_min_w = 360*2
-        self._startup_min_h = 480*2
+        self._startup_min_w = 720
+        self._startup_min_h = 540
 
         # Apply once using primary screen as a safe default, then re-apply on the
         # actual screen after the window is created/shown.
@@ -5135,12 +5135,14 @@ class MainWindow(QMainWindow):
         if avail_w <= 0 or avail_h <= 0:
             return
 
-        w = int(max(int(getattr(self, '_startup_min_w', 360)), avail_w * float(getattr(self, '_startup_w_ratio', 0.65))))
-        h = int(max(int(getattr(self, '_startup_min_h', 480)), avail_h * float(getattr(self, '_startup_h_ratio', 0.75))))
+        w = int(max(int(getattr(self, '_startup_min_w', 720)), avail_w * float(getattr(self, '_startup_w_ratio', 0.65))))
+        h = int(max(int(getattr(self, '_startup_min_h', 540)), avail_h * float(getattr(self, '_startup_h_ratio', 0.75))))
 
-        # Never spill off-screen.
-        w = min(w, avail_w)
-        h = min(h, avail_h)
+        # Reserve space for the window frame (title bar + borders) so the
+        # title bar is always reachable for dragging/closing.
+        frame_margin = 40  # px — generous estimate for title bar + borders
+        w = min(w, avail_w - frame_margin)
+        h = min(h, avail_h - frame_margin)
 
         try:
             self._startup_available_size = (avail_w, avail_h)
