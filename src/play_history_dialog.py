@@ -7,11 +7,14 @@ import re
 import math
 import datetime
 
+import json
+
 from PySide6.QtCore import Qt, QRect, QSize
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QFontMetrics
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QWidget, QSizePolicy, QFileDialog, QMessageBox, QToolTip,
+    QComboBox,
 )
 
 # Season colour palette — Material Design 300 level, visually distinct on dark backgrounds.
@@ -52,8 +55,13 @@ def _nice_max(val: int) -> int:
 
 def _build_records(pm) -> list[dict]:
     """Build sorted per-episode records from PlaylistManager state."""
+    return _build_records_from_items(list(pm.current_playlist or []), pm)
+
+
+def _build_records_from_items(items: list, pm) -> list[dict]:
+    """Build sorted per-episode records from a list of playlist items."""
     records = []
-    for item in list(pm.current_playlist or []):
+    for item in items:
         if not isinstance(item, dict):
             continue
         if item.get('type', 'video') != 'video':
@@ -86,6 +94,21 @@ def _build_records(pm) -> list[dict]:
         })
     records.sort(key=lambda r: (r['season'], r['episode']))
     return records
+
+
+def _build_records_from_playlist_file(playlist_path: str, pm) -> list[dict]:
+    """Load a playlist JSON and build records using the PM's exposure data."""
+    try:
+        with open(playlist_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    items = data.get('playlist', [])
+    if not isinstance(items, list):
+        return []
+    return _build_records_from_items(items, pm)
 
 
 class _BarChart(QWidget):
@@ -255,15 +278,29 @@ class _BarChart(QWidget):
 
 
 class PlayHistoryDialog(QDialog):
-    """Show play-count distribution chart for the currently loaded show."""
+    """Show play-count distribution chart with a playlist selector dropdown."""
 
-    def __init__(self, pm, show_name: str, parent=None):
+    def __init__(self, pm, show_name: str, parent=None, *,
+                 playlist_files: list[tuple[str, str]] | None = None):
+        """
+        Parameters
+        ----------
+        pm : PlaylistManager
+        show_name : str
+            Name of the initially selected show (may be empty).
+        parent : QWidget | None
+        playlist_files : list of (display_name, absolute_path) tuples
+            Available playlists the user can switch between.
+        """
         super().__init__(parent)
         self._pm = pm
         self._show_name = show_name
-        self._records = _build_records(pm)
+        self._playlist_files = list(playlist_files or [])
 
-        self.setWindowTitle(f'Play History — {show_name}')
+        # Build initial records from whatever is currently loaded.
+        self._records = _build_records(pm) if pm.current_playlist else []
+
+        self.setWindowTitle('Play History')
         self.resize(960, 580)
         self.setMinimumSize(500, 350)
 
@@ -271,12 +308,59 @@ class PlayHistoryDialog(QDialog):
         root.setContentsMargins(16, 16, 16, 12)
         root.setSpacing(10)
 
-        title = QLabel(f'Play History — {show_name}')
-        title.setStyleSheet('font-size: 18px; font-weight: bold; color: white;')
-        root.addWidget(title)
+        # --- Playlist selector row ---
+        selector_row = QHBoxLayout()
+        selector_row.setContentsMargins(0, 0, 0, 0)
+        selector_row.setSpacing(8)
+
+        sel_label = QLabel('Playlist:')
+        sel_label.setStyleSheet('font-size: 14px; color: white;')
+        selector_row.addWidget(sel_label)
+
+        self._combo = QComboBox()
+        self._combo.setStyleSheet(
+            "QComboBox { background: #333; color: white; padding: 5px 10px;"
+            " border: 1px solid #555; border-radius: 4px; min-width: 200px; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { background: #333; color: white;"
+            " selection-background-color: #0e1a77; }"
+        )
+        self._combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        # Populate combo: first entry is a placeholder if nothing is selected.
+        initial_idx = 0
+        for display_name, fpath in self._playlist_files:
+            self._combo.addItem(display_name, fpath)
+            # Pre-select the currently loaded show.
+            if show_name and display_name == show_name:
+                initial_idx = self._combo.count() - 1
+
+        if self._combo.count() == 0:
+            self._combo.addItem('(no playlists found)', '')
+
+        self._combo.setCurrentIndex(initial_idx)
+        selector_row.addWidget(self._combo)
+        root.addLayout(selector_row)
+
+        # If the initial selection doesn't match the loaded playlist, load it.
+        # Do this before creating widgets that depend on _records, but before
+        # _title/_chart exist, so just update _records directly.
+        if self._playlist_files and not self._records:
+            fpath = self._combo.itemData(initial_idx)
+            if fpath:
+                self._show_name = self._combo.itemText(initial_idx)
+                self._records = _build_records_from_playlist_file(str(fpath), self._pm)
+
+        self._title = QLabel(self._title_text())
+        self._title.setStyleSheet('font-size: 18px; font-weight: bold; color: white;')
+        root.addWidget(self._title)
 
         self._chart = _BarChart(self._records, self)
         root.addWidget(self._chart, 1)
+
+        # Connect combo after widgets exist so _on_playlist_changed can safely
+        # update _title and _chart.
+        self._combo.currentIndexChanged.connect(self._on_playlist_changed)
 
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 4, 0, 0)
@@ -288,6 +372,28 @@ class PlayHistoryDialog(QDialog):
         btn_row.addStretch(1)
         btn_row.addWidget(btn_close)
         root.addLayout(btn_row)
+
+    def _title_text(self) -> str:
+        name = self._show_name or 'Select a Playlist'
+        n = len(self._records)
+        if n:
+            return f'Play History \u2014 {name}  ({n} episodes)'
+        return f'Play History \u2014 {name}'
+
+    def _on_playlist_changed(self, index: int):
+        self._load_playlist_at_index(index)
+
+    def _load_playlist_at_index(self, index: int):
+        fpath = self._combo.itemData(index)
+        display = self._combo.itemText(index)
+        if not fpath:
+            self._show_name = display
+            self._records = []
+        else:
+            self._show_name = display
+            self._records = _build_records_from_playlist_file(str(fpath), self._pm)
+        self._title.setText(self._title_text())
+        self._chart.set_records(self._records)
 
     def _export(self):
         safe_name = re.sub(r'[^\w\s\-.]', '', self._show_name).strip()

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QDockWidget, QFrame, QSizePolicy, QToolButton, QStyle, QGridLayout,
                                QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider,
                                QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-                               QAbstractButton)
+                               QAbstractButton, QLayout, QScrollArea)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop, QFileSystemWatcher
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QFontDatabase, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor, QGuiApplication
 from PySide6.QtCore import QUrl
@@ -808,10 +808,24 @@ class BumpsModeWidget(QWidget):
         self.main_window = main_window
         self.setup_ui()
 
+    def minimumSizeHint(self):
+        return QSize(1, 1)
+
     def setup_ui(self):
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        outer.addWidget(scroll)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(30, 30, 30, 30)
         layout.setSpacing(15)
+        scroll.setWidget(container)
 
         title = QLabel("Settings")
         title.setStyleSheet("font-size: 28px; font-weight: bold; color: white;")
@@ -3768,6 +3782,9 @@ class EditModeWidget(QWidget):
         self.main_window = main_window
         # We access playlist_manager via main_window for shared state
         self.setup_ui()
+
+    def minimumSizeHint(self):
+        return QSize(1, 1)
         
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -4395,13 +4412,14 @@ class PlayModeWidget(QWidget):
         return QIcon(pm)
         
     def setup_ui(self):
-        self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
-        self.layout.setSpacing(0)
+        self._h_layout = QHBoxLayout(self)
+        self._h_layout.setContentsMargins(0, 0, 0, 0)
+        self._h_layout.setSpacing(0)
         
         # --- Sidebar ---
         self.sidebar_container = QWidget()
         self.sidebar_container.setFixedWidth(300)
+        self.sidebar_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.sidebar_container.setStyleSheet("background-color: #2b2b2b;")
         side_layout = QVBoxLayout(self.sidebar_container)
         
@@ -4423,18 +4441,18 @@ class PlayModeWidget(QWidget):
         self.playlists_list_widget.setStyleSheet("font-size: 14pt;")
         self.playlists_list_widget.itemClicked.connect(self.load_selected_playlist)
         self.playlists_list_widget.itemDoubleClicked.connect(self.load_and_play_playlist)
-        side_layout.addWidget(self.playlists_list_widget)
+        side_layout.addWidget(self.playlists_list_widget, 1)
         
         side_layout.addWidget(QLabel("Current Playlist Episodes:"))
         self.episode_list_widget = QListWidget()
         self.episode_list_widget.itemDoubleClicked.connect(self.play_episode_from_list)
-        side_layout.addWidget(self.episode_list_widget)
+        side_layout.addWidget(self.episode_list_widget, 1)
         
         side_refresh_btn = QPushButton("Refresh Playlists")
         side_refresh_btn.clicked.connect(self.refresh_playlists)
         side_layout.addWidget(side_refresh_btn)
         
-        self.layout.addWidget(self.sidebar_container)
+        self._h_layout.addWidget(self.sidebar_container)
         
         # --- Video Area ---
         self.video_area = QWidget()
@@ -4685,7 +4703,7 @@ class PlayModeWidget(QWidget):
         self.video_layout.addWidget(self.video_placeholder, 1) # This will be replaced
         self.video_layout.addWidget(self.controls_widget)
         
-        self.layout.addWidget(self.video_area, 1) # Expand
+        self._h_layout.addWidget(self.video_area, 1) # Expand
         
         self.sidebar_visible = True
         self.sidebar_container.setVisible(True)
@@ -5054,6 +5072,7 @@ class PlayModeWidget(QWidget):
             if isinstance(filename, str) and not filename.lower().endswith('.json'):
                 filename = filename + '.json'
         self.main_window.load_playlist(os.path.join("playlists", filename))
+        self.refresh_episode_list()
 
     def load_and_play_playlist(self, item):
         filename = None
@@ -5089,23 +5108,27 @@ class MainWindow(QMainWindow):
         # Apply once using primary screen as a safe default, then re-apply on the
         # actual screen after the window is created/shown.
         try:
-            self._apply_startup_size_for_screen(QGuiApplication.primaryScreen(), center=True)
+            self._apply_startup_geometry(QGuiApplication.primaryScreen(), center=True)
         except Exception:
             try:
                 self.resize(1200, 800)
             except Exception:
                 pass
 
+        # Full data + widget initialisation (runs exactly once).
+        self._init_data_and_ui()
+
+        # Re-apply sizing AFTER content is added so Qt layout doesn't override it.
         try:
             QTimer.singleShot(0, self._apply_startup_size_for_current_screen)
         except Exception:
             pass
 
     def _apply_startup_size_for_current_screen(self):
+        """Deferred resize: re-apply sizing for the actual screen the window landed on."""
         try:
             screen = None
             try:
-                # QWidget.screen() returns the screen the widget is on (Qt6).
                 screen = self.screen()
             except Exception:
                 screen = None
@@ -5122,11 +5145,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     screen = None
 
-            self._apply_startup_size_for_screen(screen, center=True)
+            self._apply_startup_geometry(screen, center=True)
         except Exception:
             pass
 
-    def _apply_startup_size_for_screen(self, screen, center: bool = True):
+    def _apply_startup_geometry(self, screen, center: bool = True):
+        """Resize + centre the window to fit *screen*. Pure geometry — no side effects."""
         if screen is None:
             return
 
@@ -5159,7 +5183,9 @@ class MainWindow(QMainWindow):
                 self.move(fr.topLeft())
             except Exception:
                 pass
-        
+
+    def _init_data_and_ui(self):
+        """One-time data + widget initialisation. Called once from __init__."""
         # Data
         self.playlist_manager = PlaylistManager()
 
@@ -5224,13 +5250,10 @@ class MainWindow(QMainWindow):
         if configured_mode not in {'portable', 'web'}:
             configured_mode = 'portable'
 
-        # Startup behavior: prefer Portable mode when the configured external drive is present.
-        # If it's not mounted, fall back to Web mode.
-        try:
-            has_portable_drive = _volume_label_is_mounted(self.auto_config_volume_label)
-        except Exception:
-            has_portable_drive = False
-        self.playback_mode = 'portable' if has_portable_drive else 'web'
+        # Use the configured mode as-is.  Do NOT auto-switch to web just
+        # because the portable drive is absent — the user may simply not have
+        # plugged it in yet.
+        self.playback_mode = configured_mode
 
         # Startup fix: in Portable mode, proactively auto-config so playlists are
         # validated against the external drive and rebuilt if stale.
@@ -5522,7 +5545,6 @@ class MainWindow(QMainWindow):
         # Create Player Backend (Hidden parent until attached)
         # We need a container for MPV
         self.video_container = QWidget() 
-        self.video_container.setAttribute(Qt.WA_DontCreateNativeAncestors)
         self.video_container.setAttribute(Qt.WA_NativeWindow, True)
         
         # Layout for video container to ensure player resizes
@@ -5750,6 +5772,13 @@ class MainWindow(QMainWindow):
         # --- UI Setup ---
         self.setup_ui()
         self.setStyleSheet(DARK_THEME)
+
+        # Re-apply startup geometry AFTER content is set up, so the resize
+        # wins over Qt's layout-driven minimum-size expansion.
+        try:
+            self._apply_startup_geometry(QGuiApplication.primaryScreen(), center=True)
+        except Exception:
+            pass
         
         # Install event filter to track mouse move across application
         self.installEventFilter(self)
@@ -6937,10 +6966,8 @@ class MainWindow(QMainWindow):
             f"{extra}"
         )
 
-        try:
-            QMessageBox.warning(self, 'Web Files Root Unavailable', msg)
-        except Exception:
-            print(f"DEBUG: {msg}")
+        # Log silently — never block the UI with a modal pop-up on startup.
+        print(f"[web-mode] {msg}")
 
     def _resolve_video_play_target(self, path: str) -> str:
         """Return the string mpv should play for an episode/interstitial."""
@@ -7930,11 +7957,6 @@ class MainWindow(QMainWindow):
                 self.menu_bar_widget.setVisible(False)
             except Exception:
                 pass
-        try:
-            self.statusBar().setVisible(False)
-        except Exception:
-            pass
-
         self.failsafe_timer.start()
         try:
             self._fs_last_cursor_pos = QCursor.pos()
@@ -8047,7 +8069,6 @@ class MainWindow(QMainWindow):
             self.menuBar().setVisible(False)
             if hasattr(self, 'menu_bar_widget') and self.menu_bar_widget is not None:
                 self.menu_bar_widget.setVisible(True)
-            self.statusBar().setVisible(True)
             # Ensure controls remain visible after leaving fullscreen.
             self.show_controls()
 
@@ -8062,15 +8083,19 @@ class MainWindow(QMainWindow):
             self._hide_episode_overlay()
 
     def setup_ui(self):
-        # 1. Hide Standard Menu Bar
+        # 1. Hide Standard Menu Bar and Status Bar permanently
         self.menuBar().setVisible(False)
         self.menuBar().setNativeMenuBar(False)
+        self.statusBar().setVisible(False)
+        self.statusBar().setFixedHeight(0)
         
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
+        # Prevent the layout from auto-expanding the window to fit children.
+        main_layout.setSizeConstraint(QLayout.SetNoConstraint)
         
         # --- Custom Menu Bar ---
         self.menu_bar_widget = QWidget()
@@ -8112,7 +8137,7 @@ class MainWindow(QMainWindow):
         
         # Replace placeholder in PlayModeWidget layout
         # Finding the layout directly
-        video_area = self.play_mode_widget.layout.itemAt(1).widget()
+        video_area = self.play_mode_widget._h_layout.itemAt(1).widget()
         if video_area:
              # video_area has QVBoxLayout
              v_layout = video_area.layout()
@@ -8231,12 +8256,9 @@ class MainWindow(QMainWindow):
         self.btn_mode_edit.clicked.connect(lambda _=False: self.set_mode(1))
         self.btn_mode_bumps.clicked.connect(lambda _=False: self.set_mode(3))
         
-        # Ensure status label exists
+        # Sleep status label (not displayed in status bar — only btn_sleep_timer is used).
         if not hasattr(self, 'lbl_sleep_status'):
             self.lbl_sleep_status = QLabel("")
-            self.lbl_sleep_status.setStyleSheet("color: white; padding-right: 10px;")
-            # status bar might be hidden in full screen, but we add to layout if we want custom
-            self.statusBar().addPermanentWidget(self.lbl_sleep_status)
 
     def show_sleep_timer_dropdown(self, anchor_widget=None):
         # If called from clicked(bool), ignore the boolean argument.
@@ -8470,12 +8492,37 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        # If switching to Play mode (Index 2), refresh list
+        # If switching to Play mode (Index 2), refresh lists
         if index == 2:
+            self.play_mode_widget.refresh_playlists()
             self.play_mode_widget.refresh_episode_list()
             # If no playlist is loaded, ensure menu is open so user can pick one
             if not self.playlist_manager.current_playlist and not self.play_mode_widget.sidebar_visible:
                  self.play_mode_widget.toggle_sidebar()
+
+            # Force Qt to recompute the native video_container HWND geometry after
+            # the layout settles.  Without this, the native window may start at
+            # (0,0) of the top-level HWND on its first show and overlap the menu bar.
+            QTimer.singleShot(0, self._refresh_video_container_geometry)
+            QTimer.singleShot(50, self._refresh_video_container_geometry)
+
+    def _refresh_video_container_geometry(self):
+        """Force Qt to recalculate the native video_container HWND position.
+
+        On Windows, native child windows (WA_NativeWindow + WA_DontCreateNativeAncestors)
+        can start with stale (0,0) geometry before the first layout pass completes.
+        Toggling visibility or calling updateGeometry() nudges Qt into recomputing.
+        """
+        try:
+            vc = self.video_container
+            if vc is None or not vc.isVisible():
+                return
+            vc.updateGeometry()
+            # A hide/show cycle forces the platform window to re-sync its HWND rect.
+            vc.hide()
+            vc.show()
+        except Exception:
+            pass
 
     def _sync_playback_surface_visibility_for_mode(self):
         """Prevent mpv/bump widgets from overlaying non-player modes."""
@@ -9182,9 +9229,22 @@ class MainWindow(QMainWindow):
         show_name = ''
         if filename:
             show_name = os.path.splitext(os.path.basename(str(filename)))[0]
-        if not show_name:
-            show_name = 'Current Show'
-        dlg = PlayHistoryDialog(self.playlist_manager, show_name, self)
+
+        # Build list of (display_name, absolute_path) for all saved playlists.
+        playlist_files = []
+        try:
+            playlists_dir = self.playlist_manager.playlists_dir
+            for f in sorted(self.playlist_manager.list_saved_playlists() or [], key=natural_sort_key):
+                display = os.path.splitext(f)[0]
+                fpath = os.path.join(playlists_dir, f)
+                playlist_files.append((display, fpath))
+        except Exception:
+            pass
+
+        dlg = PlayHistoryDialog(
+            self.playlist_manager, show_name, self,
+            playlist_files=playlist_files,
+        )
         dlg.exec()
 
     def show_clear_viewing_history_dialog(self):

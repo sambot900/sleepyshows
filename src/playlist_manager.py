@@ -131,13 +131,13 @@ class PlaylistManager:
         self._exposure_scores_path = os.path.join(self.playlists_dir, 'exposure_scores.json')
         self._exposure_last_save_monotonic = 0.0
         self._exposure_dirty = False
+        self._persisted_episode_history_keys = []
         self._load_exposure_scores()
 
 
 
     def reset_playback_state(self):
         self.play_queue = []
-        self.episode_history = []
         self.playback_history = []
         self.playback_history_pos = -1
         self._forced_next_episode_index = None
@@ -146,6 +146,28 @@ class PlaylistManager:
         self._session_episode_plays = 0
         self._session_bump_plays = 0
         self._session_interstitial_plays = 0
+
+        # Restore episode history from persisted keys so recently-played
+        # episodes are still deprioritized across app restarts.
+        self.episode_history = []
+        self._restore_episode_history_from_keys()
+
+    def _restore_episode_history_from_keys(self):
+        """Populate episode_history from persisted normalized path keys.
+
+        Called after reset_playback_state when current_playlist is already set.
+        Resolves stored keys to current playlist indices.
+        """
+        keys = getattr(self, '_persisted_episode_history_keys', None)
+        if not keys or not self.current_playlist:
+            return
+        for k in keys:
+            try:
+                idx = self.index_for_episode_key(str(k))
+            except Exception:
+                idx = -1
+            if idx >= 0:
+                self.episode_history.append(idx)
 
     def set_sleep_timer_active_for_exposure(self, active: bool):
         """Update whether episode exposure deltas should diminish this session."""
@@ -214,6 +236,13 @@ class PlaylistManager:
                 if kk:
                     cleaned[kk] = vv
             self.episode_exposure_scores = cleaned
+
+        # Restore episode history (normalized path keys from prior sessions).
+        hist_keys = data.get('episode_history_keys', None)
+        if isinstance(hist_keys, list):
+            self._persisted_episode_history_keys = [str(k) for k in hist_keys if k]
+        else:
+            self._persisted_episode_history_keys = []
 
         ints = data.get('interstitials', None)
         if isinstance(ints, dict):
@@ -297,11 +326,26 @@ class PlaylistManager:
                 'outro': dict(getattr(self.bump_manager, 'outro_exposure_scores', {}) or {}),
             }
 
+        # Persist episode history as normalized path keys so it survives restarts.
+        history_keys = []
+        try:
+            for idx in list(self.episode_history or []):
+                try:
+                    p = self._episode_path_for_index(int(idx))
+                    k = self._norm_path_key(p)
+                    if k:
+                        history_keys.append(str(k))
+                except Exception:
+                    pass
+        except Exception:
+            history_keys = []
+
         payload = {
             'episodes': dict(self.episode_exposure_scores or {}),
             'play_counts': {str(k): int(v) for k, v in (self.episode_play_counts or {}).items()},
             'interstitials': dict(getattr(self, 'interstitial_exposure_scores', {}) or {}),
             'bump_components': dict(bump_state or {}),
+            'episode_history_keys': history_keys,
         }
 
         tmp = path + '.tmp'
@@ -1072,11 +1116,34 @@ class PlaylistManager:
 
         def _order_by_exposure(indices):
             # Shuffle-bag: every episode appears exactly once per cycle.
-            # Pure random ordering prevents extreme accumulated-score spreads
-            # from permanently gating certain episodes at the tail.
+            # Order by effective exposure score (lowest first) so least-seen
+            # episodes are prioritized.  Ties are broken randomly.
             items = list(indices or [])
-            random.shuffle(items)
-            return items
+            if not items:
+                return items
+
+            def _eff_score(idx):
+                try:
+                    p = self._episode_path_for_index(idx)
+                    key = self._norm_path_key(p)
+                    base = float(self.episode_exposure_scores.get(key, 0.0) or 0.0)
+                    offset = float(self._effective_episode_offset(p))
+                    return base + offset
+                except Exception:
+                    return 0.0
+
+            # Group by rounded score so near-identical scores are shuffled together.
+            buckets: dict[float, list[int]] = {}
+            for idx in items:
+                s = round(_eff_score(idx), 4)
+                buckets.setdefault(s, []).append(idx)
+
+            out: list[int] = []
+            for s in sorted(buckets.keys()):
+                b = buckets[s]
+                random.shuffle(b)
+                out.extend(b)
+            return out
 
         # Build a full cycle order (excluding the current episode from the upcoming queue).
         if self.shuffle_mode == 'season':
@@ -1113,7 +1180,7 @@ class PlaylistManager:
 
         # Push recently-played episodes away from the head of the new cycle
         # to avoid back-to-back repeats across cycle boundaries.
-        recent = set(self._recent_episode_indices(current_index=current_index, count=2))
+        recent = set(self._recent_episode_indices(current_index=current_index, count=8))
         if recent:
             head = [i for i in order if i not in recent]
             tail = [i for i in order if i in recent]

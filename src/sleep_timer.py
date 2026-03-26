@@ -170,8 +170,6 @@ class SleepTimerController(QObject):
         if hasattr(mw, 'lbl_sleep_status') and mw.lbl_sleep_status is not None:
             return
         mw.lbl_sleep_status = QLabel("")
-        mw.lbl_sleep_status.setStyleSheet("color: white; padding-right: 10px;")
-        mw.statusBar().addPermanentWidget(mw.lbl_sleep_status)
 
     def _sync_menu(self) -> None:
         try:
