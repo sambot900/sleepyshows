@@ -3442,11 +3442,12 @@ class AutoConfigWorker(QObject):
 class FlowLayout(QLayout):
     """A layout that arranges child widgets left-to-right, wrapping to the next row."""
 
-    def __init__(self, parent=None, hspacing=20, vspacing=20, max_per_row=0):
+    def __init__(self, parent=None, hspacing=20, vspacing=20, max_per_row=0, max_rows=0):
         super().__init__(parent)
         self._hspacing = hspacing
         self._vspacing = vspacing
         self._max_per_row = max_per_row  # 0 = unlimited
+        self._max_rows = max_rows        # 0 = unlimited
         self._items: list = []
         self._content_left_margin = 0
         self._forced_left_offset = None  # None = auto-center, int = fixed offset
@@ -3516,10 +3517,17 @@ class FlowLayout(QLayout):
         if current_row:
             rows.append(current_row)
 
-        # Second pass: lay out each row, centered horizontally.
+        # If max_rows is set, collect overflow items to hide.
+        visible_rows = rows
+        overflow_items = []
+        if self._max_rows > 0 and len(rows) > self._max_rows:
+            visible_rows = rows[:self._max_rows]
+            overflow_items = [item for row in rows[self._max_rows:] for item in row]
+
+        # Second pass: lay out each visible row, centered horizontally.
         y = effective.y()
         min_left_offset = 0
-        for row_idx, row in enumerate(rows):
+        for row_idx, row in enumerate(visible_rows):
             row_width = sum(it.sizeHint().width() for it in row) + self._hspacing * max(0, len(row) - 1)
             if self._forced_left_offset is not None:
                 left_offset = self._forced_left_offset
@@ -3534,19 +3542,29 @@ class FlowLayout(QLayout):
                 sz = item.sizeHint()
                 if not test_only:
                     item.setGeometry(QRect(QPoint(x, y), sz))
+                    w = item.widget()
+                    if w:
+                        w.setVisible(True)
                 x += sz.width() + self._hspacing
                 row_height = max(row_height, sz.height())
             y += row_height + self._vspacing
 
+        # Hide widgets that overflow beyond max_rows.
         if not test_only:
-            new_margin = min_left_offset if rows else 0
+            for item in overflow_items:
+                w = item.widget()
+                if w:
+                    w.setVisible(False)
+
+        if not test_only:
+            new_margin = min_left_offset if visible_rows else 0
             if new_margin != self._content_left_margin:
                 self._content_left_margin = new_margin
                 if self._on_layout_updated:
                     self._on_layout_updated()
 
         # Remove trailing vspacing.
-        if rows:
+        if visible_rows:
             y -= self._vspacing
 
         return y - rect.y() + m.bottom()
@@ -3723,7 +3741,7 @@ class WelcomeScreen(QWidget):
 
         self._recent_flow_widget = QWidget()
         self._recent_flow_widget.setStyleSheet("background: transparent;")
-        self._recent_flow = FlowLayout(self._recent_flow_widget, hspacing=16, vspacing=12, max_per_row=5)
+        self._recent_flow = FlowLayout(self._recent_flow_widget, hspacing=16, vspacing=12, max_per_row=5, max_rows=1)
         self._scroll_layout.addWidget(self._recent_flow_widget)
 
         # ── "Movies & Shows" section ────────────────────────────────────
@@ -4059,8 +4077,13 @@ class WelcomeScreen(QWidget):
             lbl.setContentsMargins(offset, 0, 0, 0)
         self._toolbar_layout.setContentsMargins(offset, 0, 0, 4)
         # Keep recently-played cards aligned with the same grid.
+        # Force an immediate re-layout — the recently-played flow sits above
+        # the catalog in the QVBoxLayout, so it has already finished its
+        # layout pass by the time the catalog computes the new offset.
         self._recent_flow._forced_left_offset = offset
-        self._recent_flow_widget.updateGeometry()
+        rect = self._recent_flow.geometry()
+        if not rect.isNull():
+            self._recent_flow.setGeometry(rect)
 
     def set_show_pending(self, show_name, pending):
         btn = self._show_btn_map.get(show_name)
