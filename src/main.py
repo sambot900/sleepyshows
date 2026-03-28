@@ -47,6 +47,30 @@ THEME_COLOR = "#0e1a77"
 # White strokes are intentionally transparent so the global background gradient shows through.
 WHITE_STROKE_ALPHA = 0
 
+# ── Show & Movie Catalog ────────────────────────────────────────────────
+# Central registry of every title that appears on the Welcome screen.
+# ``type`` is "show" or "movie"; ``shuffle_mode`` is stored in each playlist.
+SHOW_CATALOG = [
+    # Shows
+    {"name": "King of the Hill",   "icon": "koth-icon.png",       "type": "show", "shuffle_mode": "standard", "year": 1997},
+    {"name": "Aqua Teen Hunger Force", "icon": "athf-icon.png",   "type": "show", "shuffle_mode": "standard", "year": 2000},
+    {"name": "Bob's Burgers",      "icon": "bobs-icon.png",       "type": "show", "shuffle_mode": "standard", "year": 2011},
+    {"name": "Squidbillies",       "icon": "squid-icon.png",      "type": "show", "shuffle_mode": "standard", "year": 2005},
+    {"name": "12 oz. Mouse",       "icon": "12oz-icon.png",       "type": "show", "shuffle_mode": "standard", "year": 2005},
+    {"name": "Futurama",           "icon": "futurama-icon.png",   "type": "show", "shuffle_mode": "standard", "year": 1999},
+    {"name": "Mission Hill",       "icon": "missionhill-icon.png","type": "show", "shuffle_mode": "standard", "year": 1999},
+    {"name": "Over the Garden Wall","icon": "otgw-icon.png",      "type": "show", "shuffle_mode": "off",      "year": 2014},
+    {"name": "Sealab 2021",        "icon": "sealab-icon.png",     "type": "show", "shuffle_mode": "standard", "year": 2000},
+    {"name": "Severance",          "icon": "severance-icon.png",  "type": "show", "shuffle_mode": "off",      "year": 2022},
+    {"name": "Superjail!",         "icon": "superjail-icon.png",  "type": "show", "shuffle_mode": "standard", "year": 2007},
+    # Movies
+    {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
+    {"name": "Talladega Nights The Ballad Of Ricky Bobby (2006)", "icon": "talladega-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2006},
+    {"name": "Zootopia 2 (2025)", "icon": "zootopia-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2025},
+]
+
+_SHOW_CATALOG_NAMES = {entry["name"] for entry in SHOW_CATALOG}
+
 
 class _WinFullscreenKeyFilter(QAbstractNativeEventFilter):
     """Windows-only key hook to toggle fullscreen on F.
@@ -541,6 +565,51 @@ def _get_resume_state_path() -> str:
     except Exception:
         home = os.path.expanduser('~')
         return os.path.join(home, '.config', 'SleepyShows', 'resume_state.json')
+
+
+def _get_recently_played_path() -> str:
+    try:
+        return os.path.join(_get_user_config_dir(), 'recently_played.json')
+    except Exception:
+        home = os.path.expanduser('~')
+        return os.path.join(home, '.config', 'SleepyShows', 'recently_played.json')
+
+
+def _load_recently_played() -> list[str]:
+    """Return list of show names, most-recently-played first."""
+    try:
+        p = _get_recently_played_path()
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [str(n) for n in data if isinstance(n, str) and n.strip()]
+    except Exception:
+        pass
+    return []
+
+
+def _save_recently_played(names: list[str]):
+    """Persist the recently-played list (most-recent first, capped at 20)."""
+    try:
+        p = _get_recently_played_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, 'w', encoding='utf-8') as f:
+            json.dump(names[:20], f, indent=2)
+    except Exception:
+        pass
+
+
+def _record_show_played(show_name: str):
+    """Move *show_name* to the front of the recently-played list and persist."""
+    name = str(show_name or '').strip()
+    if not name:
+        return
+    recent = _load_recently_played()
+    # Remove duplicates of this name, then prepend.
+    recent = [n for n in recent if n != name]
+    recent.insert(0, name)
+    _save_recently_played(recent)
 
 
 def _append_startup_geometry_log(window: QMainWindow):
@@ -1873,6 +1942,73 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join('ATHF', 'Episodes'),
             os.path.join('ATHF'),
         ]),
+        ("12 oz. Mouse", [
+            os.path.join('Shows', '12 oz. Mouse', 'Episodes'),
+            os.path.join('Shows', '12 oz. Mouse'),
+            os.path.join('Shows', '12 oz Mouse', 'Episodes'),
+            os.path.join('Shows', '12 oz Mouse'),
+            os.path.join('12 oz. Mouse', 'Episodes'),
+            os.path.join('12 oz. Mouse'),
+            os.path.join('12 oz Mouse'),
+        ]),
+        ("Futurama", [
+            os.path.join('Shows', 'Futurama', 'Episodes'),
+            os.path.join('Shows', 'Futurama'),
+            os.path.join('Futurama', 'Episodes'),
+            os.path.join('Futurama'),
+        ]),
+        ("Mission Hill", [
+            os.path.join('Shows', 'Mission Hill', 'Episodes'),
+            os.path.join('Shows', 'Mission Hill'),
+            os.path.join('Mission Hill', 'Episodes'),
+            os.path.join('Mission Hill'),
+        ]),
+        ("Over the Garden Wall", [
+            os.path.join('Shows', 'Over the Garden Wall', 'Episodes'),
+            os.path.join('Shows', 'Over the Garden Wall'),
+            os.path.join('Over the Garden Wall', 'Episodes'),
+            os.path.join('Over the Garden Wall'),
+        ]),
+        ("Sealab 2021", [
+            os.path.join('Shows', 'Sealab 2021', 'Episodes'),
+            os.path.join('Shows', 'Sealab 2021'),
+            os.path.join('Sealab 2021', 'Episodes'),
+            os.path.join('Sealab 2021'),
+        ]),
+        ("Severance", [
+            os.path.join('Shows', 'Severance', 'Episodes'),
+            os.path.join('Shows', 'Severance'),
+            os.path.join('Severance', 'Episodes'),
+            os.path.join('Severance'),
+        ]),
+        ("Superjail!", [
+            os.path.join('Shows', 'Superjail!', 'Episodes'),
+            os.path.join('Shows', 'Superjail!'),
+            os.path.join('Shows', 'Superjail', 'Episodes'),
+            os.path.join('Shows', 'Superjail'),
+            os.path.join('Superjail!', 'Episodes'),
+            os.path.join('Superjail!'),
+            os.path.join('Superjail'),
+        ]),
+        # Movies
+        ("Birdman (2014)", [
+            os.path.join('Movies', 'Birdman (2014)'),
+            os.path.join('Movies', 'Birdman'),
+            os.path.join('Birdman (2014)'),
+            os.path.join('Birdman'),
+        ]),
+        ("Talladega Nights The Ballad Of Ricky Bobby (2006)", [
+            os.path.join('Movies', 'Talladega Nights The Ballad Of Ricky Bobby (2006)'),
+            os.path.join('Movies', 'Talladega Nights'),
+            os.path.join('Talladega Nights The Ballad Of Ricky Bobby (2006)'),
+            os.path.join('Talladega Nights'),
+        ]),
+        ("Zootopia 2 (2025)", [
+            os.path.join('Movies', 'Zootopia 2 (2025)'),
+            os.path.join('Movies', 'Zootopia 2'),
+            os.path.join('Zootopia 2 (2025)'),
+            os.path.join('Zootopia 2'),
+        ]),
     ]
 
     found = {}
@@ -2081,6 +2217,73 @@ def auto_detect_show_folders_web(mount_roots_override):
             os.path.join('Shows', 'ATHF'),
             os.path.join('ATHF', 'Episodes'),
             os.path.join('ATHF'),
+        ]),
+        ("12 oz. Mouse", [
+            os.path.join('Shows', '12 oz. Mouse', 'Episodes'),
+            os.path.join('Shows', '12 oz. Mouse'),
+            os.path.join('Shows', '12 oz Mouse', 'Episodes'),
+            os.path.join('Shows', '12 oz Mouse'),
+            os.path.join('12 oz. Mouse', 'Episodes'),
+            os.path.join('12 oz. Mouse'),
+            os.path.join('12 oz Mouse'),
+        ]),
+        ("Futurama", [
+            os.path.join('Shows', 'Futurama', 'Episodes'),
+            os.path.join('Shows', 'Futurama'),
+            os.path.join('Futurama', 'Episodes'),
+            os.path.join('Futurama'),
+        ]),
+        ("Mission Hill", [
+            os.path.join('Shows', 'Mission Hill', 'Episodes'),
+            os.path.join('Shows', 'Mission Hill'),
+            os.path.join('Mission Hill', 'Episodes'),
+            os.path.join('Mission Hill'),
+        ]),
+        ("Over the Garden Wall", [
+            os.path.join('Shows', 'Over the Garden Wall', 'Episodes'),
+            os.path.join('Shows', 'Over the Garden Wall'),
+            os.path.join('Over the Garden Wall', 'Episodes'),
+            os.path.join('Over the Garden Wall'),
+        ]),
+        ("Sealab 2021", [
+            os.path.join('Shows', 'Sealab 2021', 'Episodes'),
+            os.path.join('Shows', 'Sealab 2021'),
+            os.path.join('Sealab 2021', 'Episodes'),
+            os.path.join('Sealab 2021'),
+        ]),
+        ("Severance", [
+            os.path.join('Shows', 'Severance', 'Episodes'),
+            os.path.join('Shows', 'Severance'),
+            os.path.join('Severance', 'Episodes'),
+            os.path.join('Severance'),
+        ]),
+        ("Superjail!", [
+            os.path.join('Shows', 'Superjail!', 'Episodes'),
+            os.path.join('Shows', 'Superjail!'),
+            os.path.join('Shows', 'Superjail', 'Episodes'),
+            os.path.join('Shows', 'Superjail'),
+            os.path.join('Superjail!', 'Episodes'),
+            os.path.join('Superjail!'),
+            os.path.join('Superjail'),
+        ]),
+        # Movies
+        ("Birdman (2014)", [
+            os.path.join('Movies', 'Birdman (2014)'),
+            os.path.join('Movies', 'Birdman'),
+            os.path.join('Birdman (2014)'),
+            os.path.join('Birdman'),
+        ]),
+        ("Talladega Nights The Ballad Of Ricky Bobby (2006)", [
+            os.path.join('Movies', 'Talladega Nights The Ballad Of Ricky Bobby (2006)'),
+            os.path.join('Movies', 'Talladega Nights'),
+            os.path.join('Talladega Nights The Ballad Of Ricky Bobby (2006)'),
+            os.path.join('Talladega Nights'),
+        ]),
+        ("Zootopia 2 (2025)", [
+            os.path.join('Movies', 'Zootopia 2 (2025)'),
+            os.path.join('Movies', 'Zootopia 2'),
+            os.path.join('Zootopia 2 (2025)'),
+            os.path.join('Zootopia 2'),
         ]),
     ]
 
@@ -3171,34 +3374,16 @@ class AutoConfigWorker(QObject):
                 result['episodes'] = pm.episodes
 
             updated = False
-            if show_folders.get("Bob's Burgers"):
-                updated = _write_auto_playlist_json(
-                    "Bob's Burgers.json",
-                    show_folders["Bob's Burgers"],
-                    default_shuffle_mode='standard',
-                    prefer_existing_playlist_paths=bool(roots),
-                ) or updated
-            if show_folders.get("King of the Hill"):
-                updated = _write_auto_playlist_json(
-                    "King of the Hill.json",
-                    show_folders["King of the Hill"],
-                    default_shuffle_mode='standard',
-                    prefer_existing_playlist_paths=bool(roots),
-                ) or updated
-            if show_folders.get("Squidbillies"):
-                updated = _write_auto_playlist_json(
-                    "Squidbillies.json",
-                    show_folders["Squidbillies"],
-                    default_shuffle_mode='standard',
-                    prefer_existing_playlist_paths=bool(roots),
-                ) or updated
-            if show_folders.get("Aqua Teen Hunger Force"):
-                updated = _write_auto_playlist_json(
-                    "Aqua Teen Hunger Force.json",
-                    show_folders["Aqua Teen Hunger Force"],
-                    default_shuffle_mode='standard',
-                    prefer_existing_playlist_paths=bool(roots),
-                ) or updated
+            # Write / refresh playlist JSONs for every catalog entry found on disk.
+            for entry in SHOW_CATALOG:
+                folder = show_folders.get(entry["name"])
+                if folder:
+                    updated = _write_auto_playlist_json(
+                        f"{entry['name']}.json",
+                        folder,
+                        default_shuffle_mode=entry.get("shuffle_mode", "standard"),
+                        prefer_existing_playlist_paths=bool(roots),
+                    ) or updated
             result['playlists_updated'] = bool(updated)
         except Exception:
             # Best-effort only.
@@ -3207,6 +3392,120 @@ class AutoConfigWorker(QObject):
         self.finished.emit(result)
 
 # --- Custom Widgets ---
+
+
+class FlowLayout(QLayout):
+    """A layout that arranges child widgets left-to-right, wrapping to the next row."""
+
+    def __init__(self, parent=None, hspacing=20, vspacing=20, max_per_row=0):
+        super().__init__(parent)
+        self._hspacing = hspacing
+        self._vspacing = vspacing
+        self._max_per_row = max_per_row  # 0 = unlimited
+        self._items: list = []
+        self._content_left_margin = 0
+        self._forced_left_offset = None  # None = auto-center, int = fixed offset
+        self._on_layout_updated = None
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize(0, 0)
+        for item in self._items:
+            s = s.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return QSize(s.width() + m.left() + m.right(),
+                     s.height() + m.top() + m.bottom())
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        eff_width = effective.width()
+
+        # First pass: bucket items into rows so we can center each row.
+        rows: list[list] = []
+        current_row: list = []
+        row_w = 0
+        for item in self._items:
+            sz = item.sizeHint()
+            needed = sz.width() + (self._hspacing if current_row else 0)
+            fits_width = (row_w + needed <= eff_width + 1) or not current_row
+            fits_max = self._max_per_row <= 0 or len(current_row) < self._max_per_row
+            if fits_width and fits_max:
+                current_row.append(item)
+                row_w += needed
+            else:
+                rows.append(current_row)
+                current_row = [item]
+                row_w = sz.width()
+        if current_row:
+            rows.append(current_row)
+
+        # Second pass: lay out each row, centered horizontally.
+        y = effective.y()
+        min_left_offset = 0
+        for row_idx, row in enumerate(rows):
+            row_width = sum(it.sizeHint().width() for it in row) + self._hspacing * max(0, len(row) - 1)
+            if self._forced_left_offset is not None:
+                left_offset = self._forced_left_offset
+            else:
+                left_offset = max(0, (eff_width - row_width) // 2)
+            x_offset = effective.x() + left_offset
+            if row_idx == 0 or left_offset < min_left_offset:
+                min_left_offset = left_offset
+            row_height = 0
+            x = x_offset
+            for item in row:
+                sz = item.sizeHint()
+                if not test_only:
+                    item.setGeometry(QRect(QPoint(x, y), sz))
+                x += sz.width() + self._hspacing
+                row_height = max(row_height, sz.height())
+            y += row_height + self._vspacing
+
+        if not test_only:
+            new_margin = min_left_offset if rows else 0
+            if new_margin != self._content_left_margin:
+                self._content_left_margin = new_margin
+                if self._on_layout_updated:
+                    self._on_layout_updated()
+
+        # Remove trailing vspacing.
+        if rows:
+            y -= self._vspacing
+
+        return y - rect.y() + m.bottom()
+
 
 class ShowCardButton(QPushButton):
     """A show card that can scale its icon without forcing the window minimum size.
@@ -3231,7 +3530,7 @@ class ShowCardButton(QPushButton):
         return QSize(1, 1)
 
     def sizeHint(self):
-        return QSize(220, 320)
+        return QSize(170, 255)
 
     def resizeEvent(self, event):
         try:
@@ -3263,6 +3562,7 @@ class WelcomeScreen(QWidget):
         self.is_vibes_on = True
         self.is_sleep_on = True
         self.show_btns = [] # Track buttons for resizing
+        self._show_btn_map = {}  # show_name -> ShowCardButton
 
         # Footer scaling state (populated in setup_ui)
         self._footer_widget = None
@@ -3302,15 +3602,28 @@ class WelcomeScreen(QWidget):
         # Let's give ~160px top margin to the main layout's content
         main_layout.setContentsMargins(0, 160, 0, 0)
         
-        # 1. Main Area (Shows Icons)
-        main_layout.addStretch(1) 
-        
-        shows_layout = QHBoxLayout()
-        shows_layout.setSpacing(20) # "closer to each other" (was 50)
-        shows_layout.setAlignment(Qt.AlignCenter)
-        
+        # ── Scrollable show grid ────────────────────────────────────────
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(QFrame.NoFrame)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll_area.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            " QWidget#scrollContent { background: transparent; }"
+            " QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }"
+            " QScrollBar::handle:vertical { background: rgba(255,255,255,0.25); border-radius: 4px; min-height: 30px; }"
+            " QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            " QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }"
+        )
+
+        scroll_content = QWidget()
+        scroll_content.setObjectName("scrollContent")
+        self._scroll_layout = QVBoxLayout(scroll_content)
+        self._scroll_layout.setContentsMargins(40, 10, 40, 20)
+        self._scroll_layout.setSpacing(10)
+
         # Helper for Show Buttons
-        def create_show_btn(icon_name, callback):
+        def create_show_btn(icon_name, show_name):
             btn = ShowCardButton()
             
             # Store original pixmap for resizing later
@@ -3322,10 +3635,8 @@ class WelcomeScreen(QWidget):
             except Exception:
                 pass
             
-            # Keep a reasonable visible minimum, but don't lock the window width.
-            btn.setMinimumSize(160, 240)
-            # Do NOT expand to fill the row; that makes the hover background enormous.
-            btn.setMaximumSize(280, 420)
+            btn.setMinimumSize(130, 195)
+            btn.setMaximumSize(200, 300)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             btn.setFlat(True)
             
@@ -3349,31 +3660,106 @@ class WelcomeScreen(QWidget):
             btn._pending_overlay = overlay
             btn._pending_spinner = spinner
             btn._pending = False
-            btn.clicked.connect(callback)
+            # Capture show_name in a default argument to avoid late-binding.
+            btn.clicked.connect(lambda checked=False, sn=show_name: self.load_show_playlist(sn))
             return btn
-        
-        # King of the Hill
-        self.btn_koth = create_show_btn("koth-icon.png", lambda: self.load_show_playlist("King of the Hill"))
-        shows_layout.addWidget(self.btn_koth, 0, Qt.AlignCenter)
-        self.show_btns.append(self.btn_koth)
-        
-        # Aqua Teen Hunger Force
-        self.btn_athf = create_show_btn("athf-icon.png", lambda: self.load_show_playlist("Aqua Teen Hunger Force"))
-        shows_layout.addWidget(self.btn_athf, 0, Qt.AlignCenter)
-        self.show_btns.append(self.btn_athf)
 
-        # Bobs Burgers
-        self.btn_bobs = create_show_btn("bobs-icon.png", lambda: self.load_show_playlist("Bob's Burgers"))
-        shows_layout.addWidget(self.btn_bobs, 0, Qt.AlignCenter)
-        self.show_btns.append(self.btn_bobs)
+        def _make_section_label(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                "color: rgba(255,255,255,0.85); font-size: 18px; font-weight: bold;"
+                " padding: 4px 0; background: transparent;"
+            )
+            return lbl
 
-        # Squidbillies
-        self.btn_squid = create_show_btn("squid-icon.png", lambda: self.load_show_playlist("Squidbillies"))
-        shows_layout.addWidget(self.btn_squid, 0, Qt.AlignCenter)
-        self.show_btns.append(self.btn_squid)
-        
-        main_layout.addLayout(shows_layout)
-        main_layout.addStretch(1) # Balanced vertical centering
+        # ── "Recently Played" section ───────────────────────────────────
+        self._recent_label = _make_section_label("Recently Played")
+        self._scroll_layout.addWidget(self._recent_label)
+
+        self._recent_flow_widget = QWidget()
+        self._recent_flow_widget.setStyleSheet("background: transparent;")
+        self._recent_flow = FlowLayout(self._recent_flow_widget, hspacing=16, vspacing=12, max_per_row=5)
+        self._scroll_layout.addWidget(self._recent_flow_widget)
+
+        # ── "Movies & Shows" section ────────────────────────────────────
+        self._catalog_label = _make_section_label("Movies & Shows")
+        self._scroll_layout.addWidget(self._catalog_label)
+
+        # Sort / filter toolbar (below the heading)
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 4)
+
+        _pill_style = (
+            "QPushButton { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.7);"
+            " border: 1px solid rgba(255,255,255,0.15); border-radius: 12px;"
+            " padding: 4px 14px; font-size: 13px; }"
+            " QPushButton:hover { background: rgba(255,255,255,0.15); }"
+            " QPushButton:checked { background: rgba(255,255,255,0.22); color: #fff;"
+            " border-color: rgba(255,255,255,0.35); }"
+        )
+
+        # Sort buttons
+        sort_label = QLabel("Sort:")
+        sort_label.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 13px; background: transparent;")
+        toolbar.addWidget(sort_label)
+
+        self._sort_group = []
+        for sort_key, sort_text in [("az", "A\u2013Z"), ("za", "Z\u2013A"), ("year", "Release Date")]:
+            btn = QPushButton(sort_text)
+            btn.setCheckable(True)
+            btn.setStyleSheet(_pill_style)
+            btn.setFixedHeight(26)
+            btn.clicked.connect(lambda checked=False, sk=sort_key: self._set_catalog_sort(sk))
+            toolbar.addWidget(btn)
+            self._sort_group.append((sort_key, btn))
+        # Default sort: A-Z
+        self._catalog_sort = "az"
+        self._sort_group[0][1].setChecked(True)
+
+        toolbar.addSpacing(16)
+
+        # Filter buttons
+        filter_label = QLabel("Filter:")
+        filter_label.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 13px; background: transparent;")
+        toolbar.addWidget(filter_label)
+
+        self._filter_group = []
+        for fk, ft in [("all", "All"), ("show", "TV Shows"), ("movie", "Movies")]:
+            btn = QPushButton(ft)
+            btn.setCheckable(True)
+            btn.setStyleSheet(_pill_style)
+            btn.setFixedHeight(26)
+            btn.clicked.connect(lambda checked=False, fkey=fk: self._set_catalog_filter(fkey))
+            toolbar.addWidget(btn)
+            self._filter_group.append((fk, btn))
+        self._catalog_filter = "all"
+        self._filter_group[0][1].setChecked(True)
+
+        toolbar.addStretch(1)
+        self._toolbar_layout = toolbar
+        self._scroll_layout.addLayout(toolbar)
+
+        self._catalog_flow_widget = QWidget()
+        self._catalog_flow_widget.setStyleSheet("background: transparent;")
+        self._catalog_flow = FlowLayout(self._catalog_flow_widget, hspacing=16, vspacing=12, max_per_row=5)
+        self._catalog_flow._on_layout_updated = self._align_headers_to_grid
+        self._scroll_layout.addWidget(self._catalog_flow_widget)
+
+        self._scroll_layout.addStretch(1)
+
+        # Build all catalog buttons (not yet added to flow — _rebuild_catalog does that).
+        for entry in SHOW_CATALOG:
+            btn = create_show_btn(entry["icon"], entry["name"])
+            self._show_btn_map[entry["name"]] = btn
+            self.show_btns.append(btn)
+
+        self._rebuild_catalog()
+
+        # Populate recently-played row from persisted data.
+        self._rebuild_recently_played()
+
+        self._scroll_area.setWidget(scroll_content)
+        main_layout.addWidget(self._scroll_area, 1)
         
         # 3. Footer Bar
         footer_widget = QWidget()
@@ -3526,16 +3912,113 @@ class WelcomeScreen(QWidget):
         except Exception:
             pass
 
+    # ── Sort / Filter helpers ───────────────────────────────────────────
+    def _set_catalog_sort(self, sort_key):
+        self._catalog_sort = sort_key
+        for sk, btn in self._sort_group:
+            btn.setChecked(sk == sort_key)
+        self._rebuild_catalog()
+
+    def _set_catalog_filter(self, filter_key):
+        self._catalog_filter = filter_key
+        for fk, btn in self._filter_group:
+            btn.setChecked(fk == filter_key)
+        self._rebuild_catalog()
+
+    def _rebuild_catalog(self):
+        """Remove all widgets from the catalog flow, re-add them sorted/filtered."""
+        # Detach every button from the flow without destroying them.
+        while self._catalog_flow.count():
+            item = self._catalog_flow.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+
+        filt = getattr(self, '_catalog_filter', 'all')
+        entries = list(SHOW_CATALOG)
+        if filt == 'show':
+            entries = [e for e in entries if e["type"] == "show"]
+        elif filt == 'movie':
+            entries = [e for e in entries if e["type"] == "movie"]
+
+        sort_key = getattr(self, '_catalog_sort', 'az')
+        if sort_key == 'az':
+            entries.sort(key=lambda e: e["name"].lower())
+        elif sort_key == 'za':
+            entries.sort(key=lambda e: e["name"].lower(), reverse=True)
+        elif sort_key == 'year':
+            entries.sort(key=lambda e: (e.get("year", 9999), e["name"].lower()))
+
+        for entry in entries:
+            btn = self._show_btn_map.get(entry["name"])
+            if btn:
+                self._catalog_flow.addWidget(btn)
+                btn.setParent(self._catalog_flow_widget)
+                btn.show()
+
+        # Force the flow widget to recalculate its size.
+        self._catalog_flow_widget.updateGeometry()
+
+    def _rebuild_recently_played(self):
+        """Repopulate the 'Recently Played' flow from persisted data."""
+        # Clear current recently played items.
+        while self._recent_flow.count():
+            item = self._recent_flow.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+        recent_names = _load_recently_played()
+        # Only include names that exist in the catalog.
+        recent_names = [n for n in recent_names if n in _SHOW_CATALOG_NAMES]
+
+        if not recent_names:
+            self._recent_label.setVisible(False)
+            self._recent_flow_widget.setVisible(False)
+            return
+
+        self._recent_label.setVisible(True)
+        self._recent_flow_widget.setVisible(True)
+
+        for name in recent_names:
+            entry = next((e for e in SHOW_CATALOG if e["name"] == name), None)
+            if not entry:
+                continue
+            btn = ShowCardButton()
+            path = get_asset_path(entry["icon"])
+            pix = QPixmap(path)
+            btn.setProperty("original_pixmap", pix)
+            try:
+                btn.set_original_pixmap(pix)
+            except Exception:
+                pass
+            btn.setMinimumSize(130, 195)
+            btn.setMaximumSize(200, 300)
+            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            btn.setFlat(True)
+            btn.setStyleSheet(
+                "QPushButton { border: none; background: transparent; }"
+                " QPushButton:hover { background: rgba(255,255,255,0.1); border-radius: 20px; }"
+            )
+            btn.clicked.connect(lambda checked=False, sn=name: self.load_show_playlist(sn))
+            self._recent_flow.addWidget(btn)
+
+    def _align_headers_to_grid(self):
+        """Align section headers and toolbar with the catalog card grid's left edge."""
+        offset = self._catalog_flow._content_left_margin
+        if getattr(self, '_last_grid_offset', -1) == offset:
+            return
+        self._last_grid_offset = offset
+        for lbl in (self._recent_label, self._catalog_label):
+            lbl.setContentsMargins(offset, 0, 0, 0)
+        self._toolbar_layout.setContentsMargins(offset, 0, 0, 4)
+        # Keep recently-played cards aligned with the same grid.
+        self._recent_flow._forced_left_offset = offset
+        self._recent_flow_widget.updateGeometry()
+
     def set_show_pending(self, show_name, pending):
-        btn = None
-        if show_name == "King of the Hill":
-            btn = getattr(self, 'btn_koth', None)
-        elif show_name == "Aqua Teen Hunger Force":
-            btn = getattr(self, 'btn_athf', None)
-        elif show_name == "Bob's Burgers":
-            btn = getattr(self, 'btn_bobs', None)
-        elif show_name == "Squidbillies":
-            btn = getattr(self, 'btn_squid', None)
+        btn = self._show_btn_map.get(show_name)
 
         if btn is None:
             return
@@ -3710,6 +4193,11 @@ class WelcomeScreen(QWidget):
                 txt_btn.setFixedSize(w + pad, icon_h + pad)
 
     def load_show_playlist(self, show_name):
+        _record_show_played(show_name)
+        try:
+            self._rebuild_recently_played()
+        except Exception:
+            pass
         try:
             self.main_window.ensure_show_playlist_loaded(show_name, auto_play=True)
         except Exception:
@@ -7011,10 +7499,8 @@ class MainWindow(QMainWindow):
             # Show pending overlay on the show cards while we probe external storage.
             if hasattr(self, 'welcome_screen'):
                 try:
-                    self.welcome_screen.set_show_pending("King of the Hill", True)
-                    self.welcome_screen.set_show_pending("Aqua Teen Hunger Force", True)
-                    self.welcome_screen.set_show_pending("Bob's Burgers", True)
-                    self.welcome_screen.set_show_pending("Squidbillies", True)
+                    for entry in SHOW_CATALOG:
+                        self.welcome_screen.set_show_pending(entry["name"], True)
                 except Exception:
                     pass
 
@@ -7081,10 +7567,8 @@ class MainWindow(QMainWindow):
             # Remove pending overlays.
             if hasattr(self, 'welcome_screen'):
                 try:
-                    self.welcome_screen.set_show_pending("King of the Hill", False)
-                    self.welcome_screen.set_show_pending("Aqua Teen Hunger Force", False)
-                    self.welcome_screen.set_show_pending("Bob's Burgers", False)
-                    self.welcome_screen.set_show_pending("Squidbillies", False)
+                    for entry in SHOW_CATALOG:
+                        self.welcome_screen.set_show_pending(entry["name"], False)
                 except Exception:
                     pass
 

@@ -1,0 +1,90 @@
+{
+  "playlist": [
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E01 Good News About Hell.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E02 Half Loop.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E03 In Perpetuity.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E04 The You You Are.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E05 The Grim Barbarity of Optics and Design.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E06 Hide and Seek.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E07 Defiant Jazz.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E08 What's for Dinner.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S01E09 The We We Are.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E01 Hello, Ms. Cobel.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E02 Goodbye, Mrs. Selvig.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E03 Who Is Alive.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E04 Woe's Hollow.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E05 Trojan's Horse.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E06 Attila.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E07 Chikhai Bardo.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E08 Sweet Vitriol.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E09 The After Hours.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance/S02E10 Cold Harbor.mkv"
+    }
+  ],
+  "shuffle_default": false,
+  "shuffle_mode": "off",
+  "auto_generated": true,
+  "source_folder": "/media/tyler/T7/Sleepy Shows Data/Shows/Severance",
+  "frequency_settings": {
+    "episode_offsets": {},
+    "season_offsets": {},
+    "episode_factors": {},
+    "season_factors": {}
+  }
+}

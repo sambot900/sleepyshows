@@ -1,0 +1,66 @@
+{
+  "playlist": [
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E01 Pilot (or The Douchebag Aspect).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E02 Andy Joins the PTA (or Great Sexpectations).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E03 Kevin's Problem (or Porno for Pyro).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E04 Andy vs. The Real World (or The Big-Ass Viacom Lawsuit).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E05 Andy and Kevin Make a Friend (or One Bang for Two Brothers).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E06 Andy Gets A Promotion (or How to Get Ahead in Business Without Really Trying).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E07 Kevin vs. The SAT (or Nocturnal Admissions).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E08 Unemployment Part 1 (or Brother's Big Boner).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E09 Unemployment Part 2 (or Theory of the Leisurse Ass).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E10 Kevin Finds Love (or Hot for Weirdie).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E11 Stories of Hope and Forgiveness (or Day of the Jackass).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E12 Happy Birthday, Kevin (or Happy Birthday, Douchebag).mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill/S01E13 Planet 9 from Mission Hill (or I Married a Gay Man from Outer Space).mkv"
+    }
+  ],
+  "shuffle_default": true,
+  "shuffle_mode": "standard",
+  "auto_generated": true,
+  "source_folder": "/media/tyler/T7/Sleepy Shows Data/Shows/Mission Hill",
+  "frequency_settings": {
+    "episode_offsets": {},
+    "season_offsets": {},
+    "episode_factors": {},
+    "season_factors": {}
+  }
+}

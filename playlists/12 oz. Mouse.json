@@ -1,0 +1,138 @@
+{
+  "playlist": [
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S01E01 Hired.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S01E02 Signals.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S01E03 Rooster.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S01E04 Spider.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S01E05 Rememorized.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S01E06 Spharktasm.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S01E07 Adventure Mouse.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E01 Bowtime.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E02 Surgery Circus.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E03 Booger Haze.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E04 Star Wars VII.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E05 Enjoy the Arm.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E06 Auraphull.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E07 Meat Warrior.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E08 Meaty Dreamy.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E09 Corndog Chronicles.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E10 Eighteen.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E11 Pre-Reckoning.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E12 Farewell.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S02E13 Prolegomenon.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E01 Francis, Cheap & Out of Control.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E02 First 12.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E03 Awaken.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E04 Adrift.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E05 You Made This.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E06 Because They Could.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E07 Reveal.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E08 Prime Time Nursery Rhyme.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E09 Here We Come.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E10 Portal to the Doorway.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse/S03E11 Final Beginning.mkv"
+    }
+  ],
+  "shuffle_default": true,
+  "shuffle_mode": "standard",
+  "auto_generated": true,
+  "source_folder": "/media/tyler/T7/Sleepy Shows Data/Shows/12 oz. Mouse",
+  "frequency_settings": {
+    "episode_offsets": {},
+    "season_offsets": {},
+    "episode_factors": {},
+    "season_factors": {}
+  }
+}

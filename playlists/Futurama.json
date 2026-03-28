@@ -1,0 +1,614 @@
+{
+  "playlist": [
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E01 Space Pilot 3000.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E02 The Series Has Landed.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E03 I, Roommate.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E04 Love's Labors Lost in Space.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E05 Fear of a Bot Planet.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E06 A Fishful of Dollars.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E07 My Three Suns.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E08 A Big Piece of Garbage.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S01E09 Hell Is Other Robots.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E01 A Flight to Remember.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E02 Mars University.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E03 When Aliens Attack.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E04 Fry & the Slurm Factory.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E05 I Second That Emotion.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E06 Brannigan, Begin Again.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E07 A Head in the Polls.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E08 Xmas Story.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E09 Why Must I Be a Crustacean in Love.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E10 Put Your Head on My Shoulder.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E11 Lesser of Two Evils.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E12 Raging Bender.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E13 A Bicyclops Built for Two.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E14 How Hermes Requisitioned His Groove Back.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E15 A Clone of My Own.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E16 The Deep South.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E17 Bender Gets Made.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E18 The Problem with Popplers.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E19 Mother's Day.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S02E20 Anthology of Interest I.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E01 The Honking.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E02 War Is the H-Word.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E03 The Cryonic Woman.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E04 Parasites Lost.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E05 Amazon Women in the Mood.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E06 Bendless Love.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E07 The Day the Earth Stood Stupid.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E08 That's Lobstertainment!.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E09 The Birdbot of Ice-Catraz.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E10 Luck of the Fryrish.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E11 The Cyber House Rules.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E12 Insane in the Mainframe.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E13 Bendin' in the Wind.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E14 Time Keeps on Slipping.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S03E15 I Dated a Robot.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E01 Roswell That Ends Well.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E02 A Tale of Two Santas.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E03 Anthology of Interest II.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E04 Love and Rocket.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E05 Leela's Homeworld.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E06 Where the Buggalo Roam.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E07 A Pharaoh to Remember.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E08 Godfellas.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E09 Futurestock.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E10 A Leela of Her Own.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E11 The 30% Iron Chef.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S04E12 Where No Fan Has Gone Before.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E01 Crimes of the Hot.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E02 Jurassic Bark.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E03 The Route of All Evil.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E04 A Taste of Freedom.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E05 Kif Gets Knocked Up a Notch.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E06 Less Than Hero.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E07 Teenage Mutant Leela's Hurdles.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E08 The Why of Fry.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E09 The Sting.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E10 The Farnsworth Parabox.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E11 Three Hundred Big Boys.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E12 Spanish Fry.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E13 Bend Her.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E14 Obsoletely Fabulous.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E15 Bender Should Not Be Allowed on Television.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S05E16 The Devil's Hands Are Idle Playthings.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E01 Bender's Big Score Part 1.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E02 Bender's Big Score Part 2.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E03 Bender's Big Score Part 3.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E04 Bender's Big Score Part 4.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E05 The Beast with a Billion Backs Part 1.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E06 The Beast with a Billion Backs Part 2.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E07 The Beast with a Billion Backs Part 3.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E08 The Beast with a Billion Backs Part 4.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E09 Bender's Game Part 1.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E10 Bender's Game Part 2.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E11 Bender's Game Part 3.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E12 Bender's Game Part 4.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E13 Into the Wild Green Yonder Part 1.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E14 Into the Wild Green Yonder Part 2.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E15 Into the Wild Green Yonder Part 3.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S06E16 Into the Wild Green Yonder Part 4.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E01 Rebirth.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E02 In-A-Gadda-Da-Leela.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E03 Attack of the Killer App.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E04 Proposition Infinity.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E05 The Duh-Vinci Code.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E06 Lethal Inspection.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E07 The Late Philip J. Fry.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E08 That Darn Katz!.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E09 A Clockwork Origin.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E10 The Prisoner of Benda.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E11 Lrrreconcilable Ndndifferences.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E12 The Mutants Are Revolting.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S07E13 The Futurama Holiday Spectacular.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E01 Neutopia.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E02 Benderama.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E03 Ghost in the Machines.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E04 Law and Oracle.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E05 The Silence of the Clamps.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E06 Yo Leela Leela.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E07 All the Presidents' Heads.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E08 Mobius Dick.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E09 Fry Am the Egg Man.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E10 The Tip of the Zoidberg.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E11 Cold Warriors.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E12 Overclockwise.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S08E13 Reincarnation.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E01 The Bots and the Bees.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E02 A Farewell to Arms.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E03 Decision 3012.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E04 The Thief of Baghead.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E05 Zapp Dingbat.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E06 The Butterjunk Effect.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E07 The Six Million Dollar Mon.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E08 Fun on a Bun.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E09 Free Will Hunting.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E10 Near-Death Wish.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E11 Viva Mars Vegas.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E12 31st Century Fox.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S09E13 Naturama.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E01 2-D Blacktop.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E02 Fry and Leela's Big Fling.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E03 T. The Terrestrial.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E04 Forty Percent Leadbelly.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E05 The Inhuman Torch.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E06 Saturday Morning Fun Pit.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E07 Calculon 2.0.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E08 Assie Come Home.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E09 Leela and the Genestalk.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E10 Game of Tones.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E11 Murder on the Planet Express.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E12 Stench and Stenchibility.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S10E13 Meanwhile.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E01 The Impossible Stream.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E02 Children of a Lesser Bog.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E03 How the West Was 1010001.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E04 Parasites Regained.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E05 Related to Items You've Viewed.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E06 I Know What You Did Next Xmas.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E07 Rage Against the Vaccine.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E08 Zapp Gets Canceled.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E09 The Prince and the Product.mkv"
+    },
+    {
+      "type": "video",
+      "path": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama/S11E10 All the Way Down.mkv"
+    }
+  ],
+  "shuffle_default": true,
+  "shuffle_mode": "standard",
+  "auto_generated": true,
+  "source_folder": "/media/tyler/T7/Sleepy Shows Data/Shows/Futurama",
+  "frequency_settings": {
+    "episode_offsets": {},
+    "season_offsets": {},
+    "episode_factors": {},
+    "season_factors": {}
+  }
+}

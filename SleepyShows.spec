@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['src\\main.py'],
+    ['src/main.py'],
     pathex=[],
     binaries=[],
     datas=[('assets', 'assets')],
@@ -32,7 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\sleepy-ico.ico'],
+    icon=['assets/sleepy-ico.ico'],
 )
 coll = COLLECT(
     exe,
