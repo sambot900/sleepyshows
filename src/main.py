@@ -66,7 +66,7 @@ SHOW_CATALOG = [
     # Movies
     {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
     {"name": "Talladega Nights The Ballad Of Ricky Bobby (2006)", "icon": "talladega-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2006},
-    {"name": "Zootopia 2 (2025)", "icon": "zootopia-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2025},
+    {"name": "Zootopia 2 (2025)", "icon": "zootopia2-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2025},
 ]
 
 _SHOW_CATALOG_NAMES = {entry["name"] for entry in SHOW_CATALOG}
@@ -2039,6 +2039,14 @@ def auto_detect_show_folders(volume_label='T7'):
                     if os.path.isdir(norm) and _looks_like_show_folder(norm):
                         found[show_name] = norm
                         break
+                    # Fallback: check for a single video file (e.g. Movies/Title.mp4)
+                    for ext in VIDEO_EXTENSIONS:
+                        file_candidate = norm + ext
+                        if os.path.isfile(file_candidate):
+                            found[show_name] = file_candidate
+                            break
+                    if show_name in found:
+                        break
 
     for mount_root in _iter_mount_roots_for_label(volume_label) or []:
         probe_mount(mount_root)
@@ -2312,6 +2320,14 @@ def auto_detect_show_folders_web(mount_roots_override):
                     checked.add(norm)
                     if os.path.isdir(norm) and _looks_like_show_folder(norm):
                         found[show_name] = norm
+                        break
+                    # Fallback: check for a single video file (e.g. Movies/Title.mp4)
+                    for ext in VIDEO_EXTENSIONS:
+                        file_candidate = norm + ext
+                        if os.path.isfile(file_candidate):
+                            found[show_name] = file_candidate
+                            break
+                    if show_name in found:
                         break
 
     for mount_root in roots:
@@ -3232,6 +3248,35 @@ def _write_auto_playlist_json(
                 return False
         except Exception:
             pass
+
+        # Single-file shortcut: if episode_folder is a video file (not a directory),
+        # write a single-entry playlist directly (common for movies stored as bare files).
+        if os.path.isfile(episode_folder):
+            ext = os.path.splitext(episode_folder)[1].lower()
+            if ext in VIDEO_EXTENSIONS:
+                shuffle_mode = None
+                frequency_settings = None
+                try:
+                    if isinstance(existing, dict):
+                        shuffle_mode = existing.get('shuffle_mode', None)
+                        frequency_settings = existing.get('frequency_settings', None)
+                except Exception:
+                    pass
+                if shuffle_mode not in ('off', 'standard', 'season'):
+                    shuffle_mode = default_shuffle_mode
+                if not _has_any_frequency_settings(frequency_settings):
+                    frequency_settings = {'episode_offsets': {}, 'season_offsets': {}, 'episode_factors': {}, 'season_factors': {}}
+                data = {
+                    'playlist': [{'type': 'video', 'path': episode_folder}],
+                    'shuffle_default': (shuffle_mode != 'off'),
+                    'shuffle_mode': shuffle_mode,
+                    'auto_generated': True,
+                    'source_folder': episode_folder,
+                    'frequency_settings': frequency_settings,
+                }
+                with open(playlist_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
+                return True
 
         # Web mode optimization: avoid scanning network folders by reusing existing
         # playlist entries when available.
