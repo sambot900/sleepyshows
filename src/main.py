@@ -939,84 +939,6 @@ class BumpsModeWidget(QWidget):
             lambda checked: self.main_window.set_normalize_audio_enabled(checked),
         )
 
-        initial_web_mode = (
-            str(getattr(self.main_window, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web'
-        )
-
-        self.btn_web_mode, self.lbl_playback_mode = add_toggle_row(
-            "Playback mode: Web" if initial_web_mode else "Playback mode: Portable",
-            initial_web_mode,
-            lambda checked: (self.main_window.set_web_mode_enabled(checked), self.refresh_status()),
-        )
-
-        # Web mode configuration (filesystem-based via mounted share)
-
-        web_files_row = QHBoxLayout()
-        web_files_row.setContentsMargins(0, 0, 0, 0)
-        web_files_row.setSpacing(10)
-
-        web_files_lbl = QLabel("Web Files Root:")
-        web_files_lbl.setStyleSheet("font-size: 16px; color: white;")
-
-        self.input_web_files_root = QLineEdit()
-        self.input_web_files_root.setText(str(getattr(self.main_window, 'web_files_root', '') or ''))
-        self.input_web_files_root.setPlaceholderText("/mnt/shows  (or \\\\10.0.0.210\\shows on Windows)")
-        self.input_web_files_root.setStyleSheet(
-            "QLineEdit { background: #333; color: white; padding: 6px 10px; border: 1px solid #111; border-radius: 4px; }"
-            "QLineEdit:focus { border: 1px solid #0e1a77; }"
-        )
-
-        def _commit_web_files_root():
-            try:
-                self.main_window.set_web_files_root(self.input_web_files_root.text())
-            except Exception:
-                pass
-
-        self.input_web_files_root.editingFinished.connect(_commit_web_files_root)
-        web_files_row.addWidget(web_files_lbl)
-        web_files_row.addWidget(self.input_web_files_root, 1)
-        layout.addLayout(web_files_row)
-
-        # Global interludes/interstitials folder
-        inter_row = QHBoxLayout()
-        inter_row.setContentsMargins(0, 0, 0, 0)
-        inter_row.setSpacing(10)
-
-        inter_lbl = QLabel("Interludes Folder:")
-        inter_lbl.setStyleSheet("font-size: 16px; color: white;")
-
-        self.input_interludes_dir = QLineEdit()
-        self.input_interludes_dir.setText(str(getattr(self.main_window, '_interstitials_dir', '') or ''))
-        self.input_interludes_dir.setPlaceholderText("Auto-detected: Sleepy Shows Data/TV Vibe/interludes")
-        self.input_interludes_dir.setStyleSheet(
-            "QLineEdit { background: #333; color: white; padding: 6px 10px; border: 1px solid #111; border-radius: 4px; }"
-            "QLineEdit:focus { border: 1px solid #0e1a77; }"
-        )
-
-        def _commit_interludes_dir():
-            try:
-                self.main_window.set_interludes_folder(self.input_interludes_dir.text())
-            except Exception:
-                pass
-            try:
-                self.refresh_status()
-            except Exception:
-                pass
-
-        self.input_interludes_dir.editingFinished.connect(_commit_interludes_dir)
-
-        btn_browse_inter = QPushButton("Browse…")
-        btn_browse_inter.clicked.connect(lambda: self.main_window.choose_interstitial_folder())
-
-        inter_row.addWidget(inter_lbl)
-        inter_row.addWidget(self.input_interludes_dir, 1)
-        inter_row.addWidget(btn_browse_inter)
-        layout.addLayout(inter_row)
-
-        self.lbl_interludes = QLabel("Interludes: (not set)")
-        self.lbl_interludes.setStyleSheet("font-size: 14px; color: #e0e0e0;")
-        layout.addWidget(self.lbl_interludes)
-
         # Sleepy Shows Media Directory
         media_dir_row = QHBoxLayout()
         media_dir_row.setContentsMargins(0, 0, 0, 0)
@@ -1057,47 +979,28 @@ class BumpsModeWidget(QWidget):
         media_dir_hint.setStyleSheet("font-size: 13px; color: #999;")
         layout.addWidget(media_dir_hint)
 
-        info = QLabel("Global bumps play between episodes.")
-        info.setStyleSheet("font-size: 14px; color: #e0e0e0;")
-        layout.addWidget(info)
+        layout.addSpacing(10)
 
-        self.btn_scripts = QPushButton("Reload Local Bump Scripts")
-        self.btn_scripts.clicked.connect(self.main_window.choose_bump_scripts)
-        layout.addWidget(self.btn_scripts)
-
+        # Auto-detected content summary
         self.lbl_scripts = QLabel("Scripts: 0")
-        self.lbl_scripts.setStyleSheet("font-size: 16px; color: white;")
+        self.lbl_scripts.setStyleSheet("font-size: 14px; color: #e0e0e0;")
         layout.addWidget(self.lbl_scripts)
 
-        layout.addSpacing(10)
-
-        self.btn_music = QPushButton("Set Bump Music Folder")
-        self.btn_music.clicked.connect(self.main_window.choose_bump_music)
-        layout.addWidget(self.btn_music)
-
         self.lbl_music = QLabel("Music: 0")
-        self.lbl_music.setStyleSheet("font-size: 16px; color: white;")
+        self.lbl_music.setStyleSheet("font-size: 14px; color: #e0e0e0;")
         layout.addWidget(self.lbl_music)
 
-        layout.addSpacing(10)
-
-        self.btn_images = QPushButton("Set Bump Images Folder")
-        self.btn_images.clicked.connect(self.main_window.choose_bump_images)
-        layout.addWidget(self.btn_images)
-
-        self.lbl_images = QLabel("Images: (not set)")
+        self.lbl_images = QLabel("Images: 0")
         self.lbl_images.setStyleSheet("font-size: 14px; color: #e0e0e0;")
         layout.addWidget(self.lbl_images)
 
-        layout.addSpacing(10)
-
-        self.btn_audio_fx = QPushButton("Set Bump Audio FX Folder")
-        self.btn_audio_fx.clicked.connect(self.main_window.choose_bump_audio_fx)
-        layout.addWidget(self.btn_audio_fx)
-
-        self.lbl_audio_fx = QLabel("Audio FX: (not set)")
+        self.lbl_audio_fx = QLabel("Audio FX: 0")
         self.lbl_audio_fx.setStyleSheet("font-size: 14px; color: #e0e0e0;")
         layout.addWidget(self.lbl_audio_fx)
+
+        self.lbl_interludes = QLabel("Interludes: 0")
+        self.lbl_interludes.setStyleSheet("font-size: 14px; color: #e0e0e0;")
+        layout.addWidget(self.lbl_interludes)
 
         layout.addSpacing(20)
 
@@ -1198,17 +1101,6 @@ class BumpsModeWidget(QWidget):
                 self.btn_startup_crickets.setChecked(bool(getattr(self.main_window, 'startup_crickets_enabled', True)))
             if hasattr(self, 'btn_normalize_audio'):
                 self.btn_normalize_audio.setChecked(bool(getattr(self.main_window, 'normalize_audio_enabled', False)))
-            if hasattr(self, 'btn_web_mode'):
-                self.btn_web_mode.setChecked(
-                    (str(getattr(self.main_window, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web')
-                )
-            if hasattr(self, 'lbl_playback_mode'):
-                is_web = (
-                    str(getattr(self.main_window, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web'
-                )
-                self.lbl_playback_mode.setText("Playback mode: Web" if is_web else "Playback mode: Portable")
-            if hasattr(self, 'input_interludes_dir'):
-                self.input_interludes_dir.setText(str(getattr(self.main_window, '_interstitials_dir', '') or ''))
             if hasattr(self, 'input_media_dir'):
                 self.input_media_dir.setText(str(getattr(self.main_window, 'media_directory', '') or ''))
         except Exception:
