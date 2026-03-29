@@ -22,3 +22,7 @@ echo "Building executable..."
 pyinstaller --noconfirm --clean SleepyShows.spec
 
 echo "Build complete. Executable is in dist/SleepyShows/"
+
+# Install desktop entry and icon so SleepyShows appears in the application launcher.
+echo "Installing desktop entry and icon..."
+bash "$(dirname "$0")/scripts/install_linux_desktop_entry.sh"

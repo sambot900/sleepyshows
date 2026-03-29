@@ -2,9 +2,11 @@
 Type=Application
 Version=1.0
 Name=SleepyShows
-Comment=Video player with sleep timer
+GenericName=Video Player
+Comment=Video player with sleep timer and TV-style bumps
 Exec=SleepyShows
 Icon=sleepyshows
 Terminal=false
-Categories=AudioVideo;Video;
+Categories=AudioVideo;Video;Player;
 StartupWMClass=SleepyShows
+Keywords=video;player;sleep;timer;bumps;

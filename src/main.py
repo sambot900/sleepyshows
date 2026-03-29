@@ -1017,33 +1017,45 @@ class BumpsModeWidget(QWidget):
         self.lbl_interludes.setStyleSheet("font-size: 14px; color: #e0e0e0;")
         layout.addWidget(self.lbl_interludes)
 
-        # Auto-config external drive name
-        drive_row = QHBoxLayout()
-        drive_row.setContentsMargins(0, 0, 0, 0)
-        drive_row.setSpacing(10)
+        # Sleepy Shows Media Directory
+        media_dir_row = QHBoxLayout()
+        media_dir_row.setContentsMargins(0, 0, 0, 0)
+        media_dir_row.setSpacing(10)
 
-        drive_lbl = QLabel("Auto-Config External Drive Name:")
-        drive_lbl.setStyleSheet("font-size: 16px; color: white;")
+        media_dir_lbl = QLabel("Sleepy Shows Media Directory:")
+        media_dir_lbl.setStyleSheet("font-size: 16px; color: white;")
 
-        self.input_auto_drive = QLineEdit()
-        self.input_auto_drive.setText(str(getattr(self.main_window, 'auto_config_volume_label', 'T7') or 'T7'))
-        self.input_auto_drive.setPlaceholderText("T7")
-        self.input_auto_drive.setStyleSheet(
+        self.input_media_dir = QLineEdit()
+        self.input_media_dir.setText(str(getattr(self.main_window, 'media_directory', '') or ''))
+        self.input_media_dir.setPlaceholderText("/media/user/Drive/Sleepy Shows")
+        self.input_media_dir.setStyleSheet(
             "QLineEdit { background: #333; color: white; padding: 6px 10px; border: 1px solid #111; border-radius: 4px; }"
             "QLineEdit:focus { border: 1px solid #0e1a77; }"
         )
 
-        def _commit_drive_name():
+        def _commit_media_dir():
             try:
-                self.main_window.set_auto_config_volume_label(self.input_auto_drive.text())
+                self.main_window.set_media_directory(self.input_media_dir.text())
+            except Exception:
+                pass
+            try:
+                self.refresh_status()
             except Exception:
                 pass
 
-        self.input_auto_drive.editingFinished.connect(_commit_drive_name)
+        self.input_media_dir.editingFinished.connect(_commit_media_dir)
 
-        drive_row.addWidget(drive_lbl)
-        drive_row.addWidget(self.input_auto_drive, 1)
-        layout.addLayout(drive_row)
+        btn_browse_media = QPushButton("Browse…")
+        btn_browse_media.clicked.connect(lambda: self._browse_media_directory())
+
+        media_dir_row.addWidget(media_dir_lbl)
+        media_dir_row.addWidget(self.input_media_dir, 1)
+        media_dir_row.addWidget(btn_browse_media)
+        layout.addLayout(media_dir_row)
+
+        media_dir_hint = QLabel("Root folder containing Shows/, Movies/, and TV Vibe/.")
+        media_dir_hint.setStyleSheet("font-size: 13px; color: #999;")
+        layout.addWidget(media_dir_hint)
 
         info = QLabel("Global bumps play between episodes.")
         info.setStyleSheet("font-size: 14px; color: #e0e0e0;")
@@ -1103,6 +1115,20 @@ class BumpsModeWidget(QWidget):
         layout.addWidget(diag_info)
 
         layout.addStretch(1)
+
+    def _browse_media_directory(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Sleepy Shows Media Directory")
+        if not folder:
+            return
+        self.input_media_dir.setText(folder)
+        try:
+            self.main_window.set_media_directory(folder)
+        except Exception:
+            pass
+        try:
+            self.refresh_status()
+        except Exception:
+            pass
 
     def refresh_status(self):
         def _count_files(folder, exts):
@@ -1183,6 +1209,8 @@ class BumpsModeWidget(QWidget):
                 self.lbl_playback_mode.setText("Playback mode: Web" if is_web else "Playback mode: Portable")
             if hasattr(self, 'input_interludes_dir'):
                 self.input_interludes_dir.setText(str(getattr(self.main_window, '_interstitials_dir', '') or ''))
+            if hasattr(self, 'input_media_dir'):
+                self.input_media_dir.setText(str(getattr(self.main_window, 'media_directory', '') or ''))
         except Exception:
             pass
 
@@ -5799,6 +5827,9 @@ class MainWindow(QMainWindow):
             pass
         self.auto_config_volume_label = str(self._settings.get('auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
 
+        # Single media directory: if set, used as the root for all show/movie/TV Vibe detection.
+        self.media_directory = str(self._settings.get('media_directory', '') or '').strip()
+
         # Playback topology
         # - portable: play local files from the external drive (auto-detected by volume label)
         # - web: play from a network filesystem root (SMB/UNC mounted as a local folder)
@@ -5878,7 +5909,10 @@ class MainWindow(QMainWindow):
         if needs_autofix:
             detected = None
             try:
-                if self._is_web_mode():
+                media_dir = str(getattr(self, 'media_directory', '') or '').strip()
+                if media_dir and os.path.isdir(media_dir):
+                    detected = auto_detect_tv_vibe_videos_dir_web([media_dir])
+                elif self._is_web_mode():
                     wfr = str(getattr(self, 'web_files_root', '') or '').strip()
                     if wfr:
                         detected = auto_detect_tv_vibe_videos_dir_web([wfr])
@@ -5955,7 +5989,10 @@ class MainWindow(QMainWindow):
 
             detected_inter = None
             try:
-                if self._is_web_mode():
+                media_dir = str(getattr(self, 'media_directory', '') or '').strip()
+                if media_dir and os.path.isdir(media_dir):
+                    detected_inter = auto_detect_tv_vibe_interstitials_dir_web([media_dir])
+                elif self._is_web_mode():
                     wfr = str(getattr(self, 'web_files_root', '') or '').strip()
                     if wfr:
                         detected_inter = auto_detect_tv_vibe_interstitials_dir_web([wfr])
@@ -7538,11 +7575,16 @@ class MainWindow(QMainWindow):
             if getattr(self, '_auto_config_running', False):
                 return
 
-            # In Web mode we do NOT scan for removable drives. Instead, if the user
-            # configured a Web Files Root (mounted share / UNC path), probe that.
-            web_mount_roots = None
+            # Determine mount roots to probe:
+            # 1. media_directory (single user-configured path) takes priority
+            # 2. Web mode uses web_files_root
+            # 3. Portable mode falls back to volume label detection
+            mount_roots = None
             try:
-                if self._is_web_mode():
+                media_dir = str(getattr(self, 'media_directory', '') or '').strip()
+                if media_dir and os.path.isdir(media_dir):
+                    mount_roots = [media_dir]
+                elif self._is_web_mode():
                     try:
                         self._maybe_autofix_web_files_root()
                     except Exception:
@@ -7553,14 +7595,14 @@ class MainWindow(QMainWindow):
                             self._warn_web_files_root_unavailable_once(context='auto-config')
                             self._auto_config_running = False
                             return
-                        web_mount_roots = [wfr]
+                        mount_roots = [wfr]
                     else:
                         # Web mode requires a configured/mounted root.
                         self._warn_web_files_root_unavailable_once(context='auto-config (no Web Files Root set)')
                         self._auto_config_running = False
                         return
             except Exception:
-                web_mount_roots = None
+                mount_roots = None
 
             self._auto_config_running = True
 
@@ -7575,7 +7617,7 @@ class MainWindow(QMainWindow):
             self._auto_config_thread = QThread(self)
             self._auto_config_worker = AutoConfigWorker(
                 volume_label=getattr(self, 'auto_config_volume_label', 'T7'),
-                mount_roots_override=web_mount_roots,
+                mount_roots_override=mount_roots,
             )
             self._auto_config_worker.moveToThread(self._auto_config_thread)
 
@@ -7628,6 +7670,18 @@ class MainWindow(QMainWindow):
             self._save_user_settings()
         except Exception:
             pass
+
+    def set_media_directory(self, path: str):
+        value = str(path or '').strip()
+        self.media_directory = value
+        try:
+            self._settings['media_directory'] = value
+            self._save_user_settings()
+        except Exception:
+            pass
+        # Re-run auto-config to pick up shows/bumps from the new directory.
+        if value and os.path.isdir(value):
+            self._try_auto_populate_library()
 
     def _on_auto_config_finished(self, result):
         try:
@@ -10823,6 +10877,13 @@ class MainWindow(QMainWindow):
                 outro_dir = _find_child_dir_case_insensitive(tv_vibe_dir, 'outro sounds')
                 if outro_dir and os.path.isdir(outro_dir):
                     folders.append(outro_dir)
+
+        try:
+            media_dir = str(getattr(self, 'media_directory', '') or '').strip()
+            if media_dir and os.path.isdir(media_dir):
+                _probe_mount(media_dir)
+        except Exception:
+            pass
 
         try:
             label = str(getattr(self, 'auto_config_volume_label', '') or '').strip()
