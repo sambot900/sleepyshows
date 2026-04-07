@@ -5863,9 +5863,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # When media_directory is set, always re-derive interludes from it
+        # so the path stays in sync with the canonical media root.
         inter_needs_autofix = False
         try:
-            inter_needs_autofix = (not inter_dir) or (not os.path.isdir(str(inter_dir)))
+            media_dir_set = bool(str(getattr(self, 'media_directory', '') or '').strip())
+            inter_needs_autofix = (not inter_dir) or (not os.path.isdir(str(inter_dir))) or media_dir_set
         except Exception:
             inter_needs_autofix = True
 
@@ -7735,8 +7738,10 @@ class MainWindow(QMainWindow):
                 prev_inter_ok = False
 
             if tv_vibe_interstitials_dir and os.path.isdir(str(tv_vibe_interstitials_dir)):
-                # Only override if none set (or stale).
-                if not prev_inter_ok:
+                # Always update when media_directory is set (canonical source of truth);
+                # otherwise only override if none set (or stale).
+                media_dir_set = bool(str(getattr(self, 'media_directory', '') or '').strip())
+                if media_dir_set or not prev_inter_ok:
                     try:
                         self._set_interstitials_folder(str(tv_vibe_interstitials_dir), persist=True)
                     except Exception:
@@ -12610,10 +12615,35 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pos_at_end = False
 
+            # Optional debug hook for EOF/watchdog investigations. Set
+            # SLEEPY_SHOWS_EOF_DEBUG=1 in the environment to enable.
+            try:
+                if os.environ.get('SLEEPY_SHOWS_EOF_DEBUG'):
+                    try:
+                        print(
+                            f"DEBUG-WATCHDOG idx={idx} is_bump_video={is_bump_video} eof_reached={eof_reached} "
+                            f"pos={pos} dur={dur} pos_at_end={pos_at_end} core_idle={core_idle} paused={paused} "
+                            f"played_since_start={getattr(self, '_played_since_start', False)}"
+                        )
+                    except Exception:
+                        print("DEBUG-WATCHDOG (failed to stringify state)")
+            except Exception:
+                pass
+
             should_advance = False
             if eof_reached:
                 should_advance = True
             elif self._played_since_start and pos_at_end and (core_idle or paused):
+                should_advance = True
+            # Linux-specific conservative fallback: some mpv builds / window managers
+            # don't reliably set `core_idle` or `pause` on EOF. If the video position
+            # is at the end and we've been playing for a short time, force advance.
+            elif sys.platform.startswith('linux') and self._played_since_start and pos_at_end and (getattr(self, '_play_start_monotonic', None) is not None) and (time.monotonic() - self._play_start_monotonic) > 2.0:
+                try:
+                    if os.environ.get('SLEEPY_SHOWS_EOF_DEBUG'):
+                        print(f"DEBUG-WATCHDOG: linux fallback triggered idx={idx} pos={pos} dur={dur}")
+                except Exception:
+                    pass
                 should_advance = True
             # Bump-video load failure: mpv goes idle with no duration/position and
             # eof_reached stays None. Detect this so we don't get stuck forever.
