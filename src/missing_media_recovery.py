@@ -112,6 +112,14 @@ class MissingMediaRecovery(QObject):
         except Exception:
             pass
         try:
+            mw._pending_next_index = None
+        except Exception:
+            pass
+        try:
+            mw._pending_bump_item = None
+        except Exception:
+            pass
+        try:
             if hasattr(mw, 'player') and mw.player:
                 mw.player.stop()
         except Exception:

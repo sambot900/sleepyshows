@@ -1,8 +1,15 @@
 import sys
 import os
+import platform
+
+# On Linux/Wayland, mpv requires an X11 window handle for embedding (set via `wid`).
+# Force Qt to use XWayland so winId() returns a usable X11 WId.
+_system = platform.system().lower()
+if _system == 'linux':
+    os.environ['QT_QPA_PLATFORM'] = 'xcb'
+
 import json
 import time
-import platform
 import re
 import html
 import random
@@ -63,6 +70,8 @@ SHOW_CATALOG = [
     {"name": "Sealab 2021",        "icon": "sealab-icon.png",     "type": "show", "shuffle_mode": "standard", "year": 2000},
     {"name": "Severance",          "icon": "severance-icon.png",  "type": "show", "shuffle_mode": "off",      "year": 2022},
     {"name": "Superjail!",         "icon": "superjail-icon.png",  "type": "show", "shuffle_mode": "standard", "year": 2007},
+    {"name": "Supernatural",      "icon": "supernatural-icon.png", "type": "show", "shuffle_mode": "off",      "year": 2005},
+    {"name": "Dr. Stone",         "icon": "drstone-icon.png",      "type": "show", "shuffle_mode": "off",      "year": 2019},
     # Movies
     {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
     {"name": "Talladega Nights The Ballad Of Ricky Bobby (2006)", "icon": "talladega-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2006},
@@ -1020,7 +1029,8 @@ class BumpsModeWidget(QWidget):
         layout.addStretch(1)
 
     def _browse_media_directory(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Sleepy Shows Media Directory")
+        folder = QFileDialog.getExistingDirectory(self, "Select Sleepy Shows Media Directory",
+                                                  _file_dialog_start_dir(getattr(self.main_window, 'media_directory', '')))
         if not folder:
             return
         self.input_media_dir.setText(folder)
@@ -1910,6 +1920,18 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join('Superjail!'),
             os.path.join('Superjail'),
         ]),
+        ("Supernatural", [
+            os.path.join('Shows', 'Supernatural', 'Episodes'),
+            os.path.join('Shows', 'Supernatural'),
+            os.path.join('Supernatural', 'Episodes'),
+            os.path.join('Supernatural'),
+        ]),
+        ("Dr. Stone", [
+            os.path.join('Shows', 'Dr. Stone', 'Episodes'),
+            os.path.join('Shows', 'Dr. Stone'),
+            os.path.join('Dr. Stone', 'Episodes'),
+            os.path.join('Dr. Stone'),
+        ]),
         # Movies
         ("Birdman (2014)", [
             os.path.join('Movies', 'Birdman (2014)'),
@@ -2075,6 +2097,50 @@ def _normalize_mount_roots_override(mount_roots_override):
     return roots
 
 
+def _file_dialog_start_dir(existing_path: str = '') -> str:
+    """Return a sensible starting directory for QFileDialog on all platforms.
+
+    On Linux the native dialog often starts at the home folder and hides mounted
+    drives under /mnt or /run/media.  Starting from one of those locations means
+    the user sees their external drives immediately.
+
+    On macOS /Volumes is the natural mount point for removable media.
+    On Windows an empty string shows "This PC" which enumerates all drives.
+    """
+    system = platform.system().lower()
+
+    if system == 'windows':
+        return ''  # Shows "This PC" with all drives
+
+    if system == 'darwin':
+        vol = '/Volumes'
+        return vol if os.path.isdir(vol) else os.path.expanduser('~')
+
+    # Linux
+    if existing_path and os.path.isdir(existing_path):
+        return existing_path
+
+    user = os.environ.get('USER') or os.environ.get('LOGNAME') or ''
+    candidates = []
+    if os.path.isdir('/mnt'):
+        candidates.append('/mnt')
+    if user:
+        run_media = f'/run/media/{user}'
+        if os.path.isdir(run_media):
+            candidates.append(run_media)
+        media_user = f'/media/{user}'
+        if os.path.isdir(media_user):
+            candidates.append(media_user)
+    if os.path.isdir('/media'):
+        candidates.append('/media')
+    candidates.append('/')
+
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return os.path.expanduser('~')
+
+
 def auto_detect_default_show_sources_web(mount_roots_override):
     """Web-mode helper: detect show sources by probing only provided roots."""
     roots = _normalize_mount_roots_override(mount_roots_override)
@@ -2193,6 +2259,18 @@ def auto_detect_show_folders_web(mount_roots_override):
             os.path.join('Superjail!', 'Episodes'),
             os.path.join('Superjail!'),
             os.path.join('Superjail'),
+        ]),
+        ("Supernatural", [
+            os.path.join('Shows', 'Supernatural', 'Episodes'),
+            os.path.join('Shows', 'Supernatural'),
+            os.path.join('Supernatural', 'Episodes'),
+            os.path.join('Supernatural'),
+        ]),
+        ("Dr. Stone", [
+            os.path.join('Shows', 'Dr. Stone', 'Episodes'),
+            os.path.join('Shows', 'Dr. Stone'),
+            os.path.join('Dr. Stone', 'Episodes'),
+            os.path.join('Dr. Stone'),
         ]),
         # Movies
         ("Birdman (2014)", [
@@ -5076,6 +5154,22 @@ class PlayModeWidget(QWidget):
         self.btn_seek_fwd.clicked.connect(lambda: self.main_window.seek_relative(20))
         playback_layout.addWidget(self.btn_seek_fwd)
 
+        # Audio track language cycle button (hidden until multiple tracks are detected)
+        self.btn_audio_track = TriStrokeButton("EN")
+        self.btn_audio_track.setFixedSize(80, button_height)
+        self.btn_audio_track.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
+        self.btn_audio_track.clicked.connect(self.main_window.cycle_audio_track)
+        self.btn_audio_track.setVisible(False)
+        right_layout.addWidget(self.btn_audio_track)
+
+        # Subtitle / CC cycle button (hidden until subtitle tracks are detected)
+        self.btn_subtitle = TriStrokeButton("CC")
+        self.btn_subtitle.setFixedSize(80, button_height)
+        self.btn_subtitle.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
+        self.btn_subtitle.clicked.connect(self.main_window.cycle_subtitle_track)
+        self.btn_subtitle.setVisible(False)
+        right_layout.addWidget(self.btn_subtitle)
+
         # Sleep Timer Button (shows remaining minutes)
         self.btn_sleep_timer = TriStrokeButton("SLEEP\nOFF")
         self.btn_sleep_timer.setFixedSize(120, button_height)
@@ -5335,6 +5429,8 @@ class PlayModeWidget(QWidget):
                 'prevnext': 100,
                 'play': 140,
                 'sleep': 120,
+                'audio': 80,
+                'sub': 80,
                 'shuffle': 80,
                 'vol_label': 44,
                 'vol': 150,
@@ -5347,6 +5443,8 @@ class PlayModeWidget(QWidget):
                 'prevnext': 88,
                 'play': 128,
                 'sleep': 112,
+                'audio': 72,
+                'sub': 72,
                 'shuffle': 72,
                 'vol_label': 40,
                 'vol': 130,
@@ -5359,6 +5457,8 @@ class PlayModeWidget(QWidget):
                 'prevnext': 64,
                 'play': 96,
                 'sleep': 86,
+                'audio': 58,
+                'sub': 58,
                 'shuffle': 58,
                 'vol_label': 0,
                 'vol': 96,
@@ -5371,6 +5471,8 @@ class PlayModeWidget(QWidget):
             'prevnext': 54,
             'play': 70,
             'sleep': 66,
+            'audio': 48,
+            'sub': 48,
             'shuffle': 52,
             'vol_label': 30,
             'vol': 70,
@@ -5385,6 +5487,8 @@ class PlayModeWidget(QWidget):
         _set_w(self.btn_next, base['prevnext'], button_h)
         _set_w(self.btn_seek_fwd, base['seek'], button_h)
         _set_w(self.btn_sleep_timer, base['sleep'], button_h)
+        _set_w(self.btn_audio_track, base['audio'], button_h)
+        _set_w(self.btn_subtitle, base['sub'], button_h)
         _set_w(self.btn_shuffle, base['shuffle'], button_h)
         if show_vol_label:
             _set_w(self.lbl_volume, base['vol_label'], button_h)
@@ -5413,6 +5517,8 @@ class PlayModeWidget(QWidget):
             self.btn_seek_fwd,
         ])
         used_right = _group_used(getattr(self, '_controls_right_layout', None), [
+            self.btn_audio_track,
+            self.btn_subtitle,
             self.btn_sleep_timer,
             self.btn_shuffle,
             self.lbl_volume if show_vol_label else None,
@@ -5433,6 +5539,8 @@ class PlayModeWidget(QWidget):
             # Shrink lowest-priority / widest items first.
             shrink_order = [
                 (self.slider_vol, mins['vol']),
+                (self.btn_subtitle, mins['sub']),
+                (self.btn_audio_track, mins['audio']),
                 (self.btn_sleep_timer, mins['sleep']),
                 (self.btn_menu, mins['menu']),
                 (self.btn_shuffle, mins['shuffle']),
@@ -9104,7 +9212,8 @@ class MainWindow(QMainWindow):
     # --- Mode Logic ---
     
     def add_source_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Add Shows Directory")
+        folder = QFileDialog.getExistingDirectory(self, "Add Shows Directory",
+                                                  _file_dialog_start_dir(getattr(self, 'media_directory', '')))
         if folder:
             structure = self.playlist_manager.add_source(folder)
             self.populate_library_cumulative(structure)
@@ -9141,7 +9250,8 @@ class MainWindow(QMainWindow):
         self.edit_mode_widget.library_tree.clear()
 
     def choose_interstitial_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Interludes Directory")
+        folder = QFileDialog.getExistingDirectory(self, "Select Interludes Directory",
+                                                  _file_dialog_start_dir(getattr(self, 'media_directory', '')))
         if folder:
             self._set_interstitials_folder(folder, persist=True)
             QMessageBox.information(self, "Interludes", f"Found {len(self.playlist_manager.interstitials)} items.")
@@ -9245,7 +9355,8 @@ class MainWindow(QMainWindow):
             self.bumps_mode_widget.refresh_status()
             
     def choose_bump_music(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Bump Music Directory")
+        folder = QFileDialog.getExistingDirectory(self, "Select Bump Music Directory",
+                                                  _file_dialog_start_dir(getattr(self, 'media_directory', '')))
         if folder:
             self.playlist_manager.bump_manager.scan_music(folder)
             # Persist any one-time exposure seeds immediately.
@@ -9260,7 +9371,8 @@ class MainWindow(QMainWindow):
                 self.bumps_mode_widget.refresh_status()
 
     def choose_bump_images(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Bump Images Directory")
+        folder = QFileDialog.getExistingDirectory(self, "Select Bump Images Directory",
+                                                  _file_dialog_start_dir(getattr(self, 'media_directory', '')))
         if not folder:
             return
 
@@ -9289,7 +9401,8 @@ class MainWindow(QMainWindow):
                 pass
 
     def choose_bump_audio_fx(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Bump Audio FX Directory")
+        folder = QFileDialog.getExistingDirectory(self, "Select Bump Audio FX Directory",
+                                                  _file_dialog_start_dir(getattr(self, 'media_directory', '')))
         if not folder:
             return
 
@@ -9480,6 +9593,49 @@ class MainWindow(QMainWindow):
 
     def cycle_shuffle_mode(self):
         self.set_shuffle_mode(_next_shuffle_mode(self.playlist_manager.shuffle_mode))
+
+    def cycle_audio_track(self):
+        try:
+            if hasattr(self, 'player') and self.player:
+                self.player.cycle_audio_track()
+                self._update_track_button_labels()
+        except Exception:
+            pass
+
+    def cycle_subtitle_track(self):
+        try:
+            if hasattr(self, 'player') and self.player:
+                self.player.cycle_subtitle_track()
+                self._update_track_button_labels()
+        except Exception:
+            pass
+
+    def _update_track_button_labels(self):
+        try:
+            pw = getattr(self, 'play_mode_widget', None)
+            if pw is None:
+                return
+            base_style = "font-size: 14pt; font-weight: bold; background: transparent; border: none; "
+            if hasattr(pw, 'btn_audio_track') and self.player:
+                tracks = self.player.get_audio_tracks()
+                if len(tracks) > 1:
+                    lang = self.player.get_current_audio_lang()
+                    pw.btn_audio_track.setText(lang)
+                    pw.btn_audio_track.setVisible(True)
+                else:
+                    pw.btn_audio_track.setVisible(False)
+            if hasattr(pw, 'btn_subtitle') and self.player:
+                tracks = self.player.get_subtitle_tracks()
+                if tracks:
+                    label, visible = self.player.get_current_subtitle_info()
+                    pw.btn_subtitle.setText(label)
+                    color = "#0e1a77" if visible else "white"
+                    pw.btn_subtitle.setStyleSheet(base_style + f"color: {color};")
+                    pw.btn_subtitle.setVisible(True)
+                else:
+                    pw.btn_subtitle.setVisible(False)
+        except Exception:
+            pass
 
     def save_playlist(self):
         if not self.playlist_manager.current_playlist:
@@ -9986,6 +10142,7 @@ class MainWindow(QMainWindow):
                     # In web mode with manifest, we trust the file exists
                     self.player.play(target)
                     self._played_since_start = True
+                    QTimer.singleShot(200, self._update_track_button_labels)
                     prefix = "[IL]" if itype == 'interstitial' else ""
                     self.setWindowTitle(f"Sleepy Shows - {prefix} {os.path.basename(path)}")
                     try:
@@ -10335,11 +10492,7 @@ class MainWindow(QMainWindow):
         if not p:
             return False
 
-        # Ensure we're not in bump view.
-        try:
-            self.stop_bump_playback()
-        except Exception:
-            pass
+        # Ensure we're in the video view, not bump view.
         try:
             self.video_stack.setCurrentIndex(0)
         except Exception:
@@ -11534,6 +11687,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Clear pending bump/next-index so stale gate state doesn't survive
+        # a stop-and-resume cycle (e.g. media disconnect recovery).
+        try:
+            self._pending_bump_item = None
+            self._pending_next_index = None
+        except Exception:
+            pass
+
         self.current_bump_script = None
         try:
             if hasattr(self, 'lbl_bump_text'):
@@ -11806,6 +11967,7 @@ class MainWindow(QMainWindow):
                 bump_item = None
 
             if bump_item:
+                self.stop_bump_playback()
                 self._pending_next_index = int(next_idx)
                 self._pending_next_record_history = bool(record_history)
                 try:
@@ -11813,7 +11975,6 @@ class MainWindow(QMainWindow):
                                     has_preroll=not bool(getattr(self, '_skip_next_preroll_interstitial', False)))
                 except Exception:
                     pass
-                self.stop_bump_playback()
                 self._play_bump_with_optional_interstitial(bump_item)
                 return
 

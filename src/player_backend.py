@@ -157,6 +157,14 @@ class MpvPlayer(QWidget):
             self.mpv.panscan = 0.0
             self.mpv.video_unscaled = False
 
+            # On Linux, force X11 gpu-context so mpv embeds into the X11 window
+            # handle provided by Qt (which we force to xcb QPA in main.py).
+            if sys.platform.startswith('linux'):
+                try:
+                    self.mpv['gpu-context'] = 'x11'
+                except Exception:
+                    pass
+
             wid = int(self.winId())
             if wid:
                 self.mpv.wid = wid
@@ -246,6 +254,17 @@ class MpvPlayer(QWidget):
                     except Exception:
                         pass
 
+                    # Optional debug hook: set SLEEPY_SHOWS_EOF_DEBUG=1 to print raw end-file
+                    # diagnostics to stdout. Useful when diagnosing Linux EOF reliability.
+                    try:
+                        if os.environ.get('SLEEPY_SHOWS_EOF_DEBUG'):
+                            try:
+                                print(f"DEBUG: mpv end-file callback reason_str={repr(reason_str)} event_type={type(event)}")
+                            except Exception:
+                                print("DEBUG: mpv end-file callback (failed to stringify event)")
+                    except Exception:
+                        pass
+
                     if reason_str.lower() == 'eof':
                         try:
                             QMetaObject.invokeMethod(self, "_emit_finished", Qt.QueuedConnection)
@@ -327,6 +346,117 @@ class MpvPlayer(QWidget):
     def shutdown(self):
         if self.mpv:
             self.mpv.terminate()
+
+    # ---- Track / Subtitle API ------------------------------------------------
+
+    def _get_prop(self, prop, default=None):
+        try:
+            if self.mpv:
+                return getattr(self.mpv, prop, default)
+        except Exception:
+            pass
+        return default
+
+    def _set_prop(self, prop, value):
+        try:
+            if self.mpv:
+                setattr(self.mpv, prop, value)
+        except Exception:
+            pass
+
+    def get_track_list(self) -> list:
+        """Return a list of track dicts with keys: id, type, lang, title, selected."""
+        try:
+            if not self.mpv:
+                return []
+            return list(self.mpv.track_list or [])
+        except Exception:
+            try:
+                raw = self.mpv.command('track-list')
+                return list(raw or [])
+            except Exception:
+                return []
+
+    def get_audio_tracks(self) -> list:
+        """Return list of audio track dicts."""
+        return [t for t in self.get_track_list() if t.get('type') == 'audio']
+
+    def get_subtitle_tracks(self) -> list:
+        """Return list of subtitle track dicts."""
+        return [t for t in self.get_track_list() if t.get('type') == 'sub']
+
+    def cycle_audio_track(self):
+        """Switch to the next audio track; wraps around."""
+        tracks = self.get_audio_tracks()
+        if not tracks:
+            return
+        cur = self._get_prop('aid', 'auto')
+        ids = [t.get('id') for t in tracks]
+        try:
+            idx = ids.index(cur) if cur in ids else -1
+        except (ValueError, TypeError):
+            idx = -1
+        next_id = ids[(idx + 1) % len(ids)]
+        self._set_prop('aid', next_id)
+
+    def cycle_subtitle_track(self):
+        """Cycle through subtitle tracks: current → next → off → (wrap to first)."""
+        tracks = self.get_subtitle_tracks()
+        cur_sid = self._get_prop('sid', False)
+        sub_vis = self._get_prop('sub_visibility', False)
+
+        if not tracks:
+            if sub_vis:
+                self._set_prop('sub_visibility', False)
+            return
+
+        if cur_sid is False or cur_sid == 'no' or (not sub_vis and cur_sid not in [t.get('id') for t in tracks]):
+            # Subtitles off → enable first track.
+            first = tracks[0].get('id')
+            if first is not None:
+                self._set_prop('sid', first)
+                self._set_prop('sub_visibility', True)
+            return
+
+        ids = [t.get('id') for t in tracks]
+        try:
+            idx = ids.index(cur_sid) if cur_sid in ids else -1
+        except (ValueError, TypeError):
+            idx = -1
+
+        if idx >= 0 and idx + 1 < len(ids):
+            self._set_prop('sid', ids[idx + 1])
+            self._set_prop('sub_visibility', True)
+        else:
+            # Wrap: turn subtitles off.
+            self._set_prop('sub_visibility', False)
+
+    def get_current_audio_lang(self) -> str:
+        """Return a short language label for the active audio track, or '--'."""
+        tracks = self.get_audio_tracks()
+        cur = self._get_prop('aid', None)
+        for t in tracks:
+            if t.get('id') == cur or (t.get('selected') and cur is None):
+                lang = (t.get('lang') or '').strip()
+                if lang:
+                    return lang[:3].upper()
+                title = (t.get('title') or '').strip()
+                return title[:3].upper() if title else '--'
+        return '--'
+
+    def get_current_subtitle_info(self) -> tuple:
+        """Return (lang_label: str, is_visible: bool) for the active subtitle track."""
+        sub_vis = self._get_prop('sub_visibility', False)
+        if not sub_vis:
+            return ('CC', False)
+        tracks = self.get_subtitle_tracks()
+        cur = self._get_prop('sid', None)
+        for t in tracks:
+            if t.get('id') == cur or (t.get('selected') and cur is None):
+                lang = (t.get('lang') or '').strip()
+                label = lang[:3].upper() if lang else 'SUB'
+                return (label, True)
+        return ('CC', False)
 
 
 class MpvAudioPlayer:

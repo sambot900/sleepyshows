@@ -28,6 +28,7 @@ mkdir -p "$desktop_dir" "$bin_dir"
 # Create a launcher wrapper in ~/.local/bin (avoids space-in-path issues in .desktop Exec).
 cat > "$bin_dir/sleepyshows" <<LAUNCHER
 #!/usr/bin/env bash
+export QT_QPA_PLATFORM=xcb
 exec "$dist_exe" "\$@"
 LAUNCHER
 chmod +x "$bin_dir/sleepyshows"

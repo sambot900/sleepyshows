@@ -24,8 +24,8 @@ A robust video player with sleep timer functionality, episode browser, and playl
 ## Portable vs Web Mode
 
 The Settings page has a toggle:
-- **Portable mode** (default): plays local media files from your computer (current behavior).
-- **Web mode**: plays media from a network filesystem root (SMB/UNC mounted as a local folder).
+- **Portable mode**: plays local media files from your computer. **Not currently functional.**
+- **Web mode** (default): plays media from a network filesystem root (SMB/UNC mounted as a local folder).
 
 Startup behavior:
 - If the configured external drive label (default: `T7`) is mounted, the app starts in **Portable** mode and runs auto-config.
