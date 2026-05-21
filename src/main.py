@@ -3624,6 +3624,7 @@ class WelcomeScreen(QWidget):
         self.is_sleep_on = True
         self.show_btns = [] # Track buttons for resizing
         self._show_btn_map = {}  # show_name -> ShowCardButton
+        self._available_shows: set = set()  # populated by MainWindow after auto-config
 
         # Footer scaling state (populated in setup_ui)
         self._footer_widget = None
@@ -4002,6 +4003,12 @@ class WelcomeScreen(QWidget):
         elif filt == 'movie':
             entries = [e for e in entries if e["type"] == "movie"]
 
+        # If the inventory has been populated, only show cards for shows
+        # with actual media content on connected drives.
+        available = getattr(self, '_available_shows', None)
+        if available:
+            entries = [e for e in entries if e["name"] in available]
+
         sort_key = getattr(self, '_catalog_sort', 'az')
         if sort_key == 'az':
             entries.sort(key=lambda e: e["name"].lower())
@@ -4016,6 +4023,14 @@ class WelcomeScreen(QWidget):
                 self._catalog_flow.addWidget(btn)
                 btn.setParent(self._catalog_flow_widget)
                 btn.show()
+
+        # Show a helpful message when the catalog is empty after filtering.
+        if not entries and available:
+            self._catalog_label.setText(
+                "Movies & Shows — connect a drive with media to get started"
+            )
+        else:
+            self._catalog_label.setText("Movies & Shows")
 
         # Force the flow widget to recalculate its size.
         self._catalog_flow_widget.updateGeometry()
@@ -4033,6 +4048,11 @@ class WelcomeScreen(QWidget):
         recent_names = _load_recently_played()
         # Only include names that exist in the catalog.
         recent_names = [n for n in recent_names if n in _SHOW_CATALOG_NAMES]
+
+        # Only show recently-played cards for shows that have accessible media.
+        available = getattr(self, '_available_shows', None)
+        if available:
+            recent_names = [n for n in recent_names if n in available]
 
         if not recent_names:
             self._recent_label.setVisible(False)
@@ -4103,6 +4123,12 @@ class WelcomeScreen(QWidget):
         else:
             spinner.stop()
             overlay.setVisible(False)
+
+    def set_available_shows(self, available: set):
+        """Update which shows are available and rebuild the catalog + recently-played rows."""
+        self._available_shows = set(available or set())
+        self._rebuild_catalog()
+        self._rebuild_recently_played()
 
     def resizeEvent(self, event):
         w = event.size().width()
@@ -5698,6 +5724,11 @@ class MainWindow(QMainWindow):
                 self.resize(1200, 800)
             except Exception:
                 pass
+
+        # Set of show names from SHOW_CATALOG that have actual media content
+        # available on connected drives. Populated by auto-config; empty until
+        # first scan completes. WelcomeScreen uses this to decide which cards to show.
+        self._available_shows: set = set()
 
         # Full data + widget initialisation (runs exactly once).
         self._init_data_and_ui()
@@ -7573,6 +7604,55 @@ class MainWindow(QMainWindow):
             str(getattr(self, 'web_files_root', '') or ''),
         )
 
+    def _inventory_available_shows(self, result):
+        """Determine which shows in SHOW_CATALOG have accessible media content.
+
+        A show is considered available if:
+        1. Its media folder was found by auto-detect (appears in show_folders), OR
+        2. A playlist JSON exists on disk and its source_folder path is still valid.
+
+        Updates self._available_shows and pushes the set to the WelcomeScreen
+        so the catalog reflects only playable content.
+        """
+        available: set = set()
+        show_folders = (result or {}).get('show_folders', {}) or {}
+
+        for entry in SHOW_CATALOG:
+            name = entry["name"]
+
+            # Path found by auto-detect on a connected drive.
+            if name in show_folders:
+                folder = show_folders[name]
+                if folder and (os.path.isdir(folder) or os.path.isfile(folder)):
+                    available.add(name)
+                    continue
+
+            # Fallback: playlist JSON exists and its source_folder is accessible.
+            try:
+                playlist_path = resolve_playlist_path(
+                    os.path.join("playlists", f"{name}.json")
+                )
+            except Exception:
+                playlist_path = None
+            if playlist_path and os.path.exists(playlist_path):
+                try:
+                    with open(playlist_path, 'r', encoding='utf-8') as f:
+                        pl_data = json.load(f)
+                    src = str((pl_data or {}).get('source_folder', '') or '').strip()
+                except Exception:
+                    src = ''
+                if src and os.path.isdir(src):
+                    available.add(name)
+                    continue
+
+        self._available_shows = available
+
+        if hasattr(self, 'welcome_screen') and self.welcome_screen is not None:
+            try:
+                self.welcome_screen.set_available_shows(available)
+            except Exception:
+                pass
+
     def _try_auto_populate_library(self):
         try:
             if getattr(self, '_auto_config_running', False):
@@ -7696,6 +7776,9 @@ class MainWindow(QMainWindow):
                         self.welcome_screen.set_show_pending(entry["name"], False)
                 except Exception:
                     pass
+
+            # ── Inventory: determine which shows have accessible media ────
+            self._inventory_available_shows(result)
 
             # If user already added sources while we were scanning, don't override their
             # library state, but still apply other auto-config outputs (playlist refresh,
