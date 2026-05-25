@@ -3619,9 +3619,13 @@ class WelcomeScreen(QWidget):
         self.btn_vibes_check = None
         self.btn_sleep_label = None
         self.btn_sleep_check = None
-        # Defaults: TV Vibes ON and Sleepy Time ON (3 hours).
-        self.is_vibes_on = True
-        self.is_sleep_on = True
+        # Read persisted defaults from settings (fall back to ON).
+        try:
+            self.is_vibes_on = bool(getattr(self.main_window, '_tv_vibes_enabled_setting', True))
+            self.is_sleep_on = bool(getattr(self.main_window, '_sleep_timer_enabled_setting', True))
+        except Exception:
+            self.is_vibes_on = True
+            self.is_sleep_on = True
         self.show_btns = [] # Track buttons for resizing
         self._show_btn_map = {}  # show_name -> ShowCardButton
         self._available_shows: set = set()  # populated by MainWindow after auto-config
@@ -4311,6 +4315,11 @@ class WelcomeScreen(QWidget):
         self.is_vibes_on = not self.is_vibes_on
         self.update_checkbox(self.btn_vibes_check, self.is_vibes_on, target_size=self._footer_checkbox_target_size)
         self.main_window.set_bumps_enabled(self.is_vibes_on)
+        try:
+            self.main_window._settings['tv_vibes_enabled'] = bool(self.is_vibes_on)
+            self.main_window._save_user_settings()
+        except Exception:
+            pass
 
     def toggle_sleep(self):
         self.is_sleep_on = not self.is_sleep_on
@@ -4320,6 +4329,11 @@ class WelcomeScreen(QWidget):
             self.main_window.start_sleep_timer(180) 
         else:
             self.main_window.cancel_sleep_timer()
+        try:
+            self.main_window._settings['sleep_timer_enabled'] = bool(self.is_sleep_on)
+            self.main_window._save_user_settings()
+        except Exception:
+            pass
 
 class DropListWidget(QListWidget):
     """A list widget that accepts drag-and-drop from the library tree."""
@@ -5698,6 +5712,10 @@ class PlayModeWidget(QWidget):
 
     def play_episode_from_list(self, item):
         idx = self.episode_list_widget.row(item)
+        try:
+            self.main_window.playlist_manager.rebuild_queue(current_index=idx)
+        except Exception:
+            pass
         self.main_window.play_index(idx)
 
 
@@ -5837,6 +5855,8 @@ class MainWindow(QMainWindow):
         self.bump_images_dir = self._settings.get('bump_images_dir', None)
         self.bump_audio_fx_dir = self._settings.get('bump_audio_fx_dir', None)
         self.bump_videos_dir = self._settings.get('bump_videos_dir', None)
+        self._tv_vibes_enabled_setting = bool(self._settings.get('tv_vibes_enabled', True))
+        self._sleep_timer_enabled_setting = bool(self._settings.get('sleep_timer_enabled', True))
         # Prefer the new key name, but keep backward compatibility.
         self._interstitials_dir = str(self._settings.get('interlude_folder', self._settings.get('interstitial_folder', '')) or '').strip()
         # One-time migration: if the legacy key exists, copy it to the new key.
@@ -6052,7 +6072,7 @@ class MainWindow(QMainWindow):
         self._startup_ambient_path = get_asset_path("crickets.mp3")
 
         # Global bumps toggle (controlled from Welcome)
-        self.bumps_enabled = False
+        self.bumps_enabled = self._tv_vibes_enabled_setting
 
         # Pending bump used for interstitial-before-bump preroll.
         self._pending_bump_item = None
@@ -6680,7 +6700,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            self.player.play(self._startup_ambient_path)
+            self.fx_player.play(self._startup_ambient_path)
             self._startup_ambient_playing = True
         except Exception:
             return
@@ -6859,6 +6879,29 @@ class MainWindow(QMainWindow):
             'last_play_source_path': source_path,
             'last_stop_reason': getattr(self, '_last_stop_reason', None),
         }
+
+        # Carry position data from the previously-saved payload when the
+        # current capture has none (e.g. after playlist regeneration resets
+        # current_index to -1).  This prevents toggling TV Vibes or
+        # re-generating a playlist from losing the user's position.
+        try:
+            prev = getattr(self, '_resume_last_payload', None)
+            if isinstance(prev, dict) and prev:
+                need_pos = (
+                    payload.get('current_index', -1) < 0
+                    and not payload.get('current_episode_key')
+                    and not payload.get('last_play_target')
+                    and payload.get('playlist_filename')
+                )
+                if need_pos and prev.get('playlist_filename') == payload.get('playlist_filename'):
+                    for k in ('current_index', 'current_episode_key', 'current_episode_path',
+                              'time_pos_s', 'duration_s', 'last_play_target', 'last_play_source_path',
+                              'queue_episode_keys'):
+                        if payload.get(k) in (None, -1, '') and prev.get(k) not in (None, -1, ''):
+                            payload[k] = prev[k]
+        except Exception:
+            pass
+
         return payload
 
     def _persist_resume_state(self, *, force: bool = False, reason: str = '') -> None:
@@ -7972,7 +8015,7 @@ class MainWindow(QMainWindow):
         if not getattr(self, '_startup_ambient_playing', False):
             return
         try:
-            self.player.stop()
+            self.fx_player.stop()
         except Exception:
             pass
         self._startup_ambient_playing = False
@@ -9171,9 +9214,21 @@ class MainWindow(QMainWindow):
 
     def start_sleep_timer(self, minutes):
         self.sleep_timer.start(minutes)
+        try:
+            if not self._settings.get('sleep_timer_enabled', False):
+                self._settings['sleep_timer_enabled'] = True
+                self._save_user_settings()
+        except Exception:
+            pass
 
     def cancel_sleep_timer(self):
         self.sleep_timer.cancel()
+        try:
+            if self._settings.get('sleep_timer_enabled', True):
+                self._settings['sleep_timer_enabled'] = False
+                self._save_user_settings()
+        except Exception:
+            pass
 
     def set_mode(self, index):
         self.mode_stack.setCurrentIndex(index)
@@ -9515,6 +9570,12 @@ class MainWindow(QMainWindow):
 
     def set_bumps_enabled(self, enabled):
         self.bumps_enabled = bool(enabled)
+        try:
+            if self._settings.get('tv_vibes_enabled') != bool(enabled):
+                self._settings['tv_vibes_enabled'] = bool(enabled)
+                self._save_user_settings()
+        except Exception:
+            pass
 
         # Interludes are only meaningful when TV Vibes is on.
         try:
@@ -9869,7 +9930,7 @@ class MainWindow(QMainWindow):
                         start_idx = self.playlist_manager.get_next_index()
                         if start_idx == -1:
                             start_idx = 0
-                    self.play_index(start_idx)
+                    QTimer.singleShot(0, lambda idx=start_idx: self.play_index(idx))
 
                     if self.play_mode_widget.sidebar_visible:
                         self.play_mode_widget.toggle_sidebar()
@@ -10223,6 +10284,16 @@ class MainWindow(QMainWindow):
                         self._last_play_source_path = None
                     # Skip slow network file existence check - let mpv handle missing files
                     # In web mode with manifest, we trust the file exists
+                    # Force the entire widget hierarchy to be fully realized
+                    # before mpv acquires the native X11 window handle.
+                    # Without this the very first mode switch renders into a
+                    # 0×0 surface — permanent black screen.
+                    try:
+                        self.player.window().updateGeometry()
+                        self.video_container.repaint()
+                        _ = int(self.player.winId())
+                    except Exception:
+                        pass
                     self.player.play(target)
                     self._played_since_start = True
                     QTimer.singleShot(200, self._update_track_button_labels)
@@ -10270,6 +10341,12 @@ class MainWindow(QMainWindow):
                  # IMPORTANT: Avoid synchronous filesystem existence checks here.
                  # On network mounts these can block UI for many seconds.
                  # Let mpv attempt the open and report errors via errorOccurred.
+                 try:
+                     self.player.window().updateGeometry()
+                     self.video_container.repaint()
+                     _ = int(self.player.winId())
+                 except Exception:
+                     pass
                  self.player.play(target)
                  self._played_since_start = True
                  self.setWindowTitle(f"Sleepy Shows - {os.path.basename(item)}")

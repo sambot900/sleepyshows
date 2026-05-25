@@ -17,7 +17,6 @@ class MpvPlayer(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_DontCreateNativeAncestors)
         self.setAttribute(Qt.WA_NativeWindow, True)
         self._init_error = None
         self._dll_dir_handles = []
