@@ -6153,6 +6153,14 @@ class MainWindow(QMainWindow):
         # We intentionally do NOT prompt at startup; instead, we auto-resume
         # only when the user starts the same show/playlist again.
         self._resume_loaded_state = self._load_resume_state()
+        # Seed _resume_last_payload so the position-merge in
+        # _capture_resume_state() can preserve the previous session's
+        # position across the first playlist reload of a new session.
+        try:
+            if self._resume_loaded_state:
+                self._resume_last_payload = dict(self._resume_loaded_state)
+        except Exception:
+            pass
 
         # Auto-resume is armed when a playlist is loaded, and only triggers on the
         # first manual/auto play for that playlist (and only for the default start index).
