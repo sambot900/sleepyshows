@@ -93,7 +93,8 @@ SHOW_CATALOG = [
     {"name": "Severance",          "icon": "severance-icon.png",  "type": "show", "shuffle_mode": "off",      "year": 2022},
     {"name": "Superjail!",         "icon": "superjail-icon.png",  "type": "show", "shuffle_mode": "standard", "year": 2007},
     {"name": "Supernatural",      "icon": "supernatural-icon.png", "type": "show", "shuffle_mode": "off",      "year": 2005},
-    {"name": "Dr. Stone",         "icon": "drstone-icon.png",      "type": "show", "shuffle_mode": "off",      "year": 2019},
+    {"name": "Shark Tank",          "icon": "sharktank-icon.png",     "type": "show", "shuffle_mode": "season", "year": 2009},
+    {"name": "Crocodile Hunter",     "icon": "crocodilehunter-icon.png", "type": "show", "shuffle_mode": "standard", "year": 1996},
     # Movies
     {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
     {"name": "Talladega Nights The Ballad Of Ricky Bobby (2006)", "icon": "talladega-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2006},
@@ -138,11 +139,6 @@ class _WinFullscreenKeyFilter(QAbstractNativeEventFilter):
             try:
                 if int(msg.lParam) & (1 << 30):
                     return True, 0
-            except Exception:
-                pass
-
-            try:
-                QTimer.singleShot(0, self._mw.toggle_fullscreen)
             except Exception:
                 pass
 
@@ -1272,7 +1268,8 @@ def _get_project_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _get_thumbnails_dir():
-    d = os.path.join(_get_project_root(), 'thumbnails')
+    d = os.path.join(get_local_playlists_dir(), '..', 'thumbnails')
+    d = os.path.normpath(d)
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -1281,7 +1278,7 @@ def _thumbnail_cache_path(video_path):
 
 def _collect_all_episode_paths():
     paths = set()
-    playlists_dir = os.path.join(_get_project_root(), 'playlists')
+    playlists_dir = get_local_playlists_dir()
     try:
         for f in os.listdir(playlists_dir):
             if not f.lower().endswith('.json') or f == 'exposure_scores.json':
@@ -1302,10 +1299,22 @@ def _collect_all_episode_paths():
 
 def _generate_thumbnail_mpv(video_path, cache_path):
     try:
+        dur_result = subprocess.run([
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'csv=p=0', video_path
+        ], capture_output=True, text=True, timeout=8)
+        dur = float(dur_result.stdout.strip())
+        ss = int(dur * 0.15)
+    except Exception:
+        ss = 180
+    try:
         subprocess.run([
-            'mpv', '--no-config', '--vo=image', '--start=15%', '--frames=1',
-            f'--o={cache_path}', video_path
-        ], capture_output=True, timeout=20)
+            'ffmpeg', '-y', '-loglevel', 'error',
+            '-ss', str(ss), '-i', video_path,
+            '-vf', 'scale=320:-2',
+            '-vframes', '1',
+            cache_path
+        ], capture_output=True, timeout=25)
     except Exception:
         pass
 
@@ -1481,11 +1490,6 @@ class StartupLoadingScreen(QWidget):
             self.set_progress(p_i, "Loading...")
 
             if p_i >= 100:
-                try:
-                    timer.stop()
-                except Exception:
-                    pass
-                self.set_progress(100, "Loaded")
                 try:
                     loop.quit()
                 except Exception:
@@ -2115,6 +2119,18 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join('Dr. Stone', 'Episodes'),
             os.path.join('Dr. Stone'),
         ]),
+        ("Crocodile Hunter", [
+            os.path.join('Shows', 'Crocodile Hunter', 'Episodes'),
+            os.path.join('Shows', 'Crocodile Hunter'),
+            os.path.join('Crocodile Hunter', 'Episodes'),
+            os.path.join('Crocodile Hunter'),
+        ]),
+        ("Shark Tank", [
+            os.path.join('Shows', 'Shark Tank', 'Episodes'),
+            os.path.join('Shows', 'Shark Tank'),
+            os.path.join('Shark Tank', 'Episodes'),
+            os.path.join('Shark Tank'),
+        ]),
         # Movies
         ("Birdman (2014)", [
             os.path.join('Movies', 'Birdman (2014)'),
@@ -2454,6 +2470,18 @@ def auto_detect_show_folders_web(mount_roots_override):
             os.path.join('Shows', 'Dr. Stone'),
             os.path.join('Dr. Stone', 'Episodes'),
             os.path.join('Dr. Stone'),
+        ]),
+        ("Crocodile Hunter", [
+            os.path.join('Shows', 'Crocodile Hunter', 'Episodes'),
+            os.path.join('Shows', 'Crocodile Hunter'),
+            os.path.join('Crocodile Hunter', 'Episodes'),
+            os.path.join('Crocodile Hunter'),
+        ]),
+        ("Shark Tank", [
+            os.path.join('Shows', 'Shark Tank', 'Episodes'),
+            os.path.join('Shows', 'Shark Tank'),
+            os.path.join('Shark Tank', 'Episodes'),
+            os.path.join('Shark Tank'),
         ]),
         # Movies
         ("Birdman (2014)", [
@@ -13846,9 +13874,8 @@ if __name__ == "__main__":
     window = MainWindow()
     window.splash_progress.connect(loading.set_progress)
 
-    # Show the main window immediately so all widgets initialize properly.
-    # The splash overlays on top and will be closed once auto-config finishes.
     window.show()
+    window.setEnabled(False)
     try:
         app.processEvents()
     except Exception:
@@ -13875,6 +13902,25 @@ if __name__ == "__main__":
     poll_timer.stop()
     safety_timer.stop()
 
+    loading.set_progress(88, "Generating thumbnails...")
+    try:
+        app.processEvents()
+    except Exception:
+        pass
+
+    all_paths = _collect_all_episode_paths()
+    missing = [(p, _thumbnail_cache_path(p)) for p in all_paths
+               if not os.path.exists(_thumbnail_cache_path(p))]
+    total = len(missing)
+    for i, (path, cpath) in enumerate(missing):
+        pct = 88 + int((i + 1) / max(1, total) * 10)
+        loading.set_progress(min(98, pct), f"Thumbnails  {i+1}/{total}")
+        try:
+            app.processEvents()
+        except Exception:
+            pass
+        _generate_thumbnail_mpv(path, cpath)
+
     loading.set_progress(100, "Ready")
     try:
         app.processEvents()
@@ -13886,14 +13932,7 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    # Start thumbnail generation in a background daemon thread
-    def _bg_thumbs():
-        missing = [(p, _thumbnail_cache_path(p)) for p in _collect_all_episode_paths()
-                   if not os.path.exists(_thumbnail_cache_path(p))]
-        for path, cpath in missing:
-            _generate_thumbnail_mpv(path, cpath)
-    t = threading.Thread(target=_bg_thumbs, daemon=True)
-    t.start()
+    window.setEnabled(True)
 
     try:
         QTimer.singleShot(0, window._start_startup_ambient)
