@@ -18,6 +18,7 @@ import hashlib
 import shutil
 import tempfile
 import threading
+import subprocess
 import datetime
 
 from bump_state import BumpState
@@ -30,10 +31,12 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QTreeWidgetItem, QSplitter, QLabel, QSlider, QTabWidget,
                                QListWidget, QListWidgetItem, QInputDialog, QMessageBox, QMenu, QStackedWidget,
                                QDockWidget, QFrame, QSizePolicy, QToolButton, QStyle, QGridLayout,
-                               QStyleOptionButton, QStyleOptionToolButton, QStylePainter, QStyleOptionSlider,
+                               QStyleOptionButton, QStyleOptionToolButton, QStyleOptionComboBox, QStylePainter, QStyleOptionSlider,
                                QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-                               QAbstractButton, QLayout, QScrollArea)
-from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop, QFileSystemWatcher
+                                QComboBox,
+                                QWidgetAction,
+                                QAbstractButton, QLayout, QScrollArea)
+from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop, QFileSystemWatcher, QVariantAnimation
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QFont, QFontDatabase, QColor, QPalette, QPixmap, QPainter, QBrush, QLinearGradient, QRadialGradient, QPen, QPainterPath, QImage, QKeySequence, QShortcut, QCursor, QGuiApplication
 from PySide6.QtCore import QUrl
 
@@ -49,7 +52,26 @@ from services import playlist_io
 from services import web_mode_paths
 
 
-THEME_COLOR = "#0e1a77"
+THEME_COLOR = "#0a2a5e"
+
+
+def _theme_color():
+    return THEME_COLOR
+
+
+GRADIENT_THEMES = {
+    "Default":  (220, 200, 95),
+    "Slate":    ["#1e2328", "#2d3339", "#3c434a", "#4b535b", "#5a636c", "#6a737d"],
+    "Amethyst": ["#1a0a3a", "#301860", "#46268a", "#5c34b4"],
+    "Rose":     ["#3a0a1e", "#5c1430", "#7e1e42"],
+    "Neon":     ["#001030", "#e01060", "#10e0c0", "#f0e010"],
+    "Pastel":   ["#2a2a4a", "#6a5a8a", "#8ababa", "#c8c0a0"],
+    "Vapor":    ["#1a0030", "#601060", "#c02060", "#f08030"],
+    "Earth":    ["#1a150a", "#3a2a10", "#5a3a15"],
+    "Twilight": ["#0a1030", "#4a1040", "#f07020"],
+    "Moss":     ["#0a1a05", "#1a3a10", "#3a5a20"],
+}
+_active_gradient_scheme = None
 
 # White strokes are intentionally transparent so the global background gradient shows through.
 WHITE_STROKE_ALPHA = 0
@@ -241,14 +263,69 @@ class BumpImageView(QWidget):
             p.end()
 
 
+def _gradient_colors():
+    global _active_gradient_scheme
+    if _active_gradient_scheme is None:
+        _active_gradient_scheme = "Default"
+    scheme = GRADIENT_THEMES.get(_active_gradient_scheme, GRADIENT_THEMES["Default"])
+    if isinstance(scheme, tuple):
+        h, s, l = _derive_theme_hsl()
+        return (
+            _with_theme_hue(h, s, l, -60, sat_delta=45, light_delta=-12),
+            _with_theme_hue(h, s, l, 0, sat_delta=40, light_delta=0),
+            _with_theme_hue(h, s, l, 60, sat_delta=35, light_delta=8),
+            _with_theme_hue(h, s, l, 120, sat_delta=30, light_delta=14),
+            _with_theme_hue(h, s, l, 200, sat_delta=30, light_delta=20),
+            _with_theme_hue(h, s, l, 280, sat_delta=35, light_delta=24),
+        )
+    return tuple(QColor(c) for c in scheme)
+
+
+def _apply_colors_to_gradient(grad, colors):
+    n = len(colors)
+    if n <= 1:
+        grad.setColorAt(0.0, colors[0])
+        grad.setColorAt(1.0, colors[0])
+        return
+    for i, c in enumerate(colors):
+        pos = i / (n - 1)
+        grad.setColorAt(pos, c)
+        if i < n - 1:
+            next_pos = (i + 1) / (n - 1)
+            band_end = pos + (next_pos - pos) * 0.70
+            grad.setColorAt(band_end, c)
+
+
 def _derive_theme_hsl():
-    base = QColor(THEME_COLOR)
-    h, s, l, _a = base.getHsl()
+    global _active_gradient_scheme
+    if _active_gradient_scheme is None:
+        _active_gradient_scheme = "Default"
+    scheme = GRADIENT_THEMES.get(_active_gradient_scheme, GRADIENT_THEMES["Default"])
+    if isinstance(scheme, tuple):
+        h, s, l = scheme
+        s = max(60, min(255, s))
+        l = max(85, min(200, l))
+        return int(h), int(s), int(l)
+    c = QColor(scheme[0])
+    h = c.hue()
     if h < 0:
         h = 220
-    s = max(120, min(255, int(s if s >= 0 else 180)))
-    l = max(90, min(200, int(l if l >= 0 else 120)))
-    return int(h), int(s), int(l)
+    return int(h), int(c.saturation()), int(c.lightness())
+
+
+def _set_gradient_scheme(name):
+    global _active_gradient_scheme, THEME_COLOR
+    if name in GRADIENT_THEMES:
+        _active_gradient_scheme = name
+        scheme = GRADIENT_THEMES[name]
+        if isinstance(scheme, tuple):
+            h, s, l = scheme
+            s = max(60, min(255, s))
+            l = max(85, min(200, l))
+            c = _with_theme_hue(h, s, l, -60, sat_delta=45, light_delta=-12)
+            THEME_COLOR = c.name()
+        else:
+            THEME_COLOR = scheme[0]
 
 
 def _with_theme_hue(h: int, s: int, l: int, deg_delta: int, *, sat_delta: int = 0, light_delta: int = 0, alpha: int = 255) -> QColor:
@@ -378,27 +455,9 @@ def _draw_gradient_outlined_text(painter: QPainter, widget: QWidget, rect: QRect
         except Exception:
             anchor_rect = widget.rect()
 
-        h0, s0, l0 = _derive_theme_hsl()
         grad = QLinearGradient(anchor_rect.topLeft(), anchor_rect.bottomRight())
-        # Keep this aligned with the shared stops.
-        c1 = _with_theme_hue(h0, s0, l0, -25, sat_delta=45, light_delta=18)
-        c2 = _with_theme_hue(h0, s0, l0, 35, sat_delta=35, light_delta=10)
-        c3 = _with_theme_hue(h0, s0, l0, 85, sat_delta=25, light_delta=0)
-        c4 = _with_theme_hue(h0, s0, l0, 160, sat_delta=15, light_delta=-8)
-        c5 = _with_theme_hue(h0, s0, l0, 245, sat_delta=30, light_delta=8)
-        c6 = _with_theme_hue(h0, s0, l0, 310, sat_delta=35, light_delta=6)
-        grad.setColorAt(0.00, c1)
-        grad.setColorAt(0.14, c1)
-        grad.setColorAt(0.141, c2)
-        grad.setColorAt(0.30, c2)
-        grad.setColorAt(0.301, c3)
-        grad.setColorAt(0.50, c3)
-        grad.setColorAt(0.501, c4)
-        grad.setColorAt(0.70, c4)
-        grad.setColorAt(0.701, c5)
-        grad.setColorAt(0.86, c5)
-        grad.setColorAt(0.861, c6)
-        grad.setColorAt(1.00, c6)
+        colors = _gradient_colors()
+        _apply_colors_to_gradient(grad, colors)
 
         pen = QPen(QBrush(grad), max(1, int(outline_px)))
         pen.setJoinStyle(Qt.RoundJoin)
@@ -423,47 +482,59 @@ def _fill_rect_with_shared_modern_gradient(painter: QPainter, widget: QWidget, t
     except Exception:
         anchor_rect = widget.rect()
 
-    h, s, l = _derive_theme_hsl()
-
     # Base gradient (chunky portions with hard-ish transitions)
     grad = QLinearGradient(anchor_rect.topLeft(), anchor_rect.bottomRight())
-    c1 = _with_theme_hue(h, s, l, -25, sat_delta=45, light_delta=18)
-    c2 = _with_theme_hue(h, s, l, 35, sat_delta=35, light_delta=10)
-    c3 = _with_theme_hue(h, s, l, 85, sat_delta=25, light_delta=0)
-    c4 = _with_theme_hue(h, s, l, 160, sat_delta=15, light_delta=-8)
-    c5 = _with_theme_hue(h, s, l, 245, sat_delta=30, light_delta=8)
-    c6 = _with_theme_hue(h, s, l, 310, sat_delta=35, light_delta=6)
-
-    # Hard stop pairs: two stops nearly at the same position.
-    grad.setColorAt(0.00, c1)
-    grad.setColorAt(0.14, c1)
-    grad.setColorAt(0.141, c2)
-    grad.setColorAt(0.30, c2)
-    grad.setColorAt(0.301, c3)
-    grad.setColorAt(0.50, c3)
-    grad.setColorAt(0.501, c4)
-    grad.setColorAt(0.70, c4)
-    grad.setColorAt(0.701, c5)
-    grad.setColorAt(0.86, c5)
-    grad.setColorAt(0.861, c6)
-    grad.setColorAt(1.00, c6)
+    colors = _gradient_colors()
+    _apply_colors_to_gradient(grad, colors)
 
     painter.fillRect(target_rect, QBrush(grad))
 
-    # Layer "blobs" (larger and with sharper falloff for chunkier variation).
+    # Layer "blobs" (radial gradients) for texture variation.
     aw = max(1, anchor_rect.width())
     ah = max(1, anchor_rect.height())
-    blobs = [
-        (QPoint(anchor_rect.left() + int(aw * 0.18), anchor_rect.top() + int(ah * 0.28)), int(aw * 0.55), 60),
-        (QPoint(anchor_rect.left() + int(aw * 0.58), anchor_rect.top() + int(ah * 0.62)), int(aw * 0.60), 175),
-        (QPoint(anchor_rect.left() + int(aw * 0.88), anchor_rect.top() + int(ah * 0.35)), int(aw * 0.52), 280),
-    ]
-    for center, radius_px, hue_delta in blobs:
-        rg = QRadialGradient(center, float(max(10, radius_px)))
-        blob = _with_theme_hue(h, s, l, hue_delta, sat_delta=55, light_delta=24, alpha=220)
+    blob_sources = [colors[i] for i in [min(len(colors) - 1, int(len(colors) * p)) for p in [0.3, 0.6, 0.9]]]
+    blob_positions = [0.22, 0.55, 0.85]
+    blob_radii = [0.55, 0.60, 0.52]
+    for idx in range(3):
+        center = QPoint(anchor_rect.left() + int(aw * blob_positions[idx]),
+                        anchor_rect.top() + int(ah * (0.30 if idx == 0 else (0.55 if idx == 1 else 0.40))))
+        radius = int(aw * blob_radii[idx])
+        rg = QRadialGradient(center, float(max(10, radius)))
+        blob = QColor(blob_sources[idx % len(blob_sources)])
+        blob.setAlpha(140)
         rg.setColorAt(0.0, blob)
-        rg.setColorAt(0.62, blob)  # flatter center
-        rg.setColorAt(1.0, _with_theme_hue(h, s, l, hue_delta, sat_delta=0, light_delta=0, alpha=0))
+        rg.setColorAt(0.62, blob)
+        transparent = QColor(blob)
+        transparent.setAlpha(0)
+        rg.setColorAt(1.0, transparent)
+        painter.fillRect(target_rect, QBrush(rg))
+
+
+def _fill_rect_with_local_gradient(painter: QPainter, widget: QWidget, target_rect: QRect):
+    """Fill a rect with the gradient using the widget's own geometry as bounds."""
+    anchor_rect = target_rect
+    aw = max(1, anchor_rect.width())
+    ah = max(1, anchor_rect.height())
+
+    colors = _gradient_colors()
+    grad = QLinearGradient(anchor_rect.topLeft(), anchor_rect.bottomRight())
+    _apply_colors_to_gradient(grad, colors)
+
+    painter.fillRect(target_rect, QBrush(grad))
+
+    blob_sources = [colors[i] for i in [min(len(colors) - 1, int(len(colors) * p)) for p in [0.3, 0.6, 0.9]]]
+    for idx in range(3):
+        cx = anchor_rect.left() + int(aw * ([0.22, 0.55, 0.78][idx]))
+        cy = anchor_rect.top() + int(ah * ([0.30, 0.55, 0.40][idx]))
+        radius = int(aw * [0.45, 0.50, 0.42][idx])
+        rg = QRadialGradient(QPoint(cx, cy), float(max(10, radius)))
+        blob = QColor(blob_sources[idx % len(blob_sources)])
+        blob.setAlpha(120)
+        rg.setColorAt(0.0, blob)
+        rg.setColorAt(0.55, blob)
+        transparent = QColor(blob)
+        transparent.setAlpha(0)
+        rg.setColorAt(1.0, transparent)
         painter.fillRect(target_rect, QBrush(rg))
 
 
@@ -487,49 +558,33 @@ def _paint_modern_background(painter: QPainter, widget: QWidget):
     if widget is None:
         return
 
-    h, s, l = _derive_theme_hsl()
     r = widget.rect()
     if r.isNull():
         return
 
-    # Base gradient with hard-ish transitions.
+    colors = _gradient_colors()
     grad = QLinearGradient(r.topLeft(), r.bottomRight())
-    c1 = _with_theme_hue(h, s, l, -25, sat_delta=45, light_delta=18)
-    c2 = _with_theme_hue(h, s, l, 35, sat_delta=35, light_delta=10)
-    c3 = _with_theme_hue(h, s, l, 85, sat_delta=25, light_delta=0)
-    c4 = _with_theme_hue(h, s, l, 160, sat_delta=15, light_delta=-8)
-    c5 = _with_theme_hue(h, s, l, 245, sat_delta=30, light_delta=8)
-    c6 = _with_theme_hue(h, s, l, 310, sat_delta=35, light_delta=6)
-
-    grad.setColorAt(0.00, c1)
-    grad.setColorAt(0.14, c1)
-    grad.setColorAt(0.141, c2)
-    grad.setColorAt(0.30, c2)
-    grad.setColorAt(0.301, c3)
-    grad.setColorAt(0.50, c3)
-    grad.setColorAt(0.501, c4)
-    grad.setColorAt(0.70, c4)
-    grad.setColorAt(0.701, c5)
-    grad.setColorAt(0.86, c5)
-    grad.setColorAt(0.861, c6)
-    grad.setColorAt(1.00, c6)
+    _apply_colors_to_gradient(grad, colors)
 
     painter.fillRect(r, QBrush(grad))
 
-    # Blobs for chunkier variation.
     aw = max(1, r.width())
     ah = max(1, r.height())
-    blobs = [
-        (QPoint(r.left() + int(aw * 0.20), r.top() + int(ah * 0.25)), int(aw * 0.60), 60),
-        (QPoint(r.left() + int(aw * 0.55), r.top() + int(ah * 0.65)), int(aw * 0.70), 175),
-        (QPoint(r.left() + int(aw * 0.88), r.top() + int(ah * 0.35)), int(aw * 0.58), 280),
-    ]
-    for center, radius_px, hue_delta in blobs:
-        rg = QRadialGradient(center, float(max(10, radius_px)))
-        blob = _with_theme_hue(h, s, l, hue_delta, sat_delta=55, light_delta=24, alpha=210)
+    blob_sources = [colors[i] for i in [min(len(colors) - 1, int(len(colors) * p)) for p in [0.3, 0.6, 0.9]]]
+    blob_positions = [0.22, 0.55, 0.85]
+    blob_radii = [0.60, 0.70, 0.58]
+    for idx in range(3):
+        center = QPoint(r.left() + int(aw * blob_positions[idx]),
+                        r.top() + int(ah * (0.25 if idx == 0 else (0.65 if idx == 1 else 0.35))))
+        radius = int(aw * blob_radii[idx])
+        rg = QRadialGradient(center, float(max(10, radius)))
+        blob = QColor(blob_sources[idx % len(blob_sources)])
+        blob.setAlpha(140)
         rg.setColorAt(0.0, blob)
         rg.setColorAt(0.62, blob)
-        rg.setColorAt(1.0, _with_theme_hue(h, s, l, hue_delta, sat_delta=0, light_delta=0, alpha=0))
+        transparent = QColor(blob)
+        transparent.setAlpha(0)
+        rg.setColorAt(1.0, transparent)
         painter.fillRect(r, QBrush(rg))
 
 
@@ -861,8 +916,7 @@ class TriStrokeToolButton(QToolButton):
                 text = self.text() or ""
                 text_rect = QRect(content.left(), icon_y + icon_size.height() + 4, content.width(), content.bottom() - (icon_y + icon_size.height() + 4))
                 painter.setPen(QColor(255, 255, 255))
-                fm = painter.fontMetrics()
-                painter.drawText(text_rect, Qt.AlignHCenter | Qt.AlignTop, fm.elidedText(text, Qt.ElideRight, text_rect.width()))
+                painter.drawText(text_rect, Qt.AlignHCenter | Qt.AlignTop, text)
             else:
                 opt = QStyleOptionToolButton()
                 opt.initFrom(self)
@@ -876,6 +930,56 @@ class TriStrokeToolButton(QToolButton):
                     opt.state |= QStyle.State_MouseOver
 
                 self.style().drawControl(QStyle.CE_ToolButtonLabel, opt, painter, self)
+        finally:
+            painter.end()
+
+
+class GradientComboBox(QComboBox):
+    def __init__(self, *args, radius=8, stroke=2, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._radius = int(radius)
+        self._stroke = int(stroke)
+        self.setAttribute(Qt.WA_StyledBackground, False)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            r = self.rect()
+            s = self._stroke
+            gradient_w = max(3, int(round(s * 1.5)))
+
+            outer_rect = r.adjusted(gradient_w // 2, gradient_w // 2, -(gradient_w // 2), -(gradient_w // 2))
+            inner_inset = max(1, gradient_w)
+            inner_rect = outer_rect.adjusted(inner_inset, inner_inset, -inner_inset, -inner_inset)
+
+            ring = QPainterPath()
+            ring.addRoundedRect(outer_rect, self._radius, self._radius)
+            cutout = QPainterPath()
+            cutout.addRoundedRect(inner_rect, max(1, self._radius - gradient_w), max(1, self._radius - gradient_w))
+            ring = ring.subtracted(cutout)
+
+            painter.save()
+            try:
+                painter.setClipPath(ring)
+                _fill_rect_with_local_gradient(painter, self, r)
+            finally:
+                painter.restore()
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#1e1e1e"))
+            bg_rect = r.adjusted(gradient_w + inner_inset, gradient_w + inner_inset,
+                                 -(gradient_w + inner_inset), -(gradient_w + inner_inset))
+            painter.drawRoundedRect(bg_rect, max(1, self._radius - s), max(1, self._radius - s))
+
+            opt = QStyleOptionComboBox()
+            opt.initFrom(self)
+            opt.rect = r
+            opt.currentText = self.currentText()
+            opt.palette.setColor(QPalette.ButtonText, QColor("#ccc"))
+            opt.palette.setColor(QPalette.WindowText, QColor("#ccc"))
+            self.style().drawComplexControl(QStyle.CC_ComboBox, opt, painter, self)
+            self.style().drawControl(QStyle.CE_ComboBoxLabel, opt, painter, self)
         finally:
             painter.end()
 
@@ -948,6 +1052,32 @@ class BumpsModeWidget(QWidget):
             lambda checked: self.main_window.set_normalize_audio_enabled(checked),
         )
 
+        layout.addSpacing(8)
+
+        grad_row = QHBoxLayout()
+        grad_row.setContentsMargins(0, 0, 0, 0)
+        grad_row.setSpacing(10)
+        grad_lbl = QLabel("Gradient scheme:")
+        grad_lbl.setStyleSheet("font-size: 16px; color: white;")
+        self.combo_gradient = QComboBox()
+        self.combo_gradient.addItems(list(GRADIENT_THEMES.keys()))
+        current = str(_active_gradient_scheme or "Default")
+        if current in GRADIENT_THEMES:
+            self.combo_gradient.setCurrentText(current)
+        self.combo_gradient.currentTextChanged.connect(
+            lambda name: self.main_window.set_gradient_scheme(name)
+        )
+        self.combo_gradient.setStyleSheet("font-size: 14px; padding: 4px 8px;")
+        grad_row.addWidget(grad_lbl)
+        grad_row.addWidget(self.combo_gradient, 1)
+        layout.addLayout(grad_row)
+
+        self.gradient_preview = QWidget()
+        self.gradient_preview.setFixedHeight(36)
+        self.gradient_preview.paintEvent = self._paint_gradient_preview
+        self.gradient_preview.setStyleSheet("background: transparent; border: 1px solid rgba(255,255,255,0.15); border-radius: 6px;")
+        layout.addWidget(self.gradient_preview)
+
         # Sleepy Shows Media Directory
         media_dir_row = QHBoxLayout()
         media_dir_row.setContentsMargins(0, 0, 0, 0)
@@ -961,7 +1091,7 @@ class BumpsModeWidget(QWidget):
         self.input_media_dir.setPlaceholderText("/media/user/Drive/Sleepy Shows")
         self.input_media_dir.setStyleSheet(
             "QLineEdit { background: #333; color: white; padding: 6px 10px; border: 1px solid #111; border-radius: 4px; }"
-            "QLineEdit:focus { border: 1px solid #0e1a77; }"
+            "QLineEdit:focus { border: 1px solid {THEME_COLOR}; }"
         )
 
         def _commit_media_dir():
@@ -1043,7 +1173,17 @@ class BumpsModeWidget(QWidget):
         except Exception:
             pass
 
+    def _paint_gradient_preview(self, event):
+        p = QPainter(self.gradient_preview)
+        try:
+            _fill_rect_with_local_gradient(p, self.gradient_preview, self.gradient_preview.rect())
+        finally:
+            p.end()
+
     def refresh_status(self):
+        if hasattr(self, 'gradient_preview'):
+            self.gradient_preview.update()
+
         def _count_files(folder, exts):
             try:
                 folder = str(folder or '')
@@ -1126,6 +1266,49 @@ def _next_shuffle_mode(mode):
     return order[(i + 1) % len(order)]
 
 # --- Path Helpers ---
+def _get_project_root():
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _get_thumbnails_dir():
+    d = os.path.join(_get_project_root(), 'thumbnails')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def _thumbnail_cache_path(video_path):
+    return os.path.join(_get_thumbnails_dir(), f"{hashlib.md5(video_path.encode()).hexdigest()}.png")
+
+def _collect_all_episode_paths():
+    paths = set()
+    playlists_dir = os.path.join(_get_project_root(), 'playlists')
+    try:
+        for f in os.listdir(playlists_dir):
+            if not f.lower().endswith('.json') or f == 'exposure_scores.json':
+                continue
+            try:
+                with open(os.path.join(playlists_dir, f)) as fp:
+                    data = json.load(fp)
+            except Exception:
+                continue
+            for item in data.get('playlist', []):
+                if isinstance(item, dict) and item.get('type') == 'video':
+                    p = item.get('path', '')
+                    if p and os.path.exists(p):
+                        paths.add(p)
+    except Exception:
+        pass
+    return sorted(paths)
+
+def _generate_thumbnail_mpv(video_path, cache_path):
+    try:
+        subprocess.run([
+            'mpv', '--no-config', '--vo=image', '--start=15%', '--frames=1',
+            f'--o={cache_path}', video_path
+        ], capture_output=True, timeout=20)
+    except Exception:
+        pass
+
 def get_asset_path(filename):
     # Resolves asset path whether running as script or frozen exe
     if getattr(sys, 'frozen', False):
@@ -3351,6 +3534,7 @@ def _write_auto_playlist_json(
 
 class AutoConfigWorker(QObject):
     finished = Signal(object)
+    progress = Signal(int, str)
 
     def __init__(self, volume_label='T7', mount_roots_override=None):
         super().__init__()
@@ -3374,6 +3558,7 @@ class AutoConfigWorker(QObject):
         }
 
         try:
+            self.progress.emit(5, "Detecting drives...")
             roots = _normalize_mount_roots_override(getattr(self, 'mount_roots_override', None))
             if roots:
                 show_folders = auto_detect_show_folders_web(roots)
@@ -3406,6 +3591,7 @@ class AutoConfigWorker(QObject):
             result['show_folders'] = show_folders
             result['sources'] = sources
 
+            self.progress.emit(25, "Scanning episode files...")
             # Build library scan in the worker so the UI thread stays responsive.
             # Skip slow network scans in web mode - rely on existing playlist files
             if sources and not roots:
@@ -3416,9 +3602,11 @@ class AutoConfigWorker(QObject):
                 result['source_folders'] = pm.source_folders
                 result['episodes'] = pm.episodes
 
+            self.progress.emit(55, "Generating playlists...")
             updated = False
             # Write / refresh playlist JSONs for every catalog entry found on disk.
-            for entry in SHOW_CATALOG:
+            total = max(1, len(SHOW_CATALOG))
+            for i, entry in enumerate(SHOW_CATALOG):
                 folder = show_folders.get(entry["name"])
                 if folder:
                     updated = _write_auto_playlist_json(
@@ -3427,7 +3615,11 @@ class AutoConfigWorker(QObject):
                         default_shuffle_mode=entry.get("shuffle_mode", "standard"),
                         prefer_existing_playlist_paths=bool(roots),
                     ) or updated
+                if hasattr(self, 'progress'):
+                    p = 55 + int((i + 1) / total * 30)
+                    self.progress.emit(min(85, p), f"Generating playlists...")
             result['playlists_updated'] = bool(updated)
+            self.progress.emit(90, "Finalizing...")
         except Exception:
             # Best-effort only.
             pass
@@ -4919,6 +5111,7 @@ class PlayModeWidget(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
+        self._duration_cache = {}
         self.setup_ui()
 
     def minimumSizeHint(self):
@@ -5011,41 +5204,76 @@ class PlayModeWidget(QWidget):
         self._h_layout.setSpacing(0)
         
         # --- Sidebar ---
+        self.sidebar_width = 380
         self.sidebar_container = QWidget()
-        self.sidebar_container.setFixedWidth(300)
-        self.sidebar_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.sidebar_container.setStyleSheet("background-color: #2b2b2b;")
+        self.sidebar_container.setFixedWidth(self.sidebar_width)
+        self.sidebar_container.setMinimumWidth(0)
+        self.sidebar_container.setStyleSheet("background-color: #1a1a1a; border-right: 1px solid #2a2a2a;")
         side_layout = QVBoxLayout(self.sidebar_container)
-        
-        # Close Button for Sidebar
-        self.btn_close_menu = QPushButton("Close Menu")
-        self.btn_close_menu.setMinimumHeight(40)
-        self.btn_close_menu.clicked.connect(self.toggle_sidebar)
-        side_layout.addWidget(self.btn_close_menu)
+        side_layout.setContentsMargins(0, 0, 0, 0)
+        side_layout.setSpacing(0)
 
-        # Back to Main
-        self.btn_back_main = QPushButton("Back to Main")
-        self.btn_back_main.setMinimumHeight(40)
-        self.btn_back_main.setStyleSheet("background-color: #444; color: white;")
+        # Top: Back to Main
+        self.btn_back_main = QPushButton("←  Back to Main")
+        self.btn_back_main.setMinimumHeight(44)
+        self.btn_back_main.setCursor(Qt.PointingHandCursor)
+        self.btn_back_main.setStyleSheet("""
+            QPushButton {
+                background-color: #222; color: #aaa; border: none;
+                border-bottom: 1px solid #2a2a2a;
+                font-size: 13pt; font-weight: bold; text-align: left; padding: 0 16px;
+            }
+            QPushButton:hover { background-color: #2d2d2d; color: white; }
+        """)
         self.btn_back_main.clicked.connect(self.main_window.go_to_welcome)
         side_layout.addWidget(self.btn_back_main)
 
-        side_layout.addWidget(QLabel("Saved Playlists:"))
-        self.playlists_list_widget = QListWidget()
-        self.playlists_list_widget.setStyleSheet("font-size: 14pt;")
-        self.playlists_list_widget.itemClicked.connect(self.load_selected_playlist)
-        self.playlists_list_widget.itemDoubleClicked.connect(self.load_and_play_playlist)
-        side_layout.addWidget(self.playlists_list_widget, 1)
-        
-        side_layout.addWidget(QLabel("Current Playlist Episodes:"))
+        # Season selector dropdown
+        self.btn_season = TriStrokeButton("Season")
+        self.btn_season.setMinimumHeight(42)
+        self.btn_season.setCursor(Qt.PointingHandCursor)
+        self.btn_season.setStyleSheet("font-size: 12pt; font-weight: bold; background: transparent; border: none; color: #ccc;")
+        self.btn_season.clicked.connect(self._show_season_menu)
+        side_layout.addWidget(self.btn_season)
+
+        # Episode list
         self.episode_list_widget = QListWidget()
-        self.episode_list_widget.itemDoubleClicked.connect(self.play_episode_from_list)
+        self.episode_list_widget.setStyleSheet("""
+            QListWidget {
+                background-color: #1a1a1a; border: none; color: #ccc;
+                font-size: 11pt; outline: none;
+            }
+            QListWidget::item { padding: 0px; border: none; }
+            QListWidget::item:hover { background: transparent; }
+            QListWidget::item:selected { background: transparent; }
+            QScrollBar:vertical {
+                background: #1a1a1a; width: 6px; margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #3a3a3a; border-radius: 3px; min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover { background: #555; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+        """)
+        self.episode_list_widget.itemDoubleClicked.connect(self._on_episode_double_clicked)
         side_layout.addWidget(self.episode_list_widget, 1)
-        
-        side_refresh_btn = QPushButton("Refresh Playlists")
-        side_refresh_btn.clicked.connect(self.refresh_playlists)
-        side_layout.addWidget(side_refresh_btn)
-        
+
+        # Bottom: Close Menu
+        self.btn_close_menu = QPushButton("Close Menu  ✕")
+        self.btn_close_menu.setMinimumHeight(44)
+        self.btn_close_menu.setCursor(Qt.PointingHandCursor)
+        self.btn_close_menu.setStyleSheet("""
+            QPushButton {
+                background-color: #222; color: #aaa; border: none;
+                border-top: 1px solid #2a2a2a;
+                font-size: 13pt; font-weight: bold; text-align: left; padding: 0 16px;
+            }
+            QPushButton:hover { background-color: #2d2d2d; color: white; }
+        """)
+        self.btn_close_menu.clicked.connect(self.toggle_sidebar)
+        side_layout.addWidget(self.btn_close_menu)
+
         self._h_layout.addWidget(self.sidebar_container)
         
         # --- Video Area ---
@@ -5174,7 +5402,7 @@ class PlayModeWidget(QWidget):
         self.btn_play = TriStrokeButton()
         self.btn_play.setIcon(self._make_play_slash_pause_icon(icon_h=40))
         self.btn_play.setIconSize(QSize(90, 40))
-        self.btn_play.setFixedSize(140, button_height)
+        self.btn_play.setFixedSize(160, button_height)
         self.btn_play.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
         self.btn_play.clicked.connect(self.main_window.toggle_play)
         playback_layout.addWidget(self.btn_play)
@@ -5194,26 +5422,25 @@ class PlayModeWidget(QWidget):
         self.btn_seek_fwd.clicked.connect(lambda: self.main_window.seek_relative(20))
         playback_layout.addWidget(self.btn_seek_fwd)
 
-        # Audio track language cycle button (hidden until multiple tracks are detected)
-        self.btn_audio_track = TriStrokeButton("EN")
-        self.btn_audio_track.setFixedSize(80, button_height)
-        self.btn_audio_track.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
+        # Audio track language cycle button
+        track_font_style = "font-size: 10pt; font-weight: bold;"
+        self.btn_audio_track = TriStrokeButton("Language:\n--")
+        self.btn_audio_track.setFixedSize(110, button_height)
+        self.btn_audio_track.setStyleSheet(track_font_style + " background: transparent; border: none; color: white;")
         self.btn_audio_track.clicked.connect(self.main_window.cycle_audio_track)
-        self.btn_audio_track.setVisible(False)
         right_layout.addWidget(self.btn_audio_track)
 
-        # Subtitle / CC cycle button (hidden until subtitle tracks are detected)
-        self.btn_subtitle = TriStrokeButton("CC")
-        self.btn_subtitle.setFixedSize(80, button_height)
-        self.btn_subtitle.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
+        # Subtitle / CC cycle button
+        self.btn_subtitle = TriStrokeButton("Captions:\n--")
+        self.btn_subtitle.setFixedSize(110, button_height)
+        self.btn_subtitle.setStyleSheet(track_font_style + " background: transparent; border: none; color: white;")
         self.btn_subtitle.clicked.connect(self.main_window.cycle_subtitle_track)
-        self.btn_subtitle.setVisible(False)
         right_layout.addWidget(self.btn_subtitle)
 
         # Sleep Timer Button (shows remaining minutes)
         self.btn_sleep_timer = TriStrokeButton("SLEEP\nOFF")
         self.btn_sleep_timer.setFixedSize(120, button_height)
-        self.btn_sleep_timer.setStyleSheet(font_style + " background: transparent; border: none; color: white;")
+        self.btn_sleep_timer.setStyleSheet("font-size: 11pt; font-weight: bold; background: transparent; border: none; color: white;")
         # Single-press cycle (menu dropdown is still available from the top menu).
         self.btn_sleep_timer.clicked.connect(self.main_window.cycle_sleep_timer_quick)
         right_layout.addWidget(self.btn_sleep_timer)
@@ -5248,31 +5475,7 @@ class PlayModeWidget(QWidget):
         self.slider_vol.setValue(100)
         self.slider_vol.setFixedWidth(150)
         self.slider_vol.setFixedHeight(50)
-        self.slider_vol.setStyleSheet(f"""
-            QSlider::groove:horizontal {{
-                border: 1px solid #444;
-                height: 10px;
-                background: #333;
-                margin: 0px;
-                border-radius: 5px;
-            }}
-            QSlider::sub-page:horizontal {{
-                background: {THEME_COLOR};
-                border-radius: 5px;
-            }}
-            QSlider::add-page:horizontal {{
-                background: #555;
-                border-radius: 5px;
-            }}
-            QSlider::handle:horizontal {{
-                width: 24px;
-                height: 24px;
-                margin: -7px 0;
-                background: white;
-                border: none;
-                border-radius: 12px;
-            }}
-        """)
+        self._apply_volume_slider_style()
         self.slider_vol.valueChanged.connect(self.main_window.set_volume)
         right_layout.addWidget(self.slider_vol)
 
@@ -5317,7 +5520,7 @@ class PlayModeWidget(QWidget):
         
         self.sidebar_visible = True
         self.sidebar_container.setVisible(True)
-        self.refresh_playlists()
+        self._populate_season_list()
 
     def resizeEvent(self, event):
         try:
@@ -5400,6 +5603,10 @@ class PlayModeWidget(QWidget):
             self.btn_next.setIconSize(QSize(icon, icon))
             self.btn_fullscreen.setIconSize(QSize(icon, icon))
             self.btn_shuffle.setIconSize(QSize(icon, icon))
+            play_icon_w = int(round(icon * 2.80))
+            play_icon_h = int(round(icon * 1.25))
+            self.btn_play.setIconSize(QSize(play_icon_w, play_icon_h))
+            self.btn_play.setIcon(self._make_play_slash_pause_icon(icon_h=play_icon_h))
         except Exception:
             pass
 
@@ -5467,57 +5674,82 @@ class PlayModeWidget(QWidget):
                 'menu': 120,
                 'seek': 100,
                 'prevnext': 100,
-                'play': 140,
+                'play': 160,
                 'sleep': 120,
-                'audio': 80,
-                'sub': 80,
-                'shuffle': 80,
+                'audio': 110,
+                'sub': 110,
+                'shuffle': 100,
                 'vol_label': 44,
                 'vol': 150,
                 'fs': button_h,
+            }
+            mins = {
+                'menu': 56,
+                'seek': 54,
+                'prevnext': 54,
+                'play': 70,
+                'sleep': 66,
+                'audio': 60,
+                'sub': 60,
+                'shuffle': 52,
+                'vol_label': 30,
+                'vol': 70,
+                'fs': 54,
             }
         elif mode == 'sm':
             base = {
                 'menu': 104,
                 'seek': 92,
                 'prevnext': 88,
-                'play': 128,
+                'play': 144,
                 'sleep': 112,
-                'audio': 72,
-                'sub': 72,
-                'shuffle': 72,
+                'audio': 100,
+                'sub': 100,
+                'shuffle': 88,
                 'vol_label': 40,
                 'vol': 130,
                 'fs': button_h,
+            }
+            mins = {
+                'menu': 56,
+                'seek': 54,
+                'prevnext': 54,
+                'play': 70,
+                'sleep': 66,
+                'audio': 60,
+                'sub': 60,
+                'shuffle': 60,
+                'vol_label': 30,
+                'vol': 70,
+                'fs': 54,
             }
         else:
             base = {
                 'menu': 64,
                 'seek': 68,
                 'prevnext': 64,
-                'play': 96,
+                'play': 108,
                 'sleep': 86,
-                'audio': 58,
-                'sub': 58,
-                'shuffle': 58,
+                'audio': 90,
+                'sub': 90,
+                'shuffle': 72,
                 'vol_label': 0,
                 'vol': 96,
                 'fs': button_h,
             }
-
-        mins = {
-            'menu': 56,
-            'seek': 54,
-            'prevnext': 54,
-            'play': 70,
-            'sleep': 66,
-            'audio': 48,
-            'sub': 48,
-            'shuffle': 52,
-            'vol_label': 30,
-            'vol': 70,
-            'fs': 54,
-        }
+            mins = {
+                'menu': 56,
+                'seek': 54,
+                'prevnext': 54,
+                'play': 70,
+                'sleep': 66,
+                'audio': 60,
+                'sub': 60,
+                'shuffle': 60,
+                'vol_label': 30,
+                'vol': 70,
+                'fs': 54,
+            }
 
         # Apply base sizes.
         _set_w(self.btn_menu, base['menu'], button_h)
@@ -5574,6 +5806,31 @@ class PlayModeWidget(QWidget):
         outer_space_total = 4 * outer_sp
         used = int(used_left + used_playback + used_right + outer_space_total)
 
+        # Always re-show hidden low-priority widgets first so they reappear on expand
+        right_hide_order = [
+            self.btn_shuffle,
+            self.btn_sleep_timer,
+            self.btn_subtitle,
+            self.btn_audio_track,
+        ]
+        for w in right_hide_order:
+            if w is not None:
+                try:
+                    w.setVisible(True)
+                except Exception:
+                    pass
+        # Recompute with everything visible
+        used_right = _group_used(getattr(self, '_controls_right_layout', None), [
+            self.btn_audio_track,
+            self.btn_subtitle,
+            self.btn_sleep_timer,
+            self.btn_shuffle,
+            self.lbl_volume if show_vol_label else None,
+            self.slider_vol,
+            self.btn_fullscreen,
+        ])
+        used = int(used_left + used_playback + used_right + outer_space_total)
+
         overflow = int(used - avail)
         if overflow > 0:
             # Shrink lowest-priority / widest items first.
@@ -5613,8 +5870,36 @@ class PlayModeWidget(QWidget):
                 _set_w(widget, int(cur - delta))
                 overflow -= int(delta)
 
+            if overflow > 0:
+                # All widgets at mins, still overflowing — hide low-priority widgets
+                for w in right_hide_order:
+                    if overflow <= 0 or w is None:
+                        break
+                    try:
+                        if not w.isVisible():
+                            continue
+                    except Exception:
+                        pass
+                    w.setVisible(False)
+                    used_right = _group_used(getattr(self, '_controls_right_layout', None), [
+                        self.btn_audio_track,
+                        self.btn_subtitle,
+                        self.btn_sleep_timer,
+                        self.btn_shuffle,
+                        self.lbl_volume if show_vol_label else None,
+                        self.slider_vol,
+                        self.btn_fullscreen,
+                    ])
+                    used = int(used_left + used_playback + used_right + outer_space_total)
+                    overflow = int(used - avail)
+
         try:
             self.slider_seek.setFixedHeight(int(seek_h))
+        except Exception:
+            pass
+
+        try:
+            self.main_window._update_track_button_labels()
         except Exception:
             pass
 
@@ -5645,83 +5930,421 @@ class PlayModeWidget(QWidget):
             except Exception:
                 pass
             
+    def _apply_volume_slider_style(self):
+        self.slider_vol.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                border: 1px solid #444;
+                height: 10px;
+                background: #333;
+                margin: 0px;
+                border-radius: 5px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {THEME_COLOR};
+                border-radius: 5px;
+            }}
+            QSlider::add-page:horizontal {{
+                background: #555;
+                border-radius: 5px;
+            }}
+            QSlider::handle:horizontal {{
+                width: 24px;
+                height: 24px;
+                margin: -7px 0;
+                background: white;
+                border: none;
+                border-radius: 12px;
+            }}
+        """)
+
     def toggle_sidebar(self):
-        self.sidebar_visible = not self.sidebar_visible
-        self.sidebar_container.setVisible(self.sidebar_visible)
-        if self.sidebar_visible:
-            self.refresh_playlists()
-            self.refresh_episode_list()
+        target_visible = not self.sidebar_visible
+        self.sidebar_visible = target_visible
+        target_width = self.sidebar_width if target_visible else 0
+
+        if target_visible:
+            self.sidebar_container.setVisible(True)
+            self._populate_season_list()
+
+        try:
+            if hasattr(self, '_sidebar_anim') and self._sidebar_anim.state() == QVariantAnimation.Running:
+                self._sidebar_anim.stop()
+        except Exception:
+            pass
+
+        self._sidebar_anim = QVariantAnimation()
+        self._sidebar_anim.setDuration(280)
+        self._sidebar_anim.setStartValue(self.sidebar_container.width())
+        self._sidebar_anim.setEndValue(target_width)
+        self._sidebar_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self._sidebar_anim.valueChanged.connect(lambda v: self.sidebar_container.setFixedWidth(int(v)))
+        if not target_visible:
+            self._sidebar_anim.finished.connect(self._on_sidebar_anim_finished)
+        self._sidebar_anim.start()
+
+    def _on_sidebar_anim_finished(self):
+        self.sidebar_container.setVisible(False)
 
     def refresh_playlists(self):
-        self.playlists_list_widget.clear()
-        playlists = self.main_window.playlist_manager.list_saved_playlists()
-        for p in playlists:
-            display = p
-            try:
-                if isinstance(p, str) and p.lower().endswith('.json'):
-                    display = p[:-5]
-            except Exception:
-                display = p
-
-            item = QListWidgetItem(str(display))
-            # Preserve the actual filename for loading.
-            try:
-                item.setData(Qt.UserRole, p)
-            except Exception:
-                pass
-            self.playlists_list_widget.addItem(item)
+        self._populate_season_list()
 
     def refresh_episode_list(self):
+        self._populate_season_list()
+
+    def _populate_season_list(self):
+        self._season_episodes = {}
+        self._current_season_key = None
+        try:
+            playlist = self.main_window.playlist_manager.current_playlist
+        except Exception:
+            return
+        if not playlist:
+            self.btn_season.setText("No episodes")
+            return
+
+        current_season = None
+        current_idx = self.main_window.playlist_manager.current_index
+        for i, item in enumerate(playlist):
+            if not isinstance(item, dict) or item.get('type') != 'video':
+                continue
+            path = item.get('path', '')
+            sk = self._season_key(path)
+            ep_num, title = self._parse_ep_info(path)
+            if sk not in self._season_episodes:
+                self._season_episodes[sk] = []
+            self._season_episodes[sk].append((i, ep_num, title, path))
+            if i == current_idx:
+                current_season = sk
+
+        if current_season is not None:
+            self._current_season_key = current_season
+        elif self._season_episodes:
+            self._current_season_key = min(self._season_episodes.keys())
+
+        if self._current_season_key is not None:
+            label = f"Season {self._current_season_key}" if self._current_season_key > 0 else "Specials"
+            count = len(self._season_episodes[self._current_season_key])
+            self.btn_season.setText(f"{label}  ·  {count} episodes  ▾")
+            self._populate_episodes(self._current_season_key)
+        else:
+            self.btn_season.setText("No episodes")
+
+    def _populate_episodes(self, season_key):
         self.episode_list_widget.clear()
-        current = self.main_window.playlist_manager.current_playlist
-        for i, item in enumerate(current):
-             if isinstance(item, dict):
-                 name = os.path.basename(item.get('path', 'Unknown'))
-                 if item.get('type') == 'bump':
-                     name = "[BUMP] " + os.path.basename(item.get('audio', 'Audio'))
-             else:
-                 name = os.path.basename(item)
-             
-             prefix = "> " if i == self.main_window.playlist_manager.current_index else ""
-             self.episode_list_widget.addItem(f"{prefix}{name}")
+        eps = self._season_episodes.get(season_key, [])
+        if not eps:
+            return
+        current_idx = self.main_window.playlist_manager.current_index
+        for i, ep_num, title, path in eps:
+            self._make_episode_item(i, ep_num, title, path, i == current_idx)
 
-    def load_selected_playlist(self, item):
-        filename = None
+    def _show_season_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: #1e1e1e; color: #ccc; border: 1px solid #3a3a3a; padding: 4px; }}
+            QMenu::item {{ padding: 8px 40px 8px 20px; }}
+            QMenu::item:selected {{ background-color: {THEME_COLOR}; color: white; }}
+        """)
+        if hasattr(self, '_season_episodes'):
+            btn_width = self.btn_season.width()
+            menu.setMinimumWidth(btn_width)
+            for sk in sorted(self._season_episodes.keys()):
+                label = f"Season {sk}" if sk > 0 else "Specials"
+                count = len(self._season_episodes[sk])
+                text = f"{label}  ·  {count} episodes"
+                if sk == self._current_season_key:
+                    widget = QLabel(text)
+                    widget.setContentsMargins(20, 8, 40, 8)
+                    widget.setStyleSheet(f"background-color: {THEME_COLOR}; color: white; font-size: 12pt; font-weight: bold;")
+                    a = QWidgetAction(menu)
+                    a.setDefaultWidget(widget)
+                    a.triggered.connect(lambda checked, key=sk: self._on_season_selected(key))
+                    menu.addAction(a)
+                else:
+                    action = menu.addAction(text)
+                    action.triggered.connect(lambda checked, key=sk: self._on_season_selected(key))
+        btn_rect = self.btn_season.rect()
+        pos = self.btn_season.mapToGlobal(QPoint(0, btn_rect.height()))
+        menu.exec(pos)
+
+    def _on_season_selected(self, season_key):
+        self._current_season_key = season_key
+        label = f"Season {season_key}" if season_key > 0 else "Specials"
+        count = len(self._season_episodes[season_key])
+        self.btn_season.setText(f"{label}  ·  {count} episodes  ▾")
+        self._populate_episodes(season_key)
+
+    def _on_season_changed(self, idx):
+        pass
+
+    def _make_episode_item(self, i, ep_num, title, path, is_current):
+        pixmap = self._load_thumbnail(path)
+        has_thumb = pixmap and not pixmap.isNull()
+
+        thumb = QLabel()
+        thumb.setFixedSize(100, 80)
+        thumb.setAlignment(Qt.AlignCenter)
+        if has_thumb:
+            thumb.setPixmap(pixmap.scaled(100, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            thumb.setStyleSheet("background-color: #2a2a2a; border-radius: 4px; border: none;")
+        else:
+            thumb.setStyleSheet("background-color: #222; border: 1px solid #3a3a3a; border-radius: 4px; color: #555; font-size: 8pt;")
+            thumb.setText("No\nimage")
+
+        ep_lbl = QLabel(f"Episode {ep_num}" if ep_num is not None else "--")
+        ep_lbl.setStyleSheet("color: #666; font-size: 8pt; background: transparent; border: none;")
+
+        title_text = title if title else "Unknown"
+        title_lbl = QLabel(title_text)
+        title_lbl.setWordWrap(True)
+        title_lbl.setAlignment(Qt.AlignCenter)
+        if is_current:
+            title_lbl.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent; border: none;")
+        else:
+            title_lbl.setStyleSheet("color: #ccc; font-size: 11pt; font-weight: bold; background: transparent; border: none;")
+
+        info = QVBoxLayout()
+        info.setSpacing(4)
+        info.setContentsMargins(4, 0, 8, 0)
+        info.addWidget(ep_lbl)
+        info.addWidget(title_lbl)
+        info.addStretch()
+
+        row = QWidget()
+        bg = "rgba(255,255,255,0.06)" if is_current else "transparent"
+        row.setStyleSheet(f"background-color: {bg}; border: none; border-bottom: 1px solid #222;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(12, 6, 10, 6)
+        h.setSpacing(12)
+        h.addLayout(info, 1)
+        h.addWidget(thumb)
+
+        item = QListWidgetItem()
+        item.setData(Qt.UserRole, i)
+        item.setSizeHint(QSize(0, 92))
+        self.episode_list_widget.addItem(item)
+        self.episode_list_widget.setItemWidget(item, row)
+
+    def _on_season_changed(self, idx):
+        pass
+
+    def _season_key(self, path):
         try:
-            filename = item.data(Qt.UserRole)
+            for part in re.split(r'[\\/]+', str(path or '')):
+                m = re.search(r'(?:season|s)[ _-]?(\d{1,2})', part, flags=re.IGNORECASE)
+                if m:
+                    return int(m.group(1))
         except Exception:
-            filename = None
-        if not filename:
-            filename = item.text()
-            if isinstance(filename, str) and not filename.lower().endswith('.json'):
-                filename = filename + '.json'
-        self.main_window.load_playlist(os.path.join("playlists", filename))
-        self.refresh_episode_list()
+            pass
+        return 0
 
-    def load_and_play_playlist(self, item):
-        filename = None
+    def _parse_ep_info(self, path):
+        basename = os.path.splitext(os.path.basename(path))[0]
+        m = re.match(r'[Ss]\d{1,2}\s*[Ee](\d{1,2})\s+(.+)', basename)
+        if m:
+            return int(m.group(1)), m.group(2).strip()
+        m = re.match(r'\d{1,2}\s*[xX]\s*(\d{1,2})\s+(.+)', basename)
+        if m:
+            return int(m.group(1)), m.group(2).strip()
+        return None, basename
+
+    def _refresh_flat_list(self):
+        self.episode_list_widget.clear()
         try:
-            filename = item.data(Qt.UserRole)
+            playlist = self.main_window.playlist_manager.current_playlist
         except Exception:
-            filename = None
-        if not filename:
-            filename = item.text()
-            if isinstance(filename, str) and not filename.lower().endswith('.json'):
-                filename = filename + '.json'
-        self.main_window.load_playlist(os.path.join("playlists", filename), auto_play=True)
+            return
+        if not playlist:
+            return
+        current_idx = self.main_window.playlist_manager.current_index
+        for i, item in enumerate(playlist):
+            if isinstance(item, dict):
+                name = os.path.basename(item.get('path', 'Unknown'))
+                if item.get('type') == 'bump':
+                    name = "[BUMP] " + os.path.basename(item.get('audio', 'Audio'))
+            else:
+                name = os.path.basename(item)
+            prefix = "> " if i == current_idx else "  "
+            self.episode_list_widget.addItem(f"{prefix}{name}")
 
-    def play_episode_from_list(self, item):
-        idx = self.episode_list_widget.row(item)
+    def _on_episode_double_clicked(self, item):
+        idx = item.data(Qt.UserRole)
+        if idx is None:
+            idx = self.episode_list_widget.row(item)
         try:
             self.main_window.playlist_manager.rebuild_queue(current_index=idx)
         except Exception:
             pass
         self.main_window.play_index(idx)
 
+    def _make_card_click_handler(self, playlist_idx):
+        def handler(event):
+            try:
+                self.main_window.playlist_manager.rebuild_queue(current_index=playlist_idx)
+            except Exception:
+                pass
+            self.main_window.play_index(playlist_idx)
+        return handler
+
+    def _on_tree_item_clicked(self, item, column):
+        pass
+
+    def _on_season_expanded(self, item):
+        pass
+
+    def _populate_season_children(self, season_item, eps):
+        pass
+
+    def _schedule_duration_scan(self, paths):
+        cache = getattr(self, '_duration_cache', {})
+        missing = [p for p in paths if p not in cache and os.path.exists(p)]
+        if not missing:
+            return
+
+        def _scan():
+            for path in missing:
+                dur_str = ""
+                try:
+                    result = subprocess.run([
+                        'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                        '-of', 'default=noprint_wrappers=1:nokey=1', path
+                    ], capture_output=True, text=True, timeout=8)
+                    dur = float(result.stdout.strip())
+                    m, s = divmod(int(dur), 60)
+                    h, m = divmod(m, 60)
+                    dur_str = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+                except Exception:
+                    pass
+                cache[path] = dur_str
+            # Cache populated — tree will pick up durations on next refresh
+
+        t = threading.Thread(target=_scan, daemon=True)
+        t.start()
+
+    def _parse_filename_metadata(self, path):
+        basename = os.path.splitext(os.path.basename(path))[0]
+        m = re.match(r'[Ss](\d{1,2})\s*[Ee](\d{1,2})\s+(.+)', basename)
+        if m:
+            return int(m.group(1)), int(m.group(2)), m.group(3).strip()
+        m = re.match(r'(\d{1,2})\s*[xX]\s*(\d{1,2})\s+(.+)', basename)
+        if m:
+            return int(m.group(1)), int(m.group(2)), m.group(3).strip()
+        season_num = self.main_window.playlist_manager._season_key_from_path(path)
+        return season_num, None, basename
+
+    def _create_episode_row(self, playlist_idx, path, ep_num, title, is_current):
+        widget = QWidget()
+        bg = "rgba(255,255,255,0.08)" if is_current else "transparent"
+        border_radius = "border-radius: 6px;" if is_current else ""
+        widget.setStyleSheet(f"background-color: {bg}; {border_radius}")
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(6, 2, 8, 2)
+        layout.setSpacing(10)
+
+        thumb = QLabel()
+        thumb.setFixedSize(120, 68)
+        thumb.setStyleSheet("background-color: #2a2a2a; border-radius: 4px;")
+        thumb.setAlignment(Qt.AlignCenter)
+        thumb.setScaledContents(True)
+        pixmap = self._load_thumbnail(path)
+        if pixmap and not pixmap.isNull():
+            thumb.setPixmap(pixmap.scaled(120, 68, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            thumb.setStyleSheet("background-color: #2a2a2a; border: 1px solid #444; border-radius: 4px; color: #666; font-size: 10pt; font-weight: bold;")
+            thumb.setText("Thumbnail\nunavailable")
+        layout.addWidget(thumb)
+
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        info.setContentsMargins(0, 2, 0, 2)
+
+        ep_label = f"E{ep_num:02d}  {title}" if ep_num else (title or "Unknown")
+        title_lbl = QLabel(ep_label)
+        title_lbl.setStyleSheet("color: #ddd; font-size: 11pt; font-weight: bold; background: transparent;")
+        title_lbl.setWordWrap(True)
+        info.addWidget(title_lbl)
+
+        dur = self._duration_cache.get(path, "")
+        dur_lbl = QLabel(dur if dur else "--:--")
+        dur_lbl.setStyleSheet("color: #777; font-size: 9pt; background: transparent;")
+        dur_lbl.setObjectName("dur_label")
+        info.addWidget(dur_lbl)
+
+        info.addStretch()
+        layout.addLayout(info, 1)
+
+        widget.setCursor(Qt.PointingHandCursor)
+        return widget
+
+    def _on_tree_item_clicked(self, item, column):
+        idx = item.data(0, Qt.UserRole)
+        if idx is not None:
+            try:
+                self.main_window.playlist_manager.rebuild_queue(current_index=idx)
+            except Exception:
+                pass
+            self.main_window.play_index(idx)
+
+    def _on_season_expanded(self, item):
+        eps = item.data(0, Qt.UserRole)
+        if not isinstance(eps, list):
+            return
+        if item.childCount() > 0 and item.child(0).data(0, Qt.UserRole) is not None:
+            return
+        self._populate_season_children(item, eps)
+
+    def _get_episode_duration(self, path):
+        if not os.path.exists(path):
+            return ""
+        if path in self._duration_cache:
+            return self._duration_cache[path]
+        dur_str = ""
+        try:
+            result = subprocess.run([
+                'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1', path
+            ], capture_output=True, text=True, timeout=5)
+            dur = float(result.stdout.strip())
+            m, s = divmod(int(dur), 60)
+            h, m = divmod(m, 60)
+            if h:
+                dur_str = f"{h}:{m:02d}:{s:02d}"
+            else:
+                dur_str = f"{m}:{s:02d}"
+        except Exception:
+            pass
+        self._duration_cache[path] = dur_str
+        return dur_str
+
+    def _load_thumbnail(self, path):
+        cache_path = _thumbnail_cache_path(path)
+        if os.path.exists(cache_path):
+            pix = QPixmap(cache_path)
+            if not pix.isNull():
+                return pix
+        video_dir = os.path.dirname(path)
+        video_base = os.path.splitext(os.path.basename(path))[0]
+        sidecar_names = [
+            f"{video_base}-thumb.jpg",
+            "folder.jpg", "cover.jpg", "poster.jpg", "thumb.jpg",
+            f"{video_base}.jpg",
+        ]
+        for name in sidecar_names:
+            sidecar_path = os.path.join(video_dir, name)
+            if os.path.exists(sidecar_path):
+                pix = QPixmap(sidecar_path)
+                if not pix.isNull():
+                    pix = pix.scaled(160, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    pix.save(cache_path, 'PNG')
+                    return pix
+        return None
+
 
 # --- Main Window ---
 
 class MainWindow(QMainWindow):
+    splash_progress = Signal(int, str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sleepy Shows Player")
@@ -5852,6 +6475,7 @@ class MainWindow(QMainWindow):
         self._settings = self._load_user_settings()
         self.startup_crickets_enabled = bool(self._settings.get('startup_crickets_enabled', True))
         self.normalize_audio_enabled = bool(self._settings.get('normalize_audio_enabled', False))
+        _set_gradient_scheme(str(self._settings.get('gradient_scheme', 'Default') or 'Default'))
         self.bump_images_dir = self._settings.get('bump_images_dir', None)
         self.bump_audio_fx_dir = self._settings.get('bump_audio_fx_dir', None)
         self.bump_videos_dir = self._settings.get('bump_videos_dir', None)
@@ -5892,14 +6516,6 @@ class MainWindow(QMainWindow):
         # because the portable drive is absent — the user may simply not have
         # plugged it in yet.
         self.playback_mode = configured_mode
-
-        # Startup fix: in Portable mode, proactively auto-config so playlists are
-        # validated against the external drive and rebuilt if stale.
-        try:
-            if self.playback_mode == 'portable':
-                QTimer.singleShot(0, self._try_auto_populate_library)
-        except Exception:
-            pass
 
         # Persist the effective mode so UI + next launch match reality.
         # (If the drive comes/goes, this will flip accordingly on next launch.)
@@ -6438,9 +7054,6 @@ class MainWindow(QMainWindow):
         # Install event filter to track mouse move across application
         self.installEventFilter(self)
 
-        # Best-effort: auto-populate library from an external drive (e.g. "T7").
-        # If nothing is found, the user can still add a folder manually.
-        QTimer.singleShot(0, self._try_auto_populate_library)
 
     def _log_event(self, event: str, **fields):
         try:
@@ -7299,6 +7912,89 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _refresh_nav_bar_styles(self):
+        menu_style = f"""
+            QMenu {{ 
+                background-color: #333; 
+                color: white; 
+                border: 1px solid #111; 
+            }} 
+            QMenu::item {{
+                padding: 8px 30px 8px 30px;
+            }}
+            QMenu::item:selected {{ 
+                background-color: {THEME_COLOR}; 
+            }}
+        """
+        for menu in getattr(self, '_nav_menus', []):
+            try:
+                menu.setStyleSheet(menu_style)
+            except Exception:
+                pass
+
+        mode_btn_style = f"""
+            QPushButton {{
+                color: #e0e0e0;
+                background: transparent;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px 12px;
+                border: 1px solid transparent;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background: #444;
+            }}
+            QPushButton:checked {{
+                background: {THEME_COLOR};
+                border-color: {THEME_COLOR};
+            }}
+        """
+        for btn in [getattr(self, 'btn_mode_welcome', None),
+                     getattr(self, 'btn_mode_play', None),
+                     getattr(self, 'btn_mode_edit', None),
+                     getattr(self, 'btn_mode_bumps', None)]:
+            if btn is not None:
+                try:
+                    btn.setStyleSheet(mode_btn_style)
+                except Exception:
+                    pass
+
+        try:
+            btn_season = getattr(getattr(self, 'play_mode_widget', None), 'btn_season', None)
+            if btn_season is not None:
+                btn_season.update()
+        except Exception:
+            pass
+
+    def set_gradient_scheme(self, name):
+        _set_gradient_scheme(name)
+        try:
+            self._settings['gradient_scheme'] = name
+            self._save_user_settings()
+        except Exception:
+            pass
+        try:
+            pm = getattr(self, 'play_mode_widget', None)
+            if pm is not None:
+                if hasattr(pm, '_apply_volume_slider_style'):
+                    pm._apply_volume_slider_style()
+        except Exception:
+            pass
+        try:
+            self._refresh_nav_bar_styles()
+        except Exception:
+            pass
+        try:
+            self.update()
+            for child in self.findChildren(QWidget):
+                try:
+                    child.update()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def set_normalize_audio_enabled(self, enabled: bool):
         self.normalize_audio_enabled = bool(enabled)
         try:
@@ -7756,6 +8452,7 @@ class MainWindow(QMainWindow):
             self._auto_config_worker.moveToThread(self._auto_config_thread)
 
             self._auto_config_thread.started.connect(self._auto_config_worker.run)
+            self._auto_config_worker.progress.connect(self.splash_progress)
             self._auto_config_worker.finished.connect(self._on_auto_config_finished)
             self._auto_config_worker.finished.connect(self._auto_config_thread.quit)
             self._auto_config_worker.finished.connect(self._auto_config_worker.deleteLater)
@@ -8514,6 +9211,17 @@ class MainWindow(QMainWindow):
              if not self.player.mpv.pause and not self.player.mpv.core_idle:
                  start_timer = True
         
+        # Don't start auto-hide timer while cursor is hovering over controls
+        if start_timer:
+            try:
+                cw = self.play_mode_widget.controls_widget
+                cursor_pos = QCursor.pos()
+                global_rect = QRect(cw.mapToGlobal(QPoint(0, 0)), cw.size())
+                if global_rect.contains(cursor_pos):
+                    start_timer = False
+            except Exception:
+                pass
+        
         self.play_mode_widget.controls_widget.setVisible(True)
 
         # Fullscreen: show cursor while controls are visible.
@@ -8546,12 +9254,18 @@ class MainWindow(QMainWindow):
         # Only hide if playing
         if hasattr(self, 'player') and self.player.mpv:
             if not self.player.mpv.pause and not self.player.mpv.core_idle:
-                 # Check if cursor is over controls?
-                 # If over controls, don't hide.
-                 controls_gm = self.play_mode_widget.controls_widget.geometry()
-                 # geometry is relative to play mode widget
-                 # map to global
-                 # simple check: just hide, moving mouse brings back
+                 # Don't hide if cursor is over controls — restart timer instead
+                 try:
+                     cw = self.play_mode_widget.controls_widget
+                     if cw.isVisible():
+                         cursor_pos = QCursor.pos()
+                         global_rect = QRect(cw.mapToGlobal(QPoint(0, 0)), cw.size())
+                         if global_rect.contains(cursor_pos):
+                             self.hover_timer.start()
+                             return
+                 except Exception:
+                     pass
+
                  self.play_mode_widget.controls_widget.setVisible(False)
 
                  # Fullscreen: hide cursor with the controls.
@@ -8944,6 +9658,7 @@ class MainWindow(QMainWindow):
 
         # 1. Sleepy Player
         app_menu = add_menu_btn("Sleepy Player")
+        self._nav_menus = [app_menu]
         
         about_action = QAction("About", self)
         about_action.triggered.connect(lambda: QMessageBox.information(self, "About", "Sleepy Shows Player v0.3"))
@@ -9026,7 +9741,7 @@ class MainWindow(QMainWindow):
                 border: none; 
                 font-size: 14px;
             }
-            QPushButton:hover { background-color: #0e1a77; }
+            QPushButton:hover { background-color: {THEME_COLOR}; }
         """)
         
         layout = QVBoxLayout(self.sleep_dropdown)
@@ -9251,8 +9966,14 @@ class MainWindow(QMainWindow):
         
         # If switching to Play mode (Index 2), refresh lists
         if index == 2:
-            self.play_mode_widget.refresh_playlists()
-            self.play_mode_widget.refresh_episode_list()
+            try:
+                self.play_mode_widget.refresh_playlists()
+            except Exception:
+                pass
+            try:
+                self.play_mode_widget.refresh_episode_list()
+            except Exception:
+                pass
             # If no playlist is loaded, ensure menu is open so user can pick one
             if not self.playlist_manager.current_playlist and not self.play_mode_widget.sidebar_visible:
                  self.play_mode_widget.toggle_sidebar()
@@ -9767,25 +10488,40 @@ class MainWindow(QMainWindow):
             pw = getattr(self, 'play_mode_widget', None)
             if pw is None:
                 return
-            base_style = "font-size: 14pt; font-weight: bold; background: transparent; border: none; "
+            base_style = "font-size: 10pt; font-weight: bold; background: transparent; border: none; "
+
+            def _narrow(widget):
+                try:
+                    return widget.width() < 100
+                except Exception:
+                    return False
+
             if hasattr(pw, 'btn_audio_track') and self.player:
                 tracks = self.player.get_audio_tracks()
+                narrow = _narrow(pw.btn_audio_track)
                 if len(tracks) > 1:
                     lang = self.player.get_current_audio_lang()
-                    pw.btn_audio_track.setText(lang)
-                    pw.btn_audio_track.setVisible(True)
+                    if narrow:
+                        pw.btn_audio_track.setText(f"LANG\n{lang[:4]}")
+                    else:
+                        pw.btn_audio_track.setText(f"Language:\n{lang}")
                 else:
-                    pw.btn_audio_track.setVisible(False)
+                    pw.btn_audio_track.setText("LANG\nN/A" if narrow else "Language:\nUnavailable")
             if hasattr(pw, 'btn_subtitle') and self.player:
                 tracks = self.player.get_subtitle_tracks()
+                narrow = _narrow(pw.btn_subtitle)
                 if tracks:
                     label, visible = self.player.get_current_subtitle_info()
-                    pw.btn_subtitle.setText(label)
-                    color = "#0e1a77" if visible else "white"
+                    if not visible:
+                        label = "Off"
+                    if narrow:
+                        pw.btn_subtitle.setText(f"CC\n{label[:4]}")
+                    else:
+                        pw.btn_subtitle.setText(f"Captions:\n{label}")
+                    color = THEME_COLOR if visible else "white"
                     pw.btn_subtitle.setStyleSheet(base_style + f"color: {color};")
-                    pw.btn_subtitle.setVisible(True)
                 else:
-                    pw.btn_subtitle.setVisible(False)
+                    pw.btn_subtitle.setText("CC\nN/A" if narrow else "Captions:\nUnavailable")
         except Exception:
             pass
 
@@ -9928,8 +10664,11 @@ class MainWindow(QMainWindow):
                     pass
                 
                 self.edit_mode_widget.refresh_playlist_list()
-                self.play_mode_widget.refresh_episode_list()
-                
+                try:
+                    self.play_mode_widget.refresh_episode_list()
+                except Exception:
+                    pass
+
                 self.set_mode(2) # Switch to play
                 
                 if auto_play:
@@ -10256,10 +10995,7 @@ class MainWindow(QMainWindow):
                 pass
             
             # Highlight in lists
-            # We can't easily highlight the sidebar list without refreshing or sophisticated mapping, 
-            # so just refresh the sidebar list to show ">" indicator
             self.play_mode_widget.refresh_episode_list()
-            self.play_mode_widget.episode_list_widget.setCurrentRow(index)
             
             if isinstance(item, dict):
                 itype = item.get('type', 'video')
@@ -13087,11 +13823,9 @@ if __name__ == "__main__":
         if platform.system().lower().startswith('win'):
             import ctypes
             try:
-                # Per-monitor v2 DPI awareness (best on modern Windows).
                 ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
             except Exception:
                 try:
-                    # Fallback for older Windows.
                     ctypes.windll.user32.SetProcessDPIAware()
                 except Exception:
                     pass
@@ -13103,32 +13837,74 @@ if __name__ == "__main__":
     loading = StartupLoadingScreen()
     loading.set_progress(0, "Starting...")
     loading.show()
-
-    # Let the splash paint before constructing the main window.
     try:
         app.processEvents()
     except Exception:
         pass
 
-    # The splash is intentionally an *artificial* load screen.
-    # Keep the UI responsive but block the app from constructing until it hits 100%.
+    loading.set_progress(2, "Initializing engine...")
+    window = MainWindow()
+    window.splash_progress.connect(loading.set_progress)
+
+    # Show the main window immediately so all widgets initialize properly.
+    # The splash overlays on top and will be closed once auto-config finishes.
+    window.show()
     try:
-        loading.run_blocking_fake_load(app, min_seconds=2.0, max_seconds=4.0)
+        app.processEvents()
     except Exception:
         pass
 
-    window = MainWindow()
+    loading.set_progress(3, "Scanning media...")
+    window._try_auto_populate_library()
 
-    # Show the main window, then close the splash immediately.
-    window.show()
+    loop = QEventLoop()
+    safety_timer = QTimer()
+    safety_timer.setSingleShot(True)
+    safety_timer.timeout.connect(loop.quit)
+    safety_timer.start(60000)
 
-    # Log startup sizing to a file (useful for packaged EXE where stdout isn't visible).
+    poll_timer = QTimer()
+    poll_timer.setInterval(80)
+    def _check_done():
+        if not getattr(window, '_auto_config_running', False):
+            loop.quit()
+    poll_timer.timeout.connect(_check_done)
+    poll_timer.start()
+
+    loop.exec()
+    poll_timer.stop()
+    safety_timer.stop()
+
+    loading.set_progress(100, "Ready")
+    try:
+        app.processEvents()
+    except Exception:
+        pass
+
+    try:
+        loading.close()
+    except Exception:
+        pass
+
+    # Start thumbnail generation in a background daemon thread
+    def _bg_thumbs():
+        missing = [(p, _thumbnail_cache_path(p)) for p in _collect_all_episode_paths()
+                   if not os.path.exists(_thumbnail_cache_path(p))]
+        for path, cpath in missing:
+            _generate_thumbnail_mpv(path, cpath)
+    t = threading.Thread(target=_bg_thumbs, daemon=True)
+    t.start()
+
+    try:
+        QTimer.singleShot(0, window._start_startup_ambient)
+    except Exception:
+        pass
+
     try:
         QTimer.singleShot(0, lambda: _append_startup_geometry_log(window))
     except Exception:
         pass
 
-    # Optional debug: print startup geometry/sizing to stdout.
     if os.getenv('SLEEPYSHOWS_DEBUG_GEOMETRY', '').strip() == '1':
         def _print_startup_geometry():
             try:
@@ -13148,7 +13924,6 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    # Start ambient only after the splash is gone.
     try:
         QTimer.singleShot(0, window._start_startup_ambient)
     except Exception:

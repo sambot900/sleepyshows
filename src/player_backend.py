@@ -156,11 +156,19 @@ class MpvPlayer(QWidget):
             self.mpv.panscan = 0.0
             self.mpv.video_unscaled = False
 
-            # On Linux, force X11 gpu-context so mpv embeds into the X11 window
-            # handle provided by Qt (which we force to xcb QPA in main.py).
+            # On Linux, force EGL gpu-context + disable hardware decoding to avoid
+            # per-frame corruption artifacts under XWayland.
             if sys.platform.startswith('linux'):
                 try:
+                    self.mpv['gpu-api'] = 'vulkan'
+                except Exception:
+                    pass
+                try:
                     self.mpv['gpu-context'] = 'x11'
+                except Exception:
+                    pass
+                try:
+                    self.mpv['hwdec'] = 'nvdec-copy'
                 except Exception:
                     pass
 
