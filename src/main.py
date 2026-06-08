@@ -95,6 +95,8 @@ SHOW_CATALOG = [
     {"name": "Supernatural",      "icon": "supernatural-icon.png", "type": "show", "shuffle_mode": "off",      "year": 2005},
     {"name": "Shark Tank",          "icon": "sharktank-icon.png",     "type": "show", "shuffle_mode": "season", "year": 2009},
     {"name": "Crocodile Hunter",     "icon": "crocodilehunter-icon.png", "type": "show", "shuffle_mode": "standard", "year": 1996},
+    {"name": "Dr. Stone",          "icon": "drstone-icon.png",     "type": "show", "shuffle_mode": "off",      "year": 2019},
+    {"name": "Mythbusters",       "icon": "mythbusters-icon.png", "type": "show", "shuffle_mode": "standard", "year": 2003},
     # Movies
     {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
     {"name": "Talladega Nights The Ballad Of Ricky Bobby (2006)", "icon": "talladega-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2006},
@@ -2131,6 +2133,12 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join('Shark Tank', 'Episodes'),
             os.path.join('Shark Tank'),
         ]),
+        ("Mythbusters", [
+            os.path.join('Shows', 'Mythbusters', 'Episodes'),
+            os.path.join('Shows', 'Mythbusters'),
+            os.path.join('Mythbusters', 'Episodes'),
+            os.path.join('Mythbusters'),
+        ]),
         # Movies
         ("Birdman (2014)", [
             os.path.join('Movies', 'Birdman (2014)'),
@@ -2482,6 +2490,12 @@ def auto_detect_show_folders_web(mount_roots_override):
             os.path.join('Shows', 'Shark Tank'),
             os.path.join('Shark Tank', 'Episodes'),
             os.path.join('Shark Tank'),
+        ]),
+        ("Mythbusters", [
+            os.path.join('Shows', 'Mythbusters', 'Episodes'),
+            os.path.join('Shows', 'Mythbusters'),
+            os.path.join('Mythbusters', 'Episodes'),
+            os.path.join('Mythbusters'),
         ]),
         # Movies
         ("Birdman (2014)", [
@@ -3146,6 +3160,11 @@ def _write_auto_playlist_json(
                 out['season_offsets']['season:3'] = 1.0
                 out['season_factors']['season:3'] = 1.5
                 out['season_factors']['season:11'] = 1.25
+                return out
+
+            if 'mythbusters' in name:
+                out['season_factors']['season:1'] = 2.0
+                out['season_factors']['season:2'] = 1.5
                 return out
 
             if "bob's burgers" in name or 'bobs burgers' in name or 'bob' in name:
@@ -5284,7 +5303,11 @@ class PlayModeWidget(QWidget):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
         """)
-        self.episode_list_widget.itemDoubleClicked.connect(self._on_episode_double_clicked)
+        self.episode_list_widget.itemClicked.connect(self._on_episode_clicked)
+        self.episode_list_widget.setMouseTracking(True)
+        self.episode_list_widget.itemEntered.connect(self._on_episode_hovered)
+        self.episode_list_widget.leaveEvent = self._episode_list_leave
+        self._hovered_episode_item = None
         side_layout.addWidget(self.episode_list_widget, 1)
 
         # Bottom: Close Menu
@@ -6195,7 +6218,7 @@ class PlayModeWidget(QWidget):
             prefix = "> " if i == current_idx else "  "
             self.episode_list_widget.addItem(f"{prefix}{name}")
 
-    def _on_episode_double_clicked(self, item):
+    def _on_episode_clicked(self, item):
         idx = item.data(Qt.UserRole)
         if idx is None:
             idx = self.episode_list_widget.row(item)
@@ -6204,6 +6227,57 @@ class PlayModeWidget(QWidget):
         except Exception:
             pass
         self.main_window.play_index(idx)
+        try:
+            self.main_window._persist_resume_state(force=True, reason='manual_episode_select')
+        except Exception:
+            pass
+
+    def _on_episode_hovered(self, item):
+        if item is None:
+            return
+        # Clear previous hover highlight.
+        prev = getattr(self, '_hovered_episode_item', None)
+        if prev is not None and prev is not item:
+            try:
+                prev_row = self.episode_list_widget.itemWidget(prev)
+            except Exception:
+                prev_row = None
+            if prev_row is not None:
+                try:
+                    idx = prev.data(Qt.UserRole)
+                    is_current = (idx == getattr(self.main_window.playlist_manager, 'current_index', -1))
+                except Exception:
+                    is_current = False
+                bg = "rgba(255,255,255,0.06)" if is_current else "transparent"
+                prev_row.setStyleSheet(f"background-color: {bg}; border: none; border-bottom: 1px solid #222;")
+        self._hovered_episode_item = item
+        try:
+            row = self.episode_list_widget.itemWidget(item)
+        except Exception:
+            row = None
+        if row is not None:
+            row.setStyleSheet("background-color: rgba(255,255,255,0.08); border: none; border-left: 3px solid #5a9ecf; border-bottom: 1px solid #222;")
+
+    def _episode_list_leave(self, event):
+        prev = getattr(self, '_hovered_episode_item', None)
+        if prev is not None:
+            try:
+                prev_row = self.episode_list_widget.itemWidget(prev)
+            except Exception:
+                prev_row = None
+            if prev_row is not None:
+                try:
+                    idx = prev.data(Qt.UserRole)
+                    is_current = (idx == getattr(self.main_window.playlist_manager, 'current_index', -1))
+                except Exception:
+                    is_current = False
+                bg = "rgba(255,255,255,0.06)" if is_current else "transparent"
+                prev_row.setStyleSheet(f"background-color: {bg}; border: none; border-bottom: 1px solid #222;")
+            self._hovered_episode_item = None
+        QListWidget.leaveEvent(self.episode_list_widget, event)
+
+    def _on_episode_double_clicked(self, item):
+        pass
 
     def _make_card_click_handler(self, playlist_idx):
         def handler(event):
@@ -6781,6 +6855,11 @@ class MainWindow(QMainWindow):
         # Playback diagnostics: JSONL event log (helps debug overnight stops).
         self._playback_log_path = os.path.join(_get_user_config_dir(), 'playback_events.jsonl')
         self._last_stop_reason = None
+
+        # Per-episode position tracking: preserves playback progress when
+        # the user skips away from an episode and later returns to it.
+        # Maps episode key (str) -> time position in seconds (float).
+        self._episode_positions: dict = {}
         self._last_stop_reason_at = None
 
         # Resume/recovery: persist the generated episode queue + position locally so we
@@ -7736,7 +7815,11 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
-        # Seek after playback has had a moment to load.
+        # Seek after the file is actually playing, not on a blind timer.
+        # A fixed 350 ms delay races against mpv's asynchronous file load
+        # and audio-device init; seeking too early can leave mpv in a
+        # broken state (video frame stuck, audio never initialised, or
+        # unresponsive pause toggle).
         try:
             pos_s = st.get('time_pos_s', None)
             pos_s = float(pos_s) if pos_s is not None else None
@@ -7744,13 +7827,140 @@ class MainWindow(QMainWindow):
             pos_s = None
         if pos_s is not None and pos_s > 0:
             seek_to = max(0.0, float(pos_s) - 3.0)
+            self._seek_when_playing(seek_to)
+
+    def _seek_when_playing(self, target: float, retries: int = 15, interval_ms: int = 100):
+        """Seek to *target* seconds once mpv has actually started playing.
+
+        mpv.loadfile / play is asynchronous: the file may still be loading
+        and the audio device may still be initialising 350 ms later.
+        Seeking before playback has started can leave mpv in a broken state
+        (stuck video frame, missing audio, unresponsive pause toggle).
+
+        This method polls ``time_pos`` every *interval_ms* until the
+        property is reported (indicating playback is underway) and then
+        issues the seek.  If playback never starts the seek is skipped.
+        """
+        try:
+            if not hasattr(self, 'player') or not self.player:
+                return
+            mpv_obj = getattr(self.player, 'mpv', None)
+            if mpv_obj is None:
+                return
+        except Exception:
+            return
+
+        if retries <= 0:
+            return
+
+        try:
+            time_pos = getattr(mpv_obj, 'time_pos', None)
+            duration = getattr(mpv_obj, 'duration', None)
+        except Exception:
+            time_pos = None
+            duration = None
+
+        if time_pos is not None and duration is not None:
             try:
-                QTimer.singleShot(350, lambda: self.player.seek(seek_to))
+                self.player.seek(float(target))
             except Exception:
-                try:
-                    self.player.seek(seek_to)
-                except Exception:
-                    pass
+                pass
+        elif time_pos is not None and time_pos > 0 and duration is None:
+            # Position is reporting but duration is still unknown —
+            # the file is actively playing. Seek anyway.
+            try:
+                self.player.seek(float(target))
+            except Exception:
+                pass
+        else:
+            # mpv is still loading — wait and retry.
+            try:
+                QTimer.singleShot(
+                    int(interval_ms),
+                    lambda: self._seek_when_playing(target, retries - 1, interval_ms),
+                )
+            except Exception:
+                pass
+
+    def _save_current_episode_position(self):
+        """Persist the current episode's time-pos to the in-memory
+        per-episode map. Called at the top of play_index() whenever
+        we are about to switch to a different episode."""
+        if getattr(self, '_in_bump_playback', False):
+            return
+        pm = getattr(self, 'playlist_manager', None)
+        if pm is None:
+            return
+        try:
+            idx = int(getattr(pm, 'current_index', -1) or -1)
+        except Exception:
+            return
+        if idx < 0:
+            return
+        try:
+            item = pm.current_playlist[idx]
+            if not pm.is_episode_item(item):
+                return
+        except Exception:
+            return
+        try:
+            path = pm._episode_path_for_index(idx)
+            if not path:
+                return
+            key = str(pm._norm_path_key(str(path or '')) or '')
+        except Exception:
+            return
+        if not key:
+            return
+
+        # Only save if the player is actually on this item (not a bump).
+        try:
+            last_target = str(getattr(self, '_last_play_target', '') or '').strip()
+            if last_target:
+                last_key = str(pm._norm_path_key(last_target) or '')
+                if key != last_key:
+                    return
+        except Exception:
+            pass
+
+        pos = None
+        try:
+            pos = self._last_time_pos
+        except Exception:
+            pos = None
+        if pos is None:
+            try:
+                if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
+                    pos = getattr(self.player.mpv, 'time_pos', None)
+            except Exception:
+                pos = None
+        if pos is not None and float(pos) > 0:
+            try:
+                self._episode_positions[key] = float(pos)
+            except Exception:
+                pass
+
+    def _maybe_restore_episode_position(self, target: str):
+        """If *target* has a saved per-episode position and the auto-resume
+        flow is NOT active, seek to it once mpv starts playing."""
+        if getattr(self, '_pending_auto_resume_state', None) is not None:
+            return
+        pm = getattr(self, 'playlist_manager', None)
+        if pm is None:
+            return
+        try:
+            key = str(pm._norm_path_key(str(target or '')) or '')
+        except Exception:
+            return
+        if not key:
+            return
+        try:
+            saved = self._episode_positions.get(key)
+        except Exception:
+            saved = None
+        if saved is not None and float(saved) > 0:
+            seek_to = max(0.0, float(saved) - 3.0)
+            self._seek_when_playing(seek_to)
 
     def _norm_match_path(self, p: str) -> str:
         try:
@@ -10960,6 +11170,10 @@ class MainWindow(QMainWindow):
         # New track start: clear per-start penalty bookkeeping.
         self._skip_penalty_applied_for_start = None
         if 0 <= index < len(pm.current_playlist):
+            # Save the current episode's position so we can restore it later
+            # if the user navigates back (skip-to-prev / play_previous).
+            self._save_current_episode_position()
+
             # Cut off startup ambient audio as soon as playback begins.
             self._stop_startup_ambient()
             self.stop_bump_playback()
@@ -11067,6 +11281,7 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
                     self.player.play(target)
+                    self._maybe_restore_episode_position(target)
                     self._played_since_start = True
                     QTimer.singleShot(200, self._update_track_button_labels)
                     prefix = "[IL]" if itype == 'interstitial' else ""
@@ -11120,6 +11335,7 @@ class MainWindow(QMainWindow):
                  except Exception:
                      pass
                  self.player.play(target)
+                 self._maybe_restore_episode_position(target)
                  self._played_since_start = True
                  self.setWindowTitle(f"Sleepy Shows - {os.path.basename(item)}")
                  try:
@@ -12991,7 +13207,12 @@ class MainWindow(QMainWindow):
             return
 
     def skip_to_previous_episode(self):
-        """Manual Previous: always go to the previous episode (no interludes/bumps)."""
+        """Manual Previous: always go to the previous episode (no interludes/bumps).
+
+        For non-shuffle (chronological) playlists, previous moves backward in
+        episode order.  For shuffle playlists, previous retraces the actual
+        playback history (the order the user heard episodes).
+        """
         pm = getattr(self, 'playlist_manager', None)
         if pm is None:
             return
@@ -13019,23 +13240,37 @@ class MainWindow(QMainWindow):
             pass
 
         prev_idx = -1
-        try:
-            prev_idx = pm.step_back_in_history_to_episode()
-        except Exception:
-            prev_idx = -1
 
-        if prev_idx == -1:
+        # Non-shuffle: previous means chronological order (not history).
+        try:
+            shuffle_mode = str(getattr(pm, 'shuffle_mode', 'off') or 'off')
+        except Exception:
+            shuffle_mode = 'off'
+
+        if shuffle_mode == 'off':
+            prev_idx = int(self._fallback_previous_episode_index())
+        else:
             try:
-                prev_idx = int(self._fallback_previous_episode_index())
+                prev_idx = pm.step_back_in_history_to_episode()
             except Exception:
                 prev_idx = -1
+            if prev_idx == -1:
+                try:
+                    prev_idx = int(self._fallback_previous_episode_index())
+                except Exception:
+                    prev_idx = -1
 
         if prev_idx == -1:
             return
 
-        # History navigation should not append new history entries.
+        record_history = True
+        # Chronological previous should not append a new history entry —
+        # we are simply walking the list.
+        if shuffle_mode == 'off':
+            record_history = False
+
         try:
-            self.play_index(int(prev_idx), record_history=False, bypass_bump_gate=True, suppress_ui=False)
+            self.play_index(int(prev_idx), record_history=record_history, bypass_bump_gate=True, suppress_ui=False)
         except Exception:
             return
 
