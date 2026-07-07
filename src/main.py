@@ -1299,26 +1299,119 @@ def _collect_all_episode_paths():
         pass
     return sorted(paths)
 
-def _generate_thumbnail_mpv(video_path, cache_path):
+def _generate_thumbnail_libmpv(video_path, cache_path, start_spec='15%'):
+    """Generate a thumbnail using the bundled libmpv (no external ffmpeg needed).
+
+    Renders a single frame via mpv's headless ``image`` video output. This is used
+    on platforms where ``ffmpeg``/``ffprobe`` are not on PATH (notably Windows
+    builds, which only bundle ``libmpv-2.dll``). Returns True on success.
+    """
+    tmp_dir = None
     try:
-        dur_result = subprocess.run([
-            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-            '-of', 'csv=p=0', video_path
-        ], capture_output=True, text=True, timeout=8)
-        dur = float(dur_result.stdout.strip())
-        ss = int(dur * 0.15)
+        import mpv
     except Exception:
-        ss = 180
+        return False
+
     try:
-        subprocess.run([
-            'ffmpeg', '-y', '-loglevel', 'error',
-            '-ss', str(ss), '-i', video_path,
-            '-vf', 'scale=320:-2',
-            '-vframes', '1',
-            cache_path
-        ], capture_output=True, timeout=25)
+        tmp_dir = tempfile.mkdtemp(prefix='ss-thumb-')
+    except Exception:
+        return False
+
+    player = None
+    try:
+        player = mpv.MPV(
+            vo='image',
+            quiet=True,
+            input_default_bindings=False,
+            input_vo_keyboard=False,
+            osc=False,
+        )
+        # Write a single scaled PNG frame to a temp dir, then move to the cache.
+        player['vo-image-format'] = 'png'
+        player['vo-image-outdir'] = tmp_dir
+        player['frames'] = 1
+        player['hr-seek'] = 'yes'
+        player['start'] = str(start_spec)
+        player['vf'] = 'scale=320:-2'
+        # Software decode keeps this reliable across GPU/driver combos.
+        try:
+            player['hwdec'] = 'no'
+        except Exception:
+            pass
+        player.play(video_path)
+        player.wait_for_playback()
     except Exception:
         pass
+    finally:
+        if player is not None:
+            try:
+                player.terminate()
+            except Exception:
+                pass
+
+    produced = False
+    try:
+        frames = sorted(f for f in os.listdir(tmp_dir) if f.lower().endswith('.png'))
+        if frames:
+            src = os.path.join(tmp_dir, frames[0])
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            except Exception:
+                pass
+            try:
+                shutil.copyfile(src, cache_path)
+                produced = os.path.exists(cache_path)
+            except Exception:
+                produced = False
+    except Exception:
+        produced = False
+
+    try:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+    return produced
+
+
+def _generate_thumbnail_mpv(video_path, cache_path):
+    # Prefer ffmpeg/ffprobe when available (fast, deterministic). These are
+    # typically present on Linux/macOS but NOT bundled with the Windows build,
+    # so fall back to the bundled libmpv when they're missing.
+    have_ffprobe = shutil.which('ffprobe') is not None
+    have_ffmpeg = shutil.which('ffmpeg') is not None
+
+    ss = 180
+    if have_ffprobe:
+        try:
+            dur_result = subprocess.run([
+                'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                '-of', 'csv=p=0', video_path
+            ], capture_output=True, text=True, timeout=8)
+            dur = float(dur_result.stdout.strip())
+            ss = int(dur * 0.15)
+        except Exception:
+            ss = 180
+
+    if have_ffmpeg:
+        try:
+            subprocess.run([
+                'ffmpeg', '-y', '-loglevel', 'error',
+                '-ss', str(ss), '-i', video_path,
+                '-vf', 'scale=320:-2',
+                '-vframes', '1',
+                cache_path
+            ], capture_output=True, timeout=25)
+        except Exception:
+            pass
+        if os.path.exists(cache_path):
+            return
+
+    # Fallback: use the bundled libmpv to render a single frame. When ffprobe was
+    # available we know the duration (seek by seconds); otherwise seek by percent.
+    start_spec = str(ss) if have_ffprobe else '15%'
+    _generate_thumbnail_libmpv(video_path, cache_path, start_spec=start_spec)
 
 def get_asset_path(filename):
     # Resolves asset path whether running as script or frozen exe
@@ -3640,8 +3733,9 @@ class AutoConfigWorker(QObject):
 
             self.progress.emit(25, "Scanning episode files...")
             # Build library scan in the worker so the UI thread stays responsive.
-            # Skip slow network scans in web mode - rely on existing playlist files
-            if sources and not roots:
+            # The configured media directory is a local folder, so scanning is
+            # cheap and required to populate the library (Browser) view.
+            if sources:
                 pm = PlaylistManager()
                 for folder in sources:
                     pm.add_source(folder)
@@ -3652,6 +3746,11 @@ class AutoConfigWorker(QObject):
             self.progress.emit(55, "Generating playlists...")
             updated = False
             # Write / refresh playlist JSONs for every catalog entry found on disk.
+            #
+            # Always rescan the detected (local) folder rather than reusing paths
+            # from an existing playlist file. Reusing stored paths would keep stale
+            # absolute paths from another machine/OS (e.g. Linux paths on Windows),
+            # which resolve to nothing and cause shows to silently fail to play.
             total = max(1, len(SHOW_CATALOG))
             for i, entry in enumerate(SHOW_CATALOG):
                 folder = show_folders.get(entry["name"])
@@ -3660,7 +3759,7 @@ class AutoConfigWorker(QObject):
                         f"{entry['name']}.json",
                         folder,
                         default_shuffle_mode=entry.get("shuffle_mode", "standard"),
-                        prefer_existing_playlist_paths=bool(roots),
+                        prefer_existing_playlist_paths=False,
                     ) or updated
                 if hasattr(self, 'progress'):
                     p = 55 + int((i + 1) / total * 30)
@@ -14143,19 +14242,18 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    if not platform.system().lower().startswith('win'):
-        all_paths = _collect_all_episode_paths()
-        missing = [(p, _thumbnail_cache_path(p)) for p in all_paths
-                   if not os.path.exists(_thumbnail_cache_path(p))]
-        total = len(missing)
-        for i, (path, cpath) in enumerate(missing):
-            pct = 88 + int((i + 1) / max(1, total) * 10)
-            loading.set_progress(min(98, pct), f"Thumbnails  {i+1}/{total}")
-            try:
-                app.processEvents()
-            except Exception:
-                pass
-            _generate_thumbnail_mpv(path, cpath)
+    all_paths = _collect_all_episode_paths()
+    missing = [(p, _thumbnail_cache_path(p)) for p in all_paths
+               if not os.path.exists(_thumbnail_cache_path(p))]
+    total = len(missing)
+    for i, (path, cpath) in enumerate(missing):
+        pct = 88 + int((i + 1) / max(1, total) * 10)
+        loading.set_progress(min(98, pct), f"Thumbnails  {i+1}/{total}")
+        try:
+            app.processEvents()
+        except Exception:
+            pass
+        _generate_thumbnail_mpv(path, cpath)
 
     loading.set_progress(100, "Ready")
     try:
