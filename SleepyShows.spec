@@ -1,8 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
+MAIN_SCRIPT = os.path.join('src', 'main.py')
+APP_ICON = os.path.join('assets', 'sleepy-ico.ico')
 
 a = Analysis(
-    ['src\\main.py'],
+    [MAIN_SCRIPT],
     pathex=[],
     binaries=[],
     datas=[('assets', 'assets')],
@@ -32,7 +36,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\sleepy-ico.ico'],
+    icon=[APP_ICON],
 )
 coll = COLLECT(
     exe,
