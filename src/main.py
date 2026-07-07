@@ -1019,6 +1019,10 @@ class BumpsModeWidget(QWidget):
         self.btn_play_history.clicked.connect(self.main_window.show_play_history_dialog)
         layout.addWidget(self.btn_play_history)
 
+        self.btn_auto_sleep_timer = QPushButton("Auto Sleep Timer…")
+        self.btn_auto_sleep_timer.clicked.connect(self.main_window.show_auto_sleep_timer_dialog)
+        layout.addWidget(self.btn_auto_sleep_timer)
+
         # --- Sound settings ---
         def add_toggle_row(label_text, initial_checked, on_toggle):
             row = QHBoxLayout()
@@ -1278,7 +1282,14 @@ def _get_thumbnails_dir():
 def _thumbnail_cache_path(video_path):
     return os.path.join(_get_thumbnails_dir(), f"{hashlib.md5(video_path.encode()).hexdigest()}.png")
 
-def _collect_all_episode_paths():
+def _collect_all_episode_paths(resolver=None):
+    """Return existing on-disk episode paths across all playlists.
+
+    ``resolver`` (optional) maps a stored playlist path to its actual on-disk
+    target (used to honor Web mode remapping). Existence is checked against the
+    resolved path so Web-mode shows are included, and the resolved path is what
+    gets returned/cached so it matches ``_load_thumbnail``.
+    """
     paths = set()
     playlists_dir = get_local_playlists_dir()
     try:
@@ -1286,18 +1297,168 @@ def _collect_all_episode_paths():
             if not f.lower().endswith('.json') or f == 'exposure_scores.json':
                 continue
             try:
-                with open(os.path.join(playlists_dir, f)) as fp:
+                with open(os.path.join(playlists_dir, f), encoding='utf-8') as fp:
                     data = json.load(fp)
             except Exception:
                 continue
             for item in data.get('playlist', []):
                 if isinstance(item, dict) and item.get('type') == 'video':
                     p = item.get('path', '')
+                    if not p:
+                        continue
+                    if resolver is not None:
+                        try:
+                            p = resolver(p)
+                        except Exception:
+                            pass
                     if p and os.path.exists(p):
                         paths.add(p)
     except Exception:
         pass
     return sorted(paths)
+
+
+_EPISODE_KEY_RE = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,2})')
+
+
+def _episode_key(name):
+    """Return a normalized ``SxxExx`` token from a filename, or None."""
+    m = _EPISODE_KEY_RE.search(str(name or ''))
+    if not m:
+        return None
+    return f"S{int(m.group(1)):02d}E{int(m.group(2)):02d}"
+
+
+def _reconcile_playlists_with_disk(window):
+    """Repair playlist entries whose filenames drifted from what's on disk.
+
+    For each playlist, entries that no longer resolve to an existing file are
+    re-matched to the real file by season/episode token (``SxxExx``) within the
+    show's folder, and the playlist JSON is rewritten. Only playlists that have
+    missing entries incur a directory scan, so a healthy library adds no cost
+    beyond cheap ``os.path.exists`` checks.
+
+    Returns the number of entries corrected.
+    """
+    try:
+        mode = str(getattr(window, 'playback_mode', 'portable') or 'portable').strip().lower()
+        files_root = str(getattr(window, 'web_files_root', '') or '').strip()
+        resolver = window._resolve_video_play_target
+    except Exception:
+        return 0
+
+    playlists_dir = get_local_playlists_dir()
+    try:
+        names = [f for f in os.listdir(playlists_dir)
+                 if f.lower().endswith('.json') and f != 'exposure_scores.json']
+    except Exception:
+        return 0
+
+    # Registry-based folder map handles whole-folder renames (e.g.
+    # "Bob's Burgers/Episodes" on disk as "Bobs Burgers"). Built once, lazily.
+    _show_folders_cache = {'value': None}
+
+    def _get_show_folders():
+        if _show_folders_cache['value'] is None:
+            folders = {}
+            try:
+                if mode == 'web' and files_root:
+                    folders = auto_detect_show_folders_web([files_root]) or {}
+            except Exception:
+                folders = {}
+            _show_folders_cache['value'] = folders
+        return _show_folders_cache['value']
+
+    def _store_form(actual_path):
+        # Prefer a portable, resolver-friendly relative form in Web mode.
+        if mode == 'web' and files_root:
+            try:
+                rel = os.path.relpath(actual_path, files_root)
+                if not rel.startswith('..'):
+                    return rel
+            except Exception:
+                pass
+        return actual_path
+
+    total_fixed = 0
+    for fname in names:
+        fpath = os.path.join(playlists_dir, fname)
+        try:
+            with open(fpath, 'r', encoding='utf-8') as fp:
+                data = json.load(fp)
+        except Exception:
+            continue
+
+        entries = data.get('playlist', [])
+        if not isinstance(entries, list) or not entries:
+            continue
+
+        missing = []          # (item, episode_key) for entries that don't resolve
+        good_dirs = set()     # directories of entries that DO resolve (self-heal source)
+        for item in entries:
+            if not isinstance(item, dict) or item.get('type') != 'video':
+                continue
+            raw = item.get('path', '')
+            if not raw:
+                continue
+            try:
+                resolved = resolver(raw)
+            except Exception:
+                resolved = raw
+            if resolved and os.path.exists(resolved):
+                good_dirs.add(os.path.dirname(resolved))
+            else:
+                missing.append((item, _episode_key(os.path.basename(str(raw)))))
+
+        if not missing:
+            continue
+
+        # Decide which directories to scan for replacement files.
+        search_dirs = list(good_dirs)
+        if not search_dirs:
+            show_name = os.path.splitext(fname)[0]
+            folder = _get_show_folders().get(show_name)
+            if folder and os.path.isdir(folder):
+                search_dirs.append(folder)
+        if not search_dirs:
+            continue
+
+        # Index actual files by episode key (scoped to this show; unique only).
+        by_key = {}
+        dup_keys = set()
+        for d in search_dirs:
+            try:
+                actual_files = _scan_episode_files(d, use_cache=False)
+            except Exception:
+                actual_files = []
+            for actual in actual_files:
+                k = _episode_key(os.path.basename(actual))
+                if not k:
+                    continue
+                if k in by_key and by_key[k] != actual:
+                    dup_keys.add(k)
+                by_key[k] = actual
+
+        fixed = 0
+        for item, key in missing:
+            if not key or key in dup_keys:
+                continue
+            actual = by_key.get(key)
+            if not actual:
+                continue
+            item['path'] = _store_form(actual)
+            fixed += 1
+
+        if fixed:
+            try:
+                with open(fpath, 'w', encoding='utf-8') as fp:
+                    json.dump(data, fp, indent=2)
+                total_fixed += fixed
+            except Exception:
+                pass
+
+    return total_fixed
+
 
 def _generate_thumbnail_libmpv(video_path, cache_path, start_spec='15%'):
     """Generate a thumbnail using the bundled libmpv (no external ffmpeg needed).
@@ -1321,6 +1482,12 @@ def _generate_thumbnail_libmpv(video_path, cache_path, start_spec='15%'):
     try:
         player = mpv.MPV(
             vo='image',
+            # Never emit sound while rendering frames. Without this, mpv opens a
+            # real audio output and plays each clip's audio during generation,
+            # producing choppy "ghost" audio on the splash screen.
+            ao='null',
+            audio='no',
+            mute=True,
             quiet=True,
             input_default_bindings=False,
             input_vo_keyboard=False,
@@ -1451,10 +1618,18 @@ class StartupLoadingScreen(QWidget):
             | Qt.Dialog
             | Qt.WindowStaysOnTopHint
         )
-        self.setAttribute(Qt.WA_StyledBackground, True)
+        # NOTE: Do NOT enable WA_StyledBackground here. Combined with our custom
+        # paintEvent gradient it makes Qt paint an opaque palette-colored backing
+        # behind each child widget, producing dark boxes behind the labels. The
+        # gradient is drawn entirely by paintEvent, so this attribute isn't needed.
 
         self._progress = 0
         self._status = "Starting..."
+        self._skip_requested = False
+        # Distinguishes a user-initiated close (abort/quit) from the normal
+        # programmatic close() we call once startup completes.
+        self._aborted = False
+        self._finishing = False
 
         self._tick_timer = None
         self._run_loop = None
@@ -1485,20 +1660,58 @@ class StartupLoadingScreen(QWidget):
 
         self.percent_label = QLabel("0%")
         self.percent_label.setAlignment(Qt.AlignCenter)
-        self.percent_label.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
+        self.percent_label.setStyleSheet("color: white; font-size: 16px; font-weight: bold; background: transparent;")
         layout.addWidget(self.percent_label, 0, Qt.AlignHCenter)
 
         self.status_label = QLabel(self._status)
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color: rgba(255,255,255,210); font-size: 14px;")
+        self.status_label.setMinimumWidth(420)
+        self.status_label.setStyleSheet("color: rgba(255,255,255,210); font-size: 14px; background: transparent;")
         layout.addWidget(self.status_label, 0, Qt.AlignHCenter)
+
+        # Optional "Skip" link, shown only during the (potentially long) thumbnail
+        # generation phase so the user can bypass it and load the app immediately.
+        self.skip_label = QLabel('<a href="#skip" style="color: rgba(255,255,255,170); text-decoration: underline;">Skip</a>')
+        self.skip_label.setAlignment(Qt.AlignCenter)
+        self.skip_label.setTextFormat(Qt.RichText)
+        self.skip_label.setOpenExternalLinks(False)
+        self.skip_label.setStyleSheet("font-size: 13px; background: transparent;")
+        self.skip_label.setCursor(Qt.PointingHandCursor)
+        self.skip_label.linkActivated.connect(self._on_skip_clicked)
+        self.skip_label.setVisible(False)
+        layout.addWidget(self.skip_label, 0, Qt.AlignHCenter)
 
         # Smaller default splash, with responsive logo scaling.
         self.setMinimumSize(520, 360)
         self.resize(620, 420)
 
         self._update_logo_pixmap()
+
+    def _on_skip_clicked(self, *args):
+        self._skip_requested = True
+        try:
+            self.skip_label.setText('<span style="color: rgba(255,255,255,120);">Skipping…</span>')
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        # If the user closes the splash (e.g. Alt+F4) while startup work is still
+        # running, treat it as an abort request so the blocking thumbnail loop
+        # stops and the process exits instead of continuing in the background.
+        if not getattr(self, '_finishing', False):
+            self._aborted = True
+        super().closeEvent(event)
+
+    def set_skip_visible(self, visible: bool):
+        try:
+            self.skip_label.setVisible(bool(visible))
+        except Exception:
+            pass
+
+    @property
+    def skip_requested(self) -> bool:
+        return bool(self._skip_requested)
 
     def resizeEvent(self, event):
         try:
@@ -4309,7 +4522,11 @@ class WelcomeScreen(QWidget):
         except Exception:
             pass
         try:
-            if self.is_sleep_on:
+            if bool(getattr(self.main_window, '_auto_sleep_enabled', False)):
+                # AUTO is armed by MainWindow and is "always on"; don't override it
+                # with a fixed countdown here.
+                pass
+            elif self.is_sleep_on:
                 self.main_window.start_sleep_timer(getattr(self.main_window, 'sleep_timer_default_minutes', 180))
             else:
                 self.main_window.cancel_sleep_timer()
@@ -4664,7 +4881,10 @@ class WelcomeScreen(QWidget):
         self.update_checkbox(self.btn_sleep_check, self.is_sleep_on, target_size=self._footer_checkbox_target_size)
         
         if self.is_sleep_on:
-            self.main_window.start_sleep_timer(180) 
+            if bool(getattr(self.main_window, '_auto_sleep_enabled', False)):
+                self.main_window.start_auto_sleep_timer()
+            else:
+                self.main_window.start_sleep_timer(180) 
         else:
             self.main_window.cancel_sleep_timer()
         try:
@@ -6518,6 +6738,12 @@ class PlayModeWidget(QWidget):
         return dur_str
 
     def _load_thumbnail(self, path):
+        # Resolve to the actual on-disk target (honors Web mode remapping) so the
+        # cache key and sidecar lookup match what thumbnail generation used.
+        try:
+            path = self.main_window._resolve_video_play_target(path)
+        except Exception:
+            pass
         cache_path = _thumbnail_cache_path(path)
         if os.path.exists(cache_path):
             pix = QPixmap(cache_path)
@@ -6682,6 +6908,10 @@ class MainWindow(QMainWindow):
         self.bump_videos_dir = self._settings.get('bump_videos_dir', None)
         self._tv_vibes_enabled_setting = bool(self._settings.get('tv_vibes_enabled', True))
         self._sleep_timer_enabled_setting = bool(self._settings.get('sleep_timer_enabled', True))
+        # Auto sleep timer: stops playback at a fixed local time (default 2:00 AM),
+        # recurring nightly. When disabled it never appears in the player controls.
+        self._auto_sleep_enabled = bool(self._settings.get('auto_sleep_enabled', False))
+        self._auto_sleep_time = str(self._settings.get('auto_sleep_time', '02:00') or '02:00')
         # Prefer the new key name, but keep backward compatibility.
         self._interstitials_dir = str(self._settings.get('interlude_folder', self._settings.get('interstitial_folder', '')) or '').strip()
         # One-time migration: if the legacy key exists, copy it to the new key.
@@ -6897,6 +7127,14 @@ class MainWindow(QMainWindow):
         # Sleep timer — all state and tick logic lives in the controller.
         self.sleep_timer = SleepTimerController(self, default_minutes=180)
         self.sleep_timer.expired.connect(self.on_sleep_timer)
+        # Apply the persisted AUTO target time and, when the feature is enabled,
+        # arm AUTO so it is "always on" and recurs nightly without user action.
+        try:
+            self.sleep_timer.set_auto_target(self._auto_sleep_time)
+            if self._auto_sleep_enabled:
+                self.sleep_timer.start_auto()
+        except Exception:
+            pass
         
         # Mouse Hover Timer
         self.hover_timer = QTimer(self)
@@ -10088,7 +10326,9 @@ class MainWindow(QMainWindow):
         # State Checking
         is_active = bool(self.sleep_timer_active)
         active_mins = int(self.current_sleep_minutes) if hasattr(self, 'current_sleep_minutes') else 0
-        
+        auto_on = bool(getattr(self, '_auto_sleep_enabled', False))
+        auto_active = bool(getattr(self, 'sleep_timer_auto_active', False))
+
         # Cache icons so update_sleep_menu_state() can reuse them.
         self._sleep_check_icon = QIcon(get_asset_path("check.png"))
         self._sleep_empty_icon = QIcon()
@@ -10098,6 +10338,7 @@ class MainWindow(QMainWindow):
 
         # Track buttons so we can update checkmarks while the dropdown is open.
         self._sleep_dropdown_buttons = {}
+        self._sleep_dropdown_auto_btn = None
         
         # Helper to add item
         def add_item(text, is_checked, callback, minutes_value=None):
@@ -10114,6 +10355,13 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _=False: callback())
             btn.clicked.connect(lambda _=False: self.sleep_dropdown.close())
             layout.addWidget(btn)
+            return btn
+
+        # 0. Auto (only when enabled in Settings)
+        if auto_on:
+            auto_label = f"Auto ({self.sleep_timer.auto_time_label()})"
+            self._sleep_dropdown_auto_btn = add_item(
+                auto_label, auto_active, lambda: self.start_auto_sleep_timer())
 
         # 1. Off
         add_item("Off", not is_active, lambda: self.cancel_sleep_timer(), minutes_value=0)
@@ -10129,7 +10377,7 @@ class MainWindow(QMainWindow):
             else:
                 label = f"{mins} Minutes"
                 
-            is_checked = is_active and (mins == active_mins)
+            is_checked = is_active and (not auto_active) and (mins == active_mins)
             add_item(label, is_checked, lambda m=mins: self.start_sleep_timer(m), minutes_value=mins)
             
         # Position it
@@ -10169,7 +10417,8 @@ class MainWindow(QMainWindow):
     def cycle_sleep_timer_quick(self):
         """Cycle sleep timer duration on single press.
 
-        Order: 3h -> 2h -> 1.5h -> 1h -> 30m -> OFF -> (back to 3h)
+        Order (AUTO only shown when enabled in Settings):
+        AUTO -> 3h -> 2h -> 1.5h -> 1h -> 30m -> OFF -> (back to AUTO)
         The dropdown picker remains available from the top menu.
         """
         try:
@@ -10180,27 +10429,35 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            steps = [180, 120, 90, 60, 30, 0]
+            auto_on = bool(getattr(self, '_auto_sleep_enabled', False))
+            steps = (['AUTO'] if auto_on else []) + [180, 120, 90, 60, 30, 0]
+
             is_active = bool(getattr(self, 'sleep_timer_active', False))
-            cur = int(getattr(self, 'current_sleep_minutes', 0) or 0)
+            auto_active = bool(getattr(self, 'sleep_timer_auto_active', False))
 
             if not is_active:
-                nxt = steps[0]
+                cur = 0  # OFF
+            elif auto_active:
+                cur = 'AUTO'
             else:
-                if cur in steps:
-                    i = steps.index(cur)
-                    nxt = steps[(i + 1) % len(steps)]
-                else:
-                    # If current is non-standard, choose the next lower standard step.
-                    nxt = 0
-                    for m in steps:
-                        if m == 0:
-                            continue
-                        if cur > m:
-                            nxt = m
-                            break
+                cur = int(getattr(self, 'current_sleep_minutes', 0) or 0)
 
-            if nxt <= 0:
+            if cur in steps:
+                i = steps.index(cur)
+                nxt = steps[(i + 1) % len(steps)]
+            else:
+                # Non-standard current value: pick the next lower standard step.
+                nxt = 0
+                for m in steps:
+                    if not isinstance(m, int) or m == 0:
+                        continue
+                    if isinstance(cur, int) and cur > m:
+                        nxt = m
+                        break
+
+            if nxt == 'AUTO':
+                self.start_auto_sleep_timer()
+            elif nxt == 0:
                 self.cancel_sleep_timer()
             else:
                 self.start_sleep_timer(nxt)
@@ -10223,6 +10480,11 @@ class MainWindow(QMainWindow):
 
             is_active = bool(getattr(self, 'sleep_timer_active', False))
             active_mins = int(getattr(self, 'current_sleep_minutes', 0) or 0)
+            auto_active = bool(getattr(self, 'sleep_timer_auto_active', False))
+
+            auto_btn = getattr(self, '_sleep_dropdown_auto_btn', None)
+            if auto_btn is not None:
+                auto_btn.setIcon(check_icon if auto_active else empty_icon)
 
             for mins, btn in list(self._sleep_dropdown_buttons.items()):
                 if btn is None:
@@ -10231,7 +10493,7 @@ class MainWindow(QMainWindow):
                 if mins == 0:
                     is_checked = not is_active
                 else:
-                    is_checked = is_active and (mins == active_mins)
+                    is_checked = is_active and (not auto_active) and (mins == active_mins)
 
                 btn.setIcon(check_icon if is_checked else empty_icon)
         except Exception:
@@ -10289,6 +10551,110 @@ class MainWindow(QMainWindow):
                 self._save_user_settings()
         except Exception:
             pass
+
+    # --- Auto sleep timer (stop at a fixed local time, recurring nightly) ---
+
+    @property
+    def auto_sleep_enabled(self) -> bool:
+        return bool(getattr(self, '_auto_sleep_enabled', False))
+
+    @property
+    def sleep_timer_auto_active(self) -> bool:
+        return bool(self.sleep_timer.auto_active)
+
+    def start_auto_sleep_timer(self):
+        self.sleep_timer.start_auto()
+
+    def set_auto_sleep_settings(self, enabled: bool, time_str: str):
+        """Persist the AUTO sleep settings and arm/disarm accordingly."""
+        enabled = bool(enabled)
+        time_str = str(time_str or '02:00')
+        self._auto_sleep_enabled = enabled
+        self._auto_sleep_time = time_str
+        try:
+            self._settings['auto_sleep_enabled'] = enabled
+            self._settings['auto_sleep_time'] = time_str
+            self._save_user_settings()
+        except Exception:
+            pass
+
+        self.sleep_timer.set_auto_target(time_str)
+        if enabled:
+            # "Always on": arm AUTO immediately so the user can rely on it.
+            self.sleep_timer.start_auto()
+        else:
+            # Feature turned off: disarm only if AUTO is the active mode so we
+            # don't clobber an in-progress fixed countdown.
+            if self.sleep_timer.auto_active:
+                self.sleep_timer.cancel()
+            try:
+                self._update_sleep_timer_ui()
+            except Exception:
+                pass
+
+    def show_auto_sleep_timer_dialog(self):
+        from PySide6.QtWidgets import QTimeEdit
+        from PySide6.QtCore import QTime
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Auto Sleep Timer")
+        dlg.setModal(True)
+
+        root = QVBoxLayout(dlg)
+        root.setContentsMargins(24, 24, 24, 24)
+        root.setSpacing(16)
+
+        info = QLabel(
+            "Automatically stop playback at a set local time each night.\n"
+            "Once enabled it stays on and recurs nightly \u2014 no need to reset it."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 14px; color: #e0e0e0;")
+        root.addWidget(info)
+
+        enable_row = QHBoxLayout()
+        enable_row.setContentsMargins(0, 0, 0, 0)
+        enable_row.setSpacing(10)
+        enable_toggle = ToggleSwitch()
+        enable_toggle.setChecked(bool(getattr(self, '_auto_sleep_enabled', False)))
+        enable_lbl = QLabel("Enable auto sleep timer")
+        enable_lbl.setStyleSheet("font-size: 16px; color: white;")
+        enable_row.addWidget(enable_toggle)
+        enable_row.addWidget(enable_lbl)
+        enable_row.addStretch(1)
+        root.addLayout(enable_row)
+
+        time_row = QHBoxLayout()
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.setSpacing(10)
+        time_lbl = QLabel("Stop playback at:")
+        time_lbl.setStyleSheet("font-size: 16px; color: white;")
+        time_edit = QTimeEdit()
+        time_edit.setDisplayFormat("h:mm AP")
+        h, m = SleepTimerController._parse_time_str(getattr(self, '_auto_sleep_time', '02:00'))
+        time_edit.setTime(QTime(h, m))
+        time_edit.setStyleSheet("font-size: 14px; padding: 4px 8px;")
+        time_row.addWidget(time_lbl)
+        time_row.addWidget(time_edit)
+        time_row.addStretch(1)
+        root.addLayout(time_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_cancel = QPushButton("Cancel")
+        btn_save = QPushButton("Save")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_save.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_save)
+        root.addLayout(btn_row)
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        t = time_edit.time()
+        time_str = f"{t.hour():02d}:{t.minute():02d}"
+        self.set_auto_sleep_settings(enable_toggle.isChecked(), time_str)
 
     def set_mode(self, index):
         self.mode_stack.setCurrentIndex(index)
@@ -14143,11 +14509,26 @@ class MainWindow(QMainWindow):
             self._set_stop_reason('sleep_timer_fired')
         except Exception:
             pass
+        # Capture whether this was an AUTO fire before stopping playback.
+        was_auto = bool(self.sleep_timer.auto_active)
+
         self.stop_playback()
         self.set_mode(0) # Go to Welcome
 
-        # Ensure internal state + UI reflects Off after timer fires.
-        self.cancel_sleep_timer()
+        if was_auto:
+            # AUTO is "always on": keep it armed for the next night. The
+            # controller already advanced its next trigger before firing.
+            try:
+                self._update_sleep_timer_ui()
+            except Exception:
+                pass
+            try:
+                self.update_sleep_menu_state()
+            except Exception:
+                pass
+        else:
+            # Ensure internal state + UI reflects Off after a countdown fires.
+            self.cancel_sleep_timer()
 
     def closeEvent(self, event):
         try:
@@ -14236,31 +14617,63 @@ if __name__ == "__main__":
     poll_timer.stop()
     safety_timer.stop()
 
+    loading.set_progress(86, "Verifying media...")
+    try:
+        app.processEvents()
+    except Exception:
+        pass
+    try:
+        _reconcile_playlists_with_disk(window)
+    except Exception:
+        pass
+
     loading.set_progress(88, "Generating thumbnails...")
     try:
         app.processEvents()
     except Exception:
         pass
 
-    all_paths = _collect_all_episode_paths()
+    all_paths = _collect_all_episode_paths(resolver=window._resolve_video_play_target)
     missing = [(p, _thumbnail_cache_path(p)) for p in all_paths
                if not os.path.exists(_thumbnail_cache_path(p))]
     total = len(missing)
+    if total:
+        loading.set_skip_visible(True)
+    user_quit = False
     for i, (path, cpath) in enumerate(missing):
+        # If the user closed the splash/main window during generation, abort the
+        # loop immediately so no work continues in the background after close.
+        if getattr(loading, '_aborted', False) or not window.isVisible():
+            user_quit = True
+            break
+        if getattr(loading, 'skip_requested', False):
+            break
         pct = 88 + int((i + 1) / max(1, total) * 10)
-        loading.set_progress(min(98, pct), f"Thumbnails  {i+1}/{total}")
+        loading.set_progress(min(98, pct), f"Generating thumbnails  {i+1}/{total}")
         try:
             app.processEvents()
         except Exception:
             pass
         _generate_thumbnail_mpv(path, cpath)
 
+    if user_quit:
+        # User asked to close during startup: shut down cleanly rather than
+        # proceeding to show the app.
+        loading._finishing = True
+        try:
+            loading.close()
+        except Exception:
+            pass
+        sys.exit(0)
+
+    loading.set_skip_visible(False)
     loading.set_progress(100, "Ready")
     try:
         app.processEvents()
     except Exception:
         pass
 
+    loading._finishing = True
     try:
         loading.close()
     except Exception:

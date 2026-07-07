@@ -45,6 +45,8 @@ def path_to_web_files_path(path: str, web_files_root: str) -> str:
     - Relative paths are treated as relative to the data root.
     - If the path contains 'Sleepy Shows Data', strip everything up to that marker
       and re-root under web_files_root.
+    - An absolute path that is already under files_root (or exists on disk) is used
+      as-is, preserving its directory structure.
     - URLs are not supported; if the path looks like a URL, it is treated as an opaque
       string and will fall back to basename.
     """
@@ -71,11 +73,33 @@ def path_to_web_files_path(path: str, web_files_root: str) -> str:
     except Exception:
         pass
 
-    if not rel:
+    if rel:
+        rel = rel.replace('\\', os.sep).replace('/', os.sep)
         try:
-            rel = os.path.basename(p)
+            return os.path.normpath(os.path.join(data_root, rel))
         except Exception:
-            rel = p
+            return os.path.join(data_root, rel)
+
+    # No re-root mapping was derived: the path is absolute and carries no
+    # data-root marker. It may already be a correct on-disk path (e.g. a portable
+    # path that itself lives under files_root). Prefer it as-is rather than
+    # discarding its directory structure and collapsing to the bare filename.
+    try:
+        norm_p = os.path.normpath(p)
+        norm_root = os.path.normpath(files_root)
+        if os.path.exists(norm_p):
+            return norm_p
+        root_prefix = (norm_root + os.sep).lower()
+        if norm_p.lower() == norm_root.lower() or norm_p.lower().startswith(root_prefix):
+            return norm_p
+    except Exception:
+        pass
+
+    # Fallback: re-root the bare filename under the data root.
+    try:
+        rel = os.path.basename(p)
+    except Exception:
+        rel = p
 
     rel = rel.replace('\\', os.sep).replace('/', os.sep)
     try:

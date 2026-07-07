@@ -81,6 +81,17 @@ function Invoke-Python([string[]]$PythonCmdArgs) {
 $repoRoot = (Resolve-Path "$PSScriptRoot/..").Path
 Set-Location $repoRoot
 
+# Guard: a running instance locks dist\SleepyShows\SleepyShows.exe, which makes
+# PyInstaller's COLLECT step silently fail to overwrite dist/ — leaving a stale
+# build behind. Fail loudly with a clear message instead.
+$running = Get-Process -Name "SleepyShows" -ErrorAction SilentlyContinue
+if ($running) {
+    throw "SleepyShows is currently running (PID $($running.Id -join ', ')). Close it before building, or PyInstaller cannot update dist/."
+}
+
+# Record when the build started so we can verify dist/ was actually refreshed.
+$buildStarted = Get-Date
+
 if ($Clean) {
     if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
     if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
@@ -106,7 +117,13 @@ if (-not (Test-Path $venvPython)) {
 
 # 3) Build app (folder-based dist)
 # Note: on Windows, PyInstaller --add-data uses a semicolon: source;dest
-& $venvPython -m PyInstaller --name "SleepyShows" --windowed --noconsole --icon "assets/sleepy-ico.ico" --add-data "assets;assets" src/main.py
+# --noconfirm is REQUIRED: without it PyInstaller prompts before replacing an
+# existing dist/ folder, and a non-interactive run answers "no" — silently
+# leaving a stale build in dist/. --clean drops cached intermediates.
+& $venvPython -m PyInstaller --noconfirm --clean --name "SleepyShows" --windowed --noconsole --icon "assets/sleepy-ico.ico" --add-data "assets;assets" src/main.py
+if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
 
 # 4) Extract MPV + copy libmpv-2.dll into dist
 $extractDir = Join-Path $env:TEMP "sleepyshows-mpv"
@@ -157,6 +174,19 @@ if ((Split-Path -Leaf $srcDll) -ieq "mpv-2.dll") {
 
 Copy-Item -Force -Path $srcDll -Destination (Join-Path $DistDir $destDllName)
 
+# Verify dist/ was actually refreshed by this run. If the exe predates the build
+# start, the COLLECT step didn't overwrite dist/ (e.g. locked files) and the user
+# would unknowingly run stale code.
+$distExe = Join-Path $DistDir "SleepyShows.exe"
+if (-not (Test-Path $distExe)) {
+    throw "Build did not produce $distExe."
+}
+$distExeTime = (Get-Item $distExe).LastWriteTime
+if ($distExeTime -lt $buildStarted) {
+    throw "dist/ was NOT updated by this build ($distExe is dated $distExeTime, before build start $buildStarted). PyInstaller likely failed to overwrite a stale dist/. Close any running SleepyShows instance and re-run, or use -Clean."
+}
+
 Write-Host "Done." -ForegroundColor Green
 Write-Host "Built: $DistDir"
+Write-Host "dist exe updated: $distExeTime"
 Write-Host "Copied: libmpv-2.dll"
