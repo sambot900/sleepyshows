@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 
 MAIN_SCRIPT = os.path.join('src', 'main.py')
 APP_ICON = os.path.join('assets', 'sleepy-ico.ico')
+HOOKS_DIR = os.path.abspath('hooks')
+EXE_ICON = [APP_ICON] if (sys.platform.startswith('win') or sys.platform == 'darwin') else None
 
 a = Analysis(
     [MAIN_SCRIPT],
@@ -11,7 +14,7 @@ a = Analysis(
     binaries=[],
     datas=[('assets', 'assets')],
     hiddenimports=[],
-    hookspath=[],
+    hookspath=[HOOKS_DIR],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],
@@ -36,7 +39,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=[APP_ICON],
+    icon=EXE_ICON,
 )
 coll = COLLECT(
     exe,

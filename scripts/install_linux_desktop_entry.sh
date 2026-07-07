@@ -44,11 +44,11 @@ echo "Installed icon: $icon_dir_256/sleepyshows.png"
 for size in 128 64 48; do
   icon_dir_sized="$hicolor_base/${size}x${size}/apps"
   mkdir -p "$icon_dir_sized"
-  if command -v convert &>/dev/null; then
-    convert "$icon_src" -resize "${size}x${size}" "$icon_dir_sized/sleepyshows.png"
-    echo "Installed icon: $icon_dir_sized/sleepyshows.png"
-  elif command -v magick &>/dev/null; then
+  if command -v magick &>/dev/null; then
     magick "$icon_src" -resize "${size}x${size}" "$icon_dir_sized/sleepyshows.png"
+    echo "Installed icon: $icon_dir_sized/sleepyshows.png"
+  elif command -v convert &>/dev/null; then
+    convert "$icon_src" -resize "${size}x${size}" "$icon_dir_sized/sleepyshows.png"
     echo "Installed icon: $icon_dir_sized/sleepyshows.png"
   fi
 done

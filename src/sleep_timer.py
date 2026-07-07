@@ -170,7 +170,13 @@ class SleepTimerController(QObject):
             self._timer.stop()
 
     def _resume_if_needed(self) -> None:
-        if not self.active or self.remaining_ms <= 0:
+        if not self.active:
+            self._pause()
+            return
+
+        # In AUTO mode, remaining_ms is intentionally 0; gate countdown-only
+        # expiry checks to countdown mode so the AUTO wall-clock trigger can run.
+        if self.mode != 'auto' and self.remaining_ms <= 0:
             self._pause()
             return
         if not self._is_show_playing():
