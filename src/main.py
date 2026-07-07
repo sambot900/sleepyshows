@@ -14143,18 +14143,19 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-    all_paths = _collect_all_episode_paths()
-    missing = [(p, _thumbnail_cache_path(p)) for p in all_paths
-               if not os.path.exists(_thumbnail_cache_path(p))]
-    total = len(missing)
-    for i, (path, cpath) in enumerate(missing):
-        pct = 88 + int((i + 1) / max(1, total) * 10)
-        loading.set_progress(min(98, pct), f"Thumbnails  {i+1}/{total}")
-        try:
-            app.processEvents()
-        except Exception:
-            pass
-        _generate_thumbnail_mpv(path, cpath)
+    if not platform.system().lower().startswith('win'):
+        all_paths = _collect_all_episode_paths()
+        missing = [(p, _thumbnail_cache_path(p)) for p in all_paths
+                   if not os.path.exists(_thumbnail_cache_path(p))]
+        total = len(missing)
+        for i, (path, cpath) in enumerate(missing):
+            pct = 88 + int((i + 1) / max(1, total) * 10)
+            loading.set_progress(min(98, pct), f"Thumbnails  {i+1}/{total}")
+            try:
+                app.processEvents()
+            except Exception:
+                pass
+            _generate_thumbnail_mpv(path, cpath)
 
     loading.set_progress(100, "Ready")
     try:
