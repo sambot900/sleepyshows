@@ -97,8 +97,11 @@ SHOW_CATALOG = [
     {"name": "Crocodile Hunter",     "icon": "crocodilehunter-icon.png", "type": "show", "shuffle_mode": "standard", "year": 1996},
     {"name": "Dr. Stone",          "icon": "drstone-icon.png",     "type": "show", "shuffle_mode": "off",      "year": 2019},
     {"name": "Mythbusters",       "icon": "mythbusters-icon.png", "type": "show", "shuffle_mode": "standard", "year": 2003},
+    {"name": "Trailer Park Boys", "icon": "tpb-icon.png",         "type": "show", "shuffle_mode": "off",      "year": 2001},
     # Movies
     {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
+    {"name": "Scooby-Doo and the Ghoul School (1988)", "icon": "sd-ghool-school-icon.png", "type": "movie", "shuffle_mode": "off", "year": 1988},
+    {"name": "Scooby-Doo on Zombie Island (1998)", "icon": "sd-zombie-island-icon.png", "type": "movie", "shuffle_mode": "off", "year": 1998},
     {"name": "Talladega Nights The Ballad Of Ricky Bobby (2006)", "icon": "talladega-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2006},
     {"name": "Zootopia 2 (2025)", "icon": "zootopia2-icon.png", "type": "movie", "shuffle_mode": "off", "year": 2025},
 ]
@@ -2281,6 +2284,18 @@ def auto_detect_default_show_sources(volume_label='T7'):
         if not mount_root or not os.path.isdir(mount_root):
             return
 
+        # If the selected root is already a single show folder (for example,
+        # .../Shows/Trailer Park Boys), map it directly.
+        try:
+            root_name = os.path.basename(os.path.normpath(str(mount_root or '')))
+            if root_name and _looks_like_show_folder(mount_root):
+                for show_name, _rels in show_patterns:
+                    if root_name == show_name:
+                        found[show_name] = os.path.normpath(mount_root)
+                        break
+        except Exception:
+            pass
+
         # Prefer the new top-level folder if present, but keep backward compatibility.
         data_root = os.path.join(mount_root, 'Sleepy Shows Data')
         roots_to_probe = []
@@ -2445,12 +2460,35 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join('Mythbusters', 'Episodes'),
             os.path.join('Mythbusters'),
         ]),
+        ("Trailer Park Boys", [
+            os.path.join('Shows', 'Trailer Park Boys', 'Episodes'),
+            os.path.join('Shows', 'Trailer Park Boys'),
+            os.path.join('Trailer Park Boys', 'Episodes'),
+            os.path.join('Trailer Park Boys'),
+            # Common abbreviation fallback
+            os.path.join('Shows', 'TPB', 'Episodes'),
+            os.path.join('Shows', 'TPB'),
+            os.path.join('TPB', 'Episodes'),
+            os.path.join('TPB'),
+        ]),
         # Movies
         ("Birdman (2014)", [
             os.path.join('Movies', 'Birdman (2014)'),
             os.path.join('Movies', 'Birdman'),
             os.path.join('Birdman (2014)'),
             os.path.join('Birdman'),
+        ]),
+        ("Scooby-Doo and the Ghoul School (1988)", [
+            os.path.join('Movies', 'Scooby-Doo and the Ghoul School (1988)'),
+            os.path.join('Movies', 'Scooby-Doo and the Ghoul School'),
+            os.path.join('Scooby-Doo and the Ghoul School (1988)'),
+            os.path.join('Scooby-Doo and the Ghoul School'),
+        ]),
+        ("Scooby-Doo on Zombie Island (1998)", [
+            os.path.join('Movies', 'Scooby-Doo on Zombie Island (1998)'),
+            os.path.join('Movies', 'Scooby-Doo on Zombie Island'),
+            os.path.join('Scooby-Doo on Zombie Island (1998)'),
+            os.path.join('Scooby-Doo on Zombie Island'),
         ]),
         ("Talladega Nights The Ballad Of Ricky Bobby (2006)", [
             os.path.join('Movies', 'Talladega Nights The Ballad Of Ricky Bobby (2006)'),
@@ -2472,6 +2510,18 @@ def auto_detect_show_folders(volume_label='T7'):
     def probe_mount(mount_root):
         if not mount_root or not os.path.isdir(mount_root):
             return
+
+        # If the selected root is already a single show folder (for example,
+        # .../Shows/Trailer Park Boys), map it directly.
+        try:
+            root_name = os.path.basename(os.path.normpath(str(mount_root or '')))
+            if root_name and _looks_like_show_folder(mount_root):
+                for show_name, _rels in show_patterns:
+                    if root_name == show_name:
+                        found[show_name] = os.path.normpath(mount_root)
+                        break
+        except Exception:
+            pass
 
         # Prefer the new top-level folder if present, but keep backward compatibility.
         data_root = os.path.join(mount_root, 'Sleepy Shows Data')
@@ -2803,12 +2853,35 @@ def auto_detect_show_folders_web(mount_roots_override):
             os.path.join('Mythbusters', 'Episodes'),
             os.path.join('Mythbusters'),
         ]),
+        ("Trailer Park Boys", [
+            os.path.join('Shows', 'Trailer Park Boys', 'Episodes'),
+            os.path.join('Shows', 'Trailer Park Boys'),
+            os.path.join('Trailer Park Boys', 'Episodes'),
+            os.path.join('Trailer Park Boys'),
+            # Common abbreviation fallback
+            os.path.join('Shows', 'TPB', 'Episodes'),
+            os.path.join('Shows', 'TPB'),
+            os.path.join('TPB', 'Episodes'),
+            os.path.join('TPB'),
+        ]),
         # Movies
         ("Birdman (2014)", [
             os.path.join('Movies', 'Birdman (2014)'),
             os.path.join('Movies', 'Birdman'),
             os.path.join('Birdman (2014)'),
             os.path.join('Birdman'),
+        ]),
+        ("Scooby-Doo and the Ghoul School (1988)", [
+            os.path.join('Movies', 'Scooby-Doo and the Ghoul School (1988)'),
+            os.path.join('Movies', 'Scooby-Doo and the Ghoul School'),
+            os.path.join('Scooby-Doo and the Ghoul School (1988)'),
+            os.path.join('Scooby-Doo and the Ghoul School'),
+        ]),
+        ("Scooby-Doo on Zombie Island (1998)", [
+            os.path.join('Movies', 'Scooby-Doo on Zombie Island (1998)'),
+            os.path.join('Movies', 'Scooby-Doo on Zombie Island'),
+            os.path.join('Scooby-Doo on Zombie Island (1998)'),
+            os.path.join('Scooby-Doo on Zombie Island'),
         ]),
         ("Talladega Nights The Ballad Of Ricky Bobby (2006)", [
             os.path.join('Movies', 'Talladega Nights The Ballad Of Ricky Bobby (2006)'),
@@ -3913,20 +3986,16 @@ class AutoConfigWorker(QObject):
         try:
             self.progress.emit(5, "Detecting drives...")
             roots = _normalize_mount_roots_override(getattr(self, 'mount_roots_override', None))
-            if roots:
-                show_folders = auto_detect_show_folders_web(roots)
-                result['tv_vibe_scripts_dir'] = auto_detect_tv_vibe_scripts_dir_web(roots)
-                result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir_web(roots)
-                result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir_web(roots)
-                result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir_web(roots)
-                result['tv_vibe_interstitials_dir'] = auto_detect_tv_vibe_interstitials_dir_web(roots)
-            else:
-                show_folders = auto_detect_show_folders(volume_label=self.volume_label)
-                result['tv_vibe_scripts_dir'] = auto_detect_tv_vibe_scripts_dir(volume_label=self.volume_label)
-                result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir(volume_label=self.volume_label)
-                result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir(volume_label=self.volume_label)
-                result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir(volume_label=self.volume_label)
-                result['tv_vibe_interstitials_dir'] = auto_detect_tv_vibe_interstitials_dir(volume_label=self.volume_label)
+            if not roots:
+                self.finished.emit(result)
+                return
+
+            show_folders = auto_detect_show_folders_web(roots)
+            result['tv_vibe_scripts_dir'] = auto_detect_tv_vibe_scripts_dir_web(roots)
+            result['tv_vibe_music_dir'] = auto_detect_tv_vibe_music_dir_web(roots)
+            result['tv_vibe_images_dir'] = auto_detect_tv_vibe_images_dir_web(roots)
+            result['tv_vibe_audio_fx_dir'] = auto_detect_tv_vibe_audio_fx_dir_web(roots)
+            result['tv_vibe_interstitials_dir'] = auto_detect_tv_vibe_interstitials_dir_web(roots)
             sources = []
             for key in ("King of the Hill", "Bob's Burgers", "Squidbillies", "Aqua Teen Hunger Force"):
                 p = show_folders.get(key)
@@ -4352,6 +4421,35 @@ class WelcomeScreen(QWidget):
         self._catalog_filter = "all"
         self._filter_group[0][1].setChecked(True)
 
+        toolbar.addSpacing(16)
+
+        search_label = QLabel("Search:")
+        search_label.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 13px; background: transparent;")
+        toolbar.addWidget(search_label)
+
+        self._catalog_search = ""
+        self._catalog_search_input = QLineEdit()
+        self._catalog_search_input.setPlaceholderText("Type to filter...")
+        self._catalog_search_input.setClearButtonEnabled(True)
+        self._catalog_search_input.setFixedHeight(28)
+        self._catalog_search_input.setMinimumWidth(220)
+        self._catalog_search_input.setStyleSheet(
+            "QLineEdit {"
+            " background: rgba(255,255,255,0.08);"
+            " color: rgba(255,255,255,0.92);"
+            " border: 1px solid rgba(255,255,255,0.18);"
+            " border-radius: 12px;"
+            " padding: 4px 10px;"
+            " font-size: 13px;"
+            "}"
+            "QLineEdit:focus {"
+            " border: 1px solid rgba(255,255,255,0.35);"
+            " background: rgba(255,255,255,0.12);"
+            "}"
+        )
+        self._catalog_search_input.textChanged.connect(self._set_catalog_search)
+        toolbar.addWidget(self._catalog_search_input)
+
         toolbar.addStretch(1)
         self._toolbar_layout = toolbar
         self._scroll_layout.addLayout(toolbar)
@@ -4546,6 +4644,28 @@ class WelcomeScreen(QWidget):
             btn.setChecked(fk == filter_key)
         self._rebuild_catalog()
 
+    def _set_catalog_search(self, text):
+        self._catalog_search = str(text or '').strip().lower()
+
+        # While searching, keep the grid anchored to the same left offset so
+        # narrowing results does not recenter the whole content on each keypress.
+        try:
+            q_active = bool(self._catalog_search)
+            if q_active:
+                if getattr(self, '_catalog_search_anchor_offset', None) is None:
+                    anchor = getattr(self, '_last_grid_offset', -1)
+                    if not isinstance(anchor, int) or anchor < 0:
+                        anchor = int(getattr(self._catalog_flow, '_content_left_margin', 0) or 0)
+                    self._catalog_search_anchor_offset = max(0, int(anchor))
+                self._catalog_flow._forced_left_offset = int(self._catalog_search_anchor_offset)
+            else:
+                self._catalog_search_anchor_offset = None
+                self._catalog_flow._forced_left_offset = None
+        except Exception:
+            pass
+
+        self._rebuild_catalog()
+
     def _rebuild_catalog(self):
         """Remove all widgets from the catalog flow, re-add them sorted/filtered."""
         # Detach every button from the flow without destroying them.
@@ -4568,6 +4688,10 @@ class WelcomeScreen(QWidget):
         if available:
             entries = [e for e in entries if e["name"] in available]
 
+        q = str(getattr(self, '_catalog_search', '') or '').strip().lower()
+        if q:
+            entries = [e for e in entries if q in str(e.get("name", "")).lower()]
+
         sort_key = getattr(self, '_catalog_sort', 'az')
         if sort_key == 'az':
             entries.sort(key=lambda e: e["name"].lower())
@@ -4583,11 +4707,11 @@ class WelcomeScreen(QWidget):
                 btn.setParent(self._catalog_flow_widget)
                 btn.show()
 
-        # Show a helpful message when the catalog is empty after filtering.
-        if not entries and available:
-            self._catalog_label.setText(
-                "Movies & Shows — connect a drive with media to get started"
-            )
+        # Show a helpful message when the catalog is empty after filtering/search.
+        if not entries and q:
+            self._catalog_label.setText("Movies & Shows — no matches")
+        elif not entries and available:
+            self._catalog_label.setText("Movies & Shows — connect a drive with media to get started")
         else:
             self._catalog_label.setText("Movies & Shows")
 
@@ -6936,37 +7060,10 @@ class MainWindow(QMainWindow):
         # Single media directory: if set, used as the root for all show/movie/TV Vibe detection.
         self.media_directory = str(self._settings.get('media_directory', '') or '').strip()
 
-        # Playback topology
-        # - portable: play local files from the external drive (auto-detected by volume label)
-        # - web: play from a network filesystem root (SMB/UNC mounted as a local folder)
-        configured_mode = str(self._settings.get('playback_mode', 'portable') or 'portable').strip().lower()
-        if configured_mode not in {'portable', 'web'}:
-            configured_mode = 'portable'
-
-        # Use the configured mode as-is.  Do NOT auto-switch to web just
-        # because the portable drive is absent — the user may simply not have
-        # plugged it in yet.
-        self.playback_mode = configured_mode
-
-        # Persist the effective mode so UI + next launch match reality.
-        # (If the drive comes/goes, this will flip accordingly on next launch.)
-        try:
-            if self._settings.get('playback_mode') != self.playback_mode:
-                self._settings['playback_mode'] = self.playback_mode
-                self._save_user_settings()
-        except Exception:
-            pass
-
-        # Web mode configuration (filesystem/mount based).
-        # Optional network/mounted filesystem root for Web mode (SMB/UNC path or mounted folder).
-        # If set, the app can resolve relative playlist paths into this root.
+        # Legacy playback topology keys are kept for backward compatibility,
+        # but runtime behavior is now media_directory-only.
+        self.playback_mode = 'local'
         self.web_files_root = str(self._settings.get('web_files_root', '') or '').strip()
-
-        # Best-effort auto-defaults so switching to Web mode "just works" on a typical LAN.
-        # Users can override in Settings.
-        if self.playback_mode == 'web':
-            self._ensure_web_defaults()
-        # Web mode is filesystem-only; no remote playlist plumbing.
 
         try:
             self.playlist_manager.bump_manager.bump_images_dir = self.bump_images_dir
@@ -6986,13 +7083,6 @@ class MainWindow(QMainWindow):
         except Exception:
             vdir = ''
 
-        # In Web mode, re-root an old absolute path under the configured Web Files Root.
-        try:
-            if vdir and self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
-                vdir = self._path_to_web_files_path(str(vdir))
-        except Exception:
-            pass
-
         needs_autofix = False
         try:
             if not vdir:
@@ -7010,16 +7100,6 @@ class MainWindow(QMainWindow):
                 media_dir = str(getattr(self, 'media_directory', '') or '').strip()
                 if media_dir and os.path.isdir(media_dir):
                     detected = auto_detect_tv_vibe_videos_dir_web([media_dir])
-                elif self._is_web_mode():
-                    wfr = str(getattr(self, 'web_files_root', '') or '').strip()
-                    if wfr:
-                        detected = auto_detect_tv_vibe_videos_dir_web([wfr])
-                        if not detected:
-                            wd = self._web_data_root_for_files_root(wfr)
-                            if wd:
-                                candidate = os.path.join(str(wd), 'TV Vibe', 'videos')
-                                if os.path.isdir(candidate):
-                                    detected = candidate
                 else:
                     detected = auto_detect_tv_vibe_videos_dir(volume_label=str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7'))
             except Exception:
@@ -7062,13 +7142,6 @@ class MainWindow(QMainWindow):
         except Exception:
             inter_dir = ''
 
-        # In Web mode, re-root a stored absolute path under the configured Web Files Root.
-        try:
-            if inter_dir and self._is_web_mode() and str(getattr(self, 'web_files_root', '') or '').strip():
-                inter_dir = self._path_to_web_files_path(str(inter_dir))
-        except Exception:
-            pass
-
         # When media_directory is set, always re-derive interludes from it
         # so the path stays in sync with the canonical media root.
         inter_needs_autofix = False
@@ -7093,10 +7166,6 @@ class MainWindow(QMainWindow):
                 media_dir = str(getattr(self, 'media_directory', '') or '').strip()
                 if media_dir and os.path.isdir(media_dir):
                     detected_inter = auto_detect_tv_vibe_interstitials_dir_web([media_dir])
-                elif self._is_web_mode():
-                    wfr = str(getattr(self, 'web_files_root', '') or '').strip()
-                    if wfr:
-                        detected_inter = auto_detect_tv_vibe_interstitials_dir_web([wfr])
                 else:
                     detected_inter = auto_detect_tv_vibe_interstitials_dir(volume_label=str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7'))
             except Exception:
@@ -7312,14 +7381,7 @@ class MainWindow(QMainWindow):
         self._bump_prefetch_lock = threading.Lock()
 
         # Optional outro audio (<outro ... audio>): pick a random sound from this folder.
-        self._outro_sounds_dir = os.path.join('/media', 'tyler', 'T7', 'Sleepy Shows Data', 'TV Vibe', 'outro sounds')
-        try:
-            if self._is_web_mode():
-                wd = self._web_data_root_for_files_root(str(getattr(self, 'web_files_root', '') or '').strip())
-                if wd:
-                    self._outro_sounds_dir = os.path.join(wd, 'TV Vibe', 'outro sounds')
-        except Exception:
-            pass
+        self._outro_sounds_dir = ''
 
         # Apply audio normalization as early as possible.
         try:
@@ -8590,11 +8652,10 @@ class MainWindow(QMainWindow):
             pass
 
     def set_web_mode_enabled(self, enabled: bool):
-        self.playback_mode = 'web' if bool(enabled) else 'portable'
+        # Legacy UI hook. Runtime is media_directory-only.
+        self.playback_mode = 'local'
         try:
-            self._settings['playback_mode'] = self.playback_mode
-            if self.playback_mode == 'web':
-                self._ensure_web_defaults()
+            self._settings['playback_mode'] = 'local'
             self._save_user_settings()
         except Exception:
             pass
@@ -8613,175 +8674,16 @@ class MainWindow(QMainWindow):
             pass
 
     def _ensure_web_defaults(self):
-        """Fill in sane Web mode defaults if settings are empty."""
-        try:
-            # Skip slow network detection if manifest exists - just use config
-            manifest_path = os.path.join(get_local_playlists_dir(), 'network_manifest.json')
-            if os.path.exists(manifest_path):
-                # Manifest exists - use configured web_files_root or default
-                if not str(getattr(self, 'web_files_root', '') or '').strip():
-                    system = platform.system().lower()
-                    if system.startswith('win'):
-                        self.web_files_root = r'Z:\\Sleepy Shows Data'
-                    elif system == 'darwin':
-                        self.web_files_root = '/Volumes/shows/Sleepy Shows Data'
-                    else:
-                        self.web_files_root = '/mnt/shows/Sleepy Shows Data'
-                    self._settings['web_files_root'] = self.web_files_root
-                return
-            
-            # Default Web mode to filesystem-based playback via a mounted share.
-            # Users can override this in Settings.
-            if not str(getattr(self, 'web_files_root', '') or '').strip():
-                label = str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
-                detected = self._detect_web_files_root(label)
-                if detected:
-                    self.web_files_root = detected
-                else:
-                    system = platform.system().lower()
-                    if system.startswith('win'):
-                        self.web_files_root = r'Z:\\Sleepy Shows Data'
-                    elif system == 'darwin':
-                        self.web_files_root = '/Volumes/shows/Sleepy Shows Data'
-                    else:
-                        self.web_files_root = '/mnt/shows/Sleepy Shows Data'
-                self._settings['web_files_root'] = self.web_files_root
-
-            try:
-                self._maybe_autofix_web_files_root()
-            except Exception:
-                pass
-
-            # Legacy HTTP defaults are no longer auto-filled because Web mode is
-            # intended to be filesystem-based.
-            # (We keep the settings keys for compatibility with older configs.)
-
-        except Exception:
-            return
+        # Legacy no-op: runtime no longer uses web-mode defaults.
+        return
 
     def _maybe_autofix_web_files_root(self):
-        """If Web mode is active and the configured root isn't accessible, auto-switch to a detected root."""
-        try:
-            if not self._is_web_mode():
-                return
-        except Exception:
-            return
-
-        if self._web_files_root_accessible():
-            return
-
-        try:
-            label = str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
-        except Exception:
-            label = 'T7'
-
-        detected = self._detect_web_files_root(label)
-        if not detected:
-            return
-
-        # Persist and refresh UI.
-        try:
-            self.set_web_files_root(detected)
-        except Exception:
-            # Fallback minimal persistence.
-            self.web_files_root = detected
-            try:
-                self._settings['web_files_root'] = detected
-                self._save_user_settings()
-            except Exception:
-                pass
+        return
 
     def _detect_web_files_root_candidates(self, volume_label: str) -> list[str]:
-        """Return best-effort cross-platform candidates for a mounted library root.
-
-        Candidates may point at (or contain) 'Sleepy Shows Data'.
-        """
-        try:
-            label = str(volume_label or 'T7').strip() or 'T7'
-        except Exception:
-            label = 'T7'
-
-        candidates: list[str] = []
-        system = ''
-        try:
-            system = platform.system().lower()
-        except Exception:
-            system = ''
-
-        # Universal likely locations (fast checks only).
-        candidates.extend([
-            '/mnt/shows/Sleepy Shows Data',
-            '/mnt/shows',
-            '/Volumes/shows/Sleepy Shows Data',
-        ])
-
-        if system.startswith('win'):
-            # Common mapped-drive convention.
-            candidates.extend([
-                r'Z:\\Sleepy Shows Data',
-                r'Z:\\',
-            ])
-            # Check other drive letters for a root-level folder.
-            for letter in 'ZYXWVUTSRQPONMLKJIHGFEDCBA':
-                try:
-                    drive = f'{letter}:\\'
-                    candidates.append(os.path.join(drive, 'Sleepy Shows Data'))
-                except Exception:
-                    continue
-        elif system == 'darwin':
-            # macOS volume mounts.
-            for base in ('/Volumes',):
-                try:
-                    candidates.append(os.path.join(base, label, 'Sleepy Shows Data'))
-                except Exception:
-                    pass
-                try:
-                    candidates.append(os.path.join(base, label))
-                except Exception:
-                    pass
-        else:
-            # Linux mounts.
-            for base in ('/media', '/run/media'):
-                # Label-based (fast and targeted).
-                for pattern in (
-                    os.path.join(base, '*', label, 'Sleepy Shows Data'),
-                    os.path.join(base, '*', label),
-                ):
-                    try:
-                        candidates.extend(sorted(glob.glob(pattern)))
-                    except Exception:
-                        pass
-                # Fallback: any mounted volume that contains the folder.
-                try:
-                    pattern = os.path.join(base, '*', '*', 'Sleepy Shows Data')
-                    candidates.extend(sorted(glob.glob(pattern)))
-                except Exception:
-                    pass
-
-        # Keep order but de-dup.
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for p in candidates:
-            if not p:
-                continue
-            try:
-                normalized = os.path.normpath(str(p))
-            except Exception:
-                normalized = str(p)
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            ordered.append(normalized)
-        return ordered
+        return []
 
     def _detect_web_files_root(self, volume_label: str) -> str:
-        """Return the first accessible Web Files Root candidate."""
-        for p in self._detect_web_files_root_candidates(volume_label):
-            try:
-                if os.path.isdir(p) and os.access(p, os.R_OK):
-                    return p
-            except Exception:
-                continue
         return ''
 
     def set_web_files_root(self, path: str):
@@ -8804,14 +8706,10 @@ class MainWindow(QMainWindow):
         return web_mode_paths.web_data_root_for_files_root(files_root)
 
     def _path_to_web_files_path(self, path: str) -> str:
-        """Best-effort conversion from a playlist path to an on-filesystem path under web_files_root."""
-        return web_mode_paths.path_to_web_files_path(path, str(getattr(self, 'web_files_root', '') or '').strip())
+        return str(path or '')
 
     def _is_web_mode(self) -> bool:
-        try:
-            return str(getattr(self, 'playback_mode', 'portable') or 'portable').strip().lower() == 'web'
-        except Exception:
-            return False
+        return False
 
     def _effective_web_data_root(self) -> str:
         """Return the effective 'Sleepy Shows Data' root for the configured Web Files Root."""
@@ -8827,104 +8725,13 @@ class MainWindow(QMainWindow):
             return ''
 
     def _web_files_root_accessible(self) -> bool:
-        """Best-effort check that Web mode's filesystem root is mounted and readable."""
-        try:
-            wfr = str(getattr(self, 'web_files_root', '') or '').strip()
-        except Exception:
-            wfr = ''
-        if not wfr:
-            return False
-
-        # In web mode, check if manifest exists instead of checking network paths
-        # This avoids slow/hanging network operations during startup
-        try:
-            manifest_path = os.path.join(get_local_playlists_dir(), 'network_manifest.json')
-            if os.path.exists(manifest_path):
-                return True
-        except Exception:
-            pass
-
-        try:
-            data_root = str(self._effective_web_data_root() or '')
-        except Exception:
-            data_root = ''
-
-        candidates = []
-        if wfr:
-            candidates.append(wfr)
-        if data_root and data_root not in candidates:
-            candidates.append(data_root)
-
-        for p in candidates:
-            try:
-                if os.path.isdir(p) and os.access(p, os.R_OK):
-                    return True
-            except Exception:
-                continue
         return False
 
     def _warn_web_files_root_unavailable_once(self, *, context: str):
-        """Warn once per run if Web Files Root isn't accessible (avoids popup spam)."""
-        if not self._is_web_mode():
-            return
-
-        # Best-effort auto-fix before warning.
-        try:
-            self._maybe_autofix_web_files_root()
-        except Exception:
-            pass
-
-        if self._web_files_root_accessible():
-            return
-
-        if self._web_files_root_accessible():
-            return
-
-        if bool(getattr(self, '_web_files_root_unavailable_warned', False)):
-            return
-        self._web_files_root_unavailable_warned = True
-
-        try:
-            wfr = str(getattr(self, 'web_files_root', '') or '').strip()
-        except Exception:
-            wfr = ''
-        try:
-            data_root = str(self._effective_web_data_root() or '')
-        except Exception:
-            data_root = ''
-
-        suggestions = []
-        try:
-            label = str(getattr(self, 'auto_config_volume_label', 'T7') or 'T7').strip() or 'T7'
-            for sug in self._detect_web_files_root_candidates(label)[:6]:
-                if sug and sug not in (wfr, data_root):
-                    suggestions.append(sug)
-        except Exception:
-            suggestions = []
-
-        extra = ''
-        if suggestions:
-            extra = "\n\nSuggested Web Files Root (detected):\n" + "\n".join(suggestions)
-
-        msg = (
-            "Web mode is enabled, but the Web Files Root is not accessible.\n\n"
-            f"Context: {context}\n\n"
-            f"Web Files Root: {wfr or '(not set)'}\n"
-            f"Expected data root: {data_root or '(unknown)'}\n\n"
-            "Mount the share (SMB/UNC) in your OS and/or update Settings → Web Files Root."
-            f"{extra}"
-        )
-
-        # Log silently — never block the UI with a modal pop-up on startup.
-        print(f"[web-mode] {msg}")
+        return
 
     def _resolve_video_play_target(self, path: str) -> str:
-        """Return the string mpv should play for an episode/interstitial."""
-        return web_mode_paths.resolve_video_play_target(
-            path,
-            str(getattr(self, 'playback_mode', 'portable') or 'portable'),
-            str(getattr(self, 'web_files_root', '') or ''),
-        )
+        return str(path or '')
 
     def _inventory_available_shows(self, result):
         """Determine which shows in SHOW_CATALOG have accessible media content.
@@ -8980,34 +8787,18 @@ class MainWindow(QMainWindow):
             if getattr(self, '_auto_config_running', False):
                 return
 
-            # Determine mount roots to probe:
-            # 1. media_directory (single user-configured path) takes priority
-            # 2. Web mode uses web_files_root
-            # 3. Portable mode falls back to volume label detection
+            # Runtime auto-config is media_directory-only.
             mount_roots = None
             try:
                 media_dir = str(getattr(self, 'media_directory', '') or '').strip()
                 if media_dir and os.path.isdir(media_dir):
                     mount_roots = [media_dir]
-                elif self._is_web_mode():
-                    try:
-                        self._maybe_autofix_web_files_root()
-                    except Exception:
-                        pass
-                    wfr = str(getattr(self, 'web_files_root', '') or '').strip()
-                    if wfr:
-                        if not self._web_files_root_accessible():
-                            self._warn_web_files_root_unavailable_once(context='auto-config')
-                            self._auto_config_running = False
-                            return
-                        mount_roots = [wfr]
-                    else:
-                        # Web mode requires a configured/mounted root.
-                        self._warn_web_files_root_unavailable_once(context='auto-config (no Web Files Root set)')
-                        self._auto_config_running = False
-                        return
             except Exception:
                 mount_roots = None
+
+            if not mount_roots:
+                self._auto_config_running = False
+                return
 
             self._auto_config_running = True
 
