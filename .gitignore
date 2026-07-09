@@ -29,20 +29,10 @@ _geom_err.txt
 # Script-generated scratch
 scripts/_tmp_bumps/
 
-# Auto-generated playlists (contain machine-specific absolute paths)
-playlists/Bob's Burgers.json
-playlists/King of the Hill.json
-playlists/Squidbillies.json
-playlists/Aqua Teen Hunger Force.json
-
-# Local runtime state / caches (machine-specific)
-playlists/exposure_scores.json
-playlists/network_manifest.json
-playlists/episodes_manifest.json
-playlists/index.json
+# Auto-generated playlists & thumbnails (contain machine-specific absolute paths)
+playlists/
+thumbnails/
 
 # Windows runtime binaries (downloaded locally)
 # (We source libmpv-2.dll from the archive in drivers/ via scripts/windows_build.ps1)
 libmpv-2.dll
-
-playlists/.scan_cache/
