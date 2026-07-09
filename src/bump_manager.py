@@ -2533,37 +2533,73 @@ class BumpManager:
             except Exception:
                 return None
 
+        # Holds the single reused headless probe instance for this scan.
+        _probe = {'player': None, 'disabled': False}
+
         def _mpv_duration_ms(path: str, *, timeout_s: float = 2.5) -> int | None:
-            # Best-effort headless probe; slower than ffprobe.
+            # Reuse a single headless mpv instance for the whole scan. Creating
+            # and terminating a fresh libmpv instance per file races python-mpv's
+            # per-instance event thread and crashes on Windows (access violation).
+            # One long-lived instance, terminated once, avoids that churn.
+            #
+            # On Windows, spinning up libmpv on a background worker thread while
+            # the main player's libmpv is live crashes reliably (access violation
+            # in mpv's event thread). ffprobe already covers precise durations
+            # when available, and otherwise the main player reports the duration
+            # when the clip actually plays, so skip the in-process probe here.
+            if os.name == 'nt':
+                _probe['disabled'] = True
+                return None
+            if _probe['disabled']:
+                return None
+            player = _probe['player']
+            if player is None:
+                try:
+                    import mpv  # type: ignore
+                except Exception:
+                    _probe['disabled'] = True
+                    return None
+                try:
+                    player = mpv.MPV(
+                        input_default_bindings=False,
+                        input_vo_keyboard=False,
+                        osc=False,
+                        vo='null',
+                        ao='null',
+                    )
+                    try:
+                        player.keep_open = 'yes'
+                    except Exception:
+                        pass
+                    try:
+                        player.pause = True
+                    except Exception:
+                        pass
+                except Exception:
+                    _probe['disabled'] = True
+                    try:
+                        if player is not None:
+                            player.terminate()
+                    except Exception:
+                        pass
+                    return None
+                _probe['player'] = player
+
+            want = os.path.basename(str(path))
             try:
-                import mpv  # type: ignore
+                player.play(str(path))
             except Exception:
                 return None
 
-            player = None
-            try:
-                player = mpv.MPV(
-                    input_default_bindings=False,
-                    input_vo_keyboard=False,
-                    osc=False,
-                    vo='null',
-                    ao='null',
-                )
+            t0 = time.monotonic()
+            while (time.monotonic() - t0) < float(timeout_s):
+                # Only trust the duration once mpv reports the file we asked for,
+                # otherwise we may read a stale value from the previous probe.
                 try:
-                    player.keep_open = 'no'
+                    fn = getattr(player, 'filename', None)
                 except Exception:
-                    pass
-                try:
-                    player.pause = True
-                except Exception:
-                    pass
-                try:
-                    player.play(str(path))
-                except Exception:
-                    return None
-
-                t0 = time.monotonic()
-                while (time.monotonic() - t0) < float(timeout_s):
+                    fn = None
+                if fn and os.path.basename(str(fn)) == want:
                     try:
                         d = getattr(player, 'duration', None)
                     except Exception:
@@ -2575,12 +2611,16 @@ class BumpManager:
                                 return int(round(dur * 1000.0))
                         except Exception:
                             pass
-                    time.sleep(0.03)
-                return None
-            finally:
+                time.sleep(0.03)
+            return None
+
+        def _probe_cleanup():
+            player = _probe.get('player')
+            _probe['player'] = None
+            _probe['disabled'] = True
+            if player is not None:
                 try:
-                    if player is not None:
-                        player.terminate()
+                    player.terminate()
                 except Exception:
                     pass
 
@@ -2631,25 +2671,30 @@ class BumpManager:
                             continue
             except Exception:
                 pass
+            finally:
+                _probe_cleanup()
         else:
-            base_depth = folder_path.rstrip(os.sep).count(os.sep)
-            for root, dirs, files in os.walk(folder_path):
-                if _time_exceeded():
-                    break
-
-                if max_depth_v is not None:
-                    depth = root.rstrip(os.sep).count(os.sep) - base_depth
-                    if depth >= max_depth_v:
-                        dirs[:] = []
-
-                for f in files:
+            try:
+                base_depth = folder_path.rstrip(os.sep).count(os.sep)
+                for root, dirs, files in os.walk(folder_path):
                     if _time_exceeded():
                         break
-                    if max_files_v is not None and scanned >= max_files_v:
-                        dirs[:] = []
-                        break
-                    if os.path.splitext(f)[1].lower() in video_exts:
-                        _note(os.path.join(root, f))
+
+                    if max_depth_v is not None:
+                        depth = root.rstrip(os.sep).count(os.sep) - base_depth
+                        if depth >= max_depth_v:
+                            dirs[:] = []
+
+                    for f in files:
+                        if _time_exceeded():
+                            break
+                        if max_files_v is not None and scanned >= max_files_v:
+                            dirs[:] = []
+                            break
+                        if os.path.splitext(f)[1].lower() in video_exts:
+                            _note(os.path.join(root, f))
+            finally:
+                _probe_cleanup()
 
 
     def _iter_music_entries(self):

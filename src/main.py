@@ -147,7 +147,24 @@ class _WinFullscreenKeyFilter(QAbstractNativeEventFilter):
             except Exception:
                 pass
 
-            # Consume the key so mpv/other widgets don't also process it.
+            # Don't steal 'F' while the user is typing into a text field.
+            try:
+                fw = QApplication.focusWidget()
+                if isinstance(fw, QLineEdit):
+                    return False, 0
+            except Exception:
+                pass
+
+            # Toggle fullscreen, then consume the key so mpv/other widgets don't
+            # also process it. Defer the toggle to the Qt event loop rather than
+            # mutating window state inside the native message handler.
+            try:
+                QTimer.singleShot(0, self._mw.toggle_fullscreen)
+            except Exception:
+                try:
+                    self._mw.toggle_fullscreen()
+                except Exception:
+                    pass
             return True, 0
         except Exception:
             return False, 0
@@ -4067,9 +4084,17 @@ class FlowLayout(QLayout):
         self._max_per_row = max_per_row  # 0 = unlimited
         self._max_rows = max_rows        # 0 = unlimited
         self._items: list = []
-        self._content_left_margin = 0
-        self._forced_left_offset = None  # None = auto-center, int = fixed offset
-        self._on_layout_updated = None
+        self._laying_out = False  # reentrancy guard (see setGeometry)
+        # Centering: when True, the whole grid block is centered horizontally
+        # using a left offset derived from the number of columns that fit in a
+        # STABLE width (self._width_clamp, the scroll viewport). Deriving the
+        # offset from a value that does not change when the offset is applied is
+        # what keeps it from oscillating.
+        self._center = False
+        self._width_clamp = None          # optional callable -> stable width
+        self._content_left_margin = 0     # last computed grid left offset
+        self._on_layout_updated = None    # called (deferred) when offset changes
+        self._forced_left_offset = None   # override offset (used while searching)
 
     def addItem(self, item):
         self._items.append(item)
@@ -4097,8 +4122,19 @@ class FlowLayout(QLayout):
         return self._do_layout(QRect(0, 0, width, 0), test_only=True)
 
     def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self._do_layout(rect, test_only=False)
+        # Guard against reentrancy: laying out items (item.setGeometry /
+        # widget.setVisible) can synchronously post a LayoutRequest that
+        # re-activates this same layout, which would recurse into _do_layout
+        # until the stack overflows. Qt's built-in layouts guard activate()
+        # the same way.
+        if self._laying_out:
+            return
+        self._laying_out = True
+        try:
+            super().setGeometry(rect)
+            self._do_layout(rect, test_only=False)
+        finally:
+            self._laying_out = False
 
     def sizeHint(self):
         return self.minimumSize()
@@ -4106,22 +4142,55 @@ class FlowLayout(QLayout):
     def minimumSize(self):
         s = QSize(0, 0)
         for item in self._items:
-            s = s.expandedTo(item.minimumSize())
+            s = s.expandedTo(self._item_size(item))
         m = self.contentsMargins()
         return QSize(s.width() + m.left() + m.right(),
                      s.height() + m.top() + m.bottom())
 
+    def _item_size(self, item):
+        """Size hint that is STABLE regardless of the widget's visibility.
+
+        Qt's ``QWidgetItem.sizeHint()`` collapses to (0, 0) while its widget is
+        hidden. Relying on that here caused an infinite oscillation: an overflow
+        card was hidden -> reported zero width -> "fit" on the next pass -> shown
+        -> overflowed again -> hidden ... forever. Read the widget's own size
+        hint (clamped to its min/max) so hidden items keep their real footprint
+        and overflow decisions are stable.
+        """
+        w = item.widget()
+        if w is not None:
+            sz = w.sizeHint()
+            sz = sz.expandedTo(w.minimumSize()).boundedTo(w.maximumSize())
+            return sz
+        return item.sizeHint()
+
     def _do_layout(self, rect, test_only):
+        """Arrange items in wrapping rows.
+
+        When ``self._center`` is set, the grid block is centered horizontally
+        using an offset derived from a STABLE width (``self._width_clamp``, the
+        scroll viewport) so applying the offset to sibling headers can't feed
+        back into the width and oscillate. Rows beyond ``max_rows`` are hidden.
+        """
         m = self.contentsMargins()
         effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
         eff_width = effective.width()
+        # Use a stable width (viewport) for wrapping + centering so the layout
+        # can't be driven by width changes it causes itself.
+        if self._width_clamp is not None:
+            try:
+                cw = int(self._width_clamp())
+                if cw > 0:
+                    eff_width = min(eff_width, cw)
+            except Exception:
+                pass
 
-        # First pass: bucket items into rows so we can center each row.
+        # First pass: bucket items into rows (wrap on width / max_per_row).
         rows: list[list] = []
         current_row: list = []
         row_w = 0
         for item in self._items:
-            sz = item.sizeHint()
+            sz = self._item_size(item)
             needed = sz.width() + (self._hspacing if current_row else 0)
             fits_width = (row_w + needed <= eff_width + 1) or not current_row
             fits_max = self._max_per_row <= 0 or len(current_row) < self._max_per_row
@@ -4142,27 +4211,33 @@ class FlowLayout(QLayout):
             visible_rows = rows[:self._max_rows]
             overflow_items = [item for row in rows[self._max_rows:] for item in row]
 
-        # Second pass: lay out each visible row, centered horizontally.
+        # Determine the uniform left offset used to center the whole block.
+        # Base it on how many fixed-width columns fit (not the current item
+        # count) so every flow with the same card size shares the same offset
+        # and filtering/repopulating never shifts the grid.
+        block_offset = 0
+        if self._forced_left_offset is not None:
+            block_offset = max(0, int(self._forced_left_offset))
+        elif self._center and self._items:
+            card_w = max(self._item_size(it).width() for it in self._items)
+            step = card_w + self._hspacing
+            max_cols = self._max_per_row if self._max_per_row > 0 else len(self._items)
+            cols = max(1, min(max_cols, (eff_width + self._hspacing) // step))
+            full_row_w = cols * card_w + (cols - 1) * self._hspacing
+            block_offset = max(0, (eff_width - full_row_w) // 2)
+
+        # Second pass: lay out each visible row using the shared block offset.
         y = effective.y()
-        min_left_offset = 0
-        for row_idx, row in enumerate(visible_rows):
-            row_width = sum(it.sizeHint().width() for it in row) + self._hspacing * max(0, len(row) - 1)
-            if self._forced_left_offset is not None:
-                left_offset = self._forced_left_offset
-            else:
-                left_offset = max(0, (eff_width - row_width) // 2)
-            x_offset = effective.x() + left_offset
-            if row_idx == 0 or left_offset < min_left_offset:
-                min_left_offset = left_offset
+        for row in visible_rows:
             row_height = 0
-            x = x_offset
+            x = effective.x() + block_offset
             for item in row:
-                sz = item.sizeHint()
+                sz = self._item_size(item)
                 if not test_only:
-                    item.setGeometry(QRect(QPoint(x, y), sz))
                     w = item.widget()
-                    if w:
+                    if w is not None and not w.isVisible():
                         w.setVisible(True)
+                    item.setGeometry(QRect(QPoint(x, y), sz))
                 x += sz.width() + self._hspacing
                 row_height = max(row_height, sz.height())
             y += row_height + self._vspacing
@@ -4171,15 +4246,16 @@ class FlowLayout(QLayout):
         if not test_only:
             for item in overflow_items:
                 w = item.widget()
-                if w:
+                if w is not None and w.isVisible():
                     w.setVisible(False)
 
+        # Publish the grid offset so headers can align to it (deferred so we
+        # never mutate sibling layouts inside this layout pass).
         if not test_only:
-            new_margin = min_left_offset if visible_rows else 0
-            if new_margin != self._content_left_margin:
-                self._content_left_margin = new_margin
-                if self._on_layout_updated:
-                    self._on_layout_updated()
+            if block_offset != self._content_left_margin:
+                self._content_left_margin = block_offset
+                if self._on_layout_updated is not None:
+                    QTimer.singleShot(0, self._on_layout_updated)
 
         # Remove trailing vspacing.
         if visible_rows:
@@ -4230,6 +4306,94 @@ class ShowCardButton(QPushButton):
         scaled = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.setIcon(QIcon(scaled))
         self.setIconSize(scaled.size())
+
+
+class CollapsibleSearchBox(QWidget):
+    """A magnifying-glass button that expands to a search field when clicked.
+
+    Collapses back to just the icon when the field loses focus while empty.
+    Emits ``textChanged(str)`` mirroring the inner QLineEdit.
+    """
+
+    textChanged = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        self._btn = QToolButton()
+        self._btn.setCursor(Qt.PointingHandCursor)
+        self._btn.setIcon(self._make_search_icon())
+        self._btn.setIconSize(QSize(18, 18))
+        self._btn.setFixedSize(28, 28)
+        self._btn.setToolTip("Search")
+        self._btn.setStyleSheet(
+            "QToolButton { border: none; background: transparent; border-radius: 14px; }"
+            " QToolButton:hover { background: rgba(255,255,255,0.12); }"
+        )
+        self._btn.clicked.connect(self._toggle)
+
+        self._edit = QLineEdit()
+        self._edit.setPlaceholderText("Search")
+        self._edit.setClearButtonEnabled(True)
+        self._edit.setFixedHeight(28)
+        self._edit.setFixedWidth(220)
+        self._edit.setStyleSheet(
+            "QLineEdit {"
+            " background: rgba(255,255,255,0.08);"
+            " color: rgba(255,255,255,0.92);"
+            " border: 1px solid rgba(255,255,255,0.18);"
+            " border-radius: 12px;"
+            " padding: 4px 10px;"
+            " font-size: 13px;"
+            "}"
+            "QLineEdit:focus {"
+            " border: 1px solid rgba(255,255,255,0.35);"
+            " background: rgba(255,255,255,0.12);"
+            "}"
+        )
+        self._edit.textChanged.connect(self.textChanged)
+        self._edit.installEventFilter(self)
+        self._edit.hide()
+
+        lay.addWidget(self._btn)
+        lay.addWidget(self._edit)
+
+    def _make_search_icon(self) -> QIcon:
+        pm = QPixmap(20, 20)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(255, 255, 255, 200))
+        pen.setWidth(2)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawEllipse(3, 3, 10, 10)          # lens
+        p.drawLine(12, 12, 17, 17)           # handle
+        p.end()
+        return QIcon(pm)
+
+    def _toggle(self):
+        if self._edit.isVisible():
+            self._collapse()
+        else:
+            self._expand()
+
+    def _expand(self):
+        self._edit.show()
+        self._edit.setFocus()
+
+    def _collapse(self):
+        if not self._edit.text():
+            self._edit.hide()
+
+    def eventFilter(self, obj, event):
+        if obj is self._edit and event.type() == QEvent.FocusOut:
+            self._collapse()
+        return super().eventFilter(obj, event)
+
 
 class WelcomeScreen(QWidget):
     def __init__(self, main_window):
@@ -4365,13 +4529,28 @@ class WelcomeScreen(QWidget):
         self._recent_flow_widget = QWidget()
         self._recent_flow_widget.setStyleSheet("background: transparent;")
         self._recent_flow = FlowLayout(self._recent_flow_widget, hspacing=16, vspacing=12, max_per_row=5, max_rows=1)
+        self._recent_flow._center = True
+        self._recent_flow._width_clamp = self._stable_grid_width
         self._scroll_layout.addWidget(self._recent_flow_widget)
 
         # ── "Movies & Shows" section ────────────────────────────────────
+        # Header row: section title with an inline collapsible search box.
         self._catalog_label = _make_section_label("Movies & Shows")
-        self._scroll_layout.addWidget(self._catalog_label)
 
-        # Sort / filter toolbar (below the heading)
+        self._catalog_search = ""
+        self._catalog_search_input = CollapsibleSearchBox()
+        self._catalog_search_input.textChanged.connect(self._set_catalog_search)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(10)
+        header_row.addWidget(self._catalog_label)
+        header_row.addWidget(self._catalog_search_input)
+        header_row.addStretch(1)
+        self._catalog_header_layout = header_row
+        self._scroll_layout.addLayout(header_row)
+
+        # Sort / filter toolbar (below the header row)
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(0, 0, 0, 4)
 
@@ -4421,35 +4600,6 @@ class WelcomeScreen(QWidget):
         self._catalog_filter = "all"
         self._filter_group[0][1].setChecked(True)
 
-        toolbar.addSpacing(16)
-
-        search_label = QLabel("Search:")
-        search_label.setStyleSheet("color: rgba(255,255,255,0.55); font-size: 13px; background: transparent;")
-        toolbar.addWidget(search_label)
-
-        self._catalog_search = ""
-        self._catalog_search_input = QLineEdit()
-        self._catalog_search_input.setPlaceholderText("Type to filter...")
-        self._catalog_search_input.setClearButtonEnabled(True)
-        self._catalog_search_input.setFixedHeight(28)
-        self._catalog_search_input.setMinimumWidth(220)
-        self._catalog_search_input.setStyleSheet(
-            "QLineEdit {"
-            " background: rgba(255,255,255,0.08);"
-            " color: rgba(255,255,255,0.92);"
-            " border: 1px solid rgba(255,255,255,0.18);"
-            " border-radius: 12px;"
-            " padding: 4px 10px;"
-            " font-size: 13px;"
-            "}"
-            "QLineEdit:focus {"
-            " border: 1px solid rgba(255,255,255,0.35);"
-            " background: rgba(255,255,255,0.12);"
-            "}"
-        )
-        self._catalog_search_input.textChanged.connect(self._set_catalog_search)
-        toolbar.addWidget(self._catalog_search_input)
-
         toolbar.addStretch(1)
         self._toolbar_layout = toolbar
         self._scroll_layout.addLayout(toolbar)
@@ -4457,6 +4607,8 @@ class WelcomeScreen(QWidget):
         self._catalog_flow_widget = QWidget()
         self._catalog_flow_widget.setStyleSheet("background: transparent;")
         self._catalog_flow = FlowLayout(self._catalog_flow_widget, hspacing=16, vspacing=12, max_per_row=5)
+        self._catalog_flow._center = True
+        self._catalog_flow._width_clamp = self._stable_grid_width
         self._catalog_flow._on_layout_updated = self._align_headers_to_grid
         self._scroll_layout.addWidget(self._catalog_flow_widget)
 
@@ -4646,24 +4798,6 @@ class WelcomeScreen(QWidget):
 
     def _set_catalog_search(self, text):
         self._catalog_search = str(text or '').strip().lower()
-
-        # While searching, keep the grid anchored to the same left offset so
-        # narrowing results does not recenter the whole content on each keypress.
-        try:
-            q_active = bool(self._catalog_search)
-            if q_active:
-                if getattr(self, '_catalog_search_anchor_offset', None) is None:
-                    anchor = getattr(self, '_last_grid_offset', -1)
-                    if not isinstance(anchor, int) or anchor < 0:
-                        anchor = int(getattr(self._catalog_flow, '_content_left_margin', 0) or 0)
-                    self._catalog_search_anchor_offset = max(0, int(anchor))
-                self._catalog_flow._forced_left_offset = int(self._catalog_search_anchor_offset)
-            else:
-                self._catalog_search_anchor_offset = None
-                self._catalog_flow._forced_left_offset = None
-        except Exception:
-            pass
-
         self._rebuild_catalog()
 
     def _rebuild_catalog(self):
@@ -4707,13 +4841,14 @@ class WelcomeScreen(QWidget):
                 btn.setParent(self._catalog_flow_widget)
                 btn.show()
 
-        # Show a helpful message when the catalog is empty after filtering/search.
+        # Header reflects the active filter, plus empty/no-match states.
+        base_title = {'show': 'TV Shows', 'movie': 'Movies'}.get(filt, 'Movies & Shows')
         if not entries and q:
-            self._catalog_label.setText("Movies & Shows — no matches")
+            self._catalog_label.setText(f"{base_title} — no matches")
         elif not entries and available:
-            self._catalog_label.setText("Movies & Shows — connect a drive with media to get started")
+            self._catalog_label.setText(f"{base_title} — connect a drive with media to get started")
         else:
-            self._catalog_label.setText("Movies & Shows")
+            self._catalog_label.setText(base_title)
 
         # Force the flow widget to recalculate its size.
         self._catalog_flow_widget.updateGeometry()
@@ -4768,23 +4903,33 @@ class WelcomeScreen(QWidget):
             btn.clicked.connect(lambda checked=False, sn=name: self.load_show_playlist(sn))
             self._recent_flow.addWidget(btn)
 
+    def _stable_grid_width(self):
+        """Stable width (scroll viewport minus horizontal margins) used by the
+        card flows to center the grid. Independent of applied offsets, so it
+        cannot feed back and oscillate."""
+        try:
+            m = self._scroll_layout.contentsMargins()
+            return max(0, self._scroll_area.viewport().width() - m.left() - m.right())
+        except Exception:
+            return 0
+
     def _align_headers_to_grid(self):
-        """Align section headers and toolbar with the catalog card grid's left edge."""
-        offset = self._catalog_flow._content_left_margin
+        """Indent section headers + toolbar to match the centered grid's left
+        edge. Runs deferred and is idempotent (guarded by _last_grid_offset), so
+        it settles in one pass and never loops."""
+        try:
+            offset = int(self._catalog_flow._content_left_margin)
+        except Exception:
+            return
         if getattr(self, '_last_grid_offset', -1) == offset:
             return
         self._last_grid_offset = offset
-        for lbl in (self._recent_label, self._catalog_label):
-            lbl.setContentsMargins(offset, 0, 0, 0)
-        self._toolbar_layout.setContentsMargins(offset, 0, 0, 4)
-        # Keep recently-played cards aligned with the same grid.
-        # Force an immediate re-layout — the recently-played flow sits above
-        # the catalog in the QVBoxLayout, so it has already finished its
-        # layout pass by the time the catalog computes the new offset.
-        self._recent_flow._forced_left_offset = offset
-        rect = self._recent_flow.geometry()
-        if not rect.isNull():
-            self._recent_flow.setGeometry(rect)
+        try:
+            self._recent_label.setContentsMargins(offset, 0, 0, 0)
+            self._catalog_header_layout.setContentsMargins(offset, 0, 0, 0)
+            self._toolbar_layout.setContentsMargins(offset, 0, 0, 4)
+        except Exception:
+            pass
 
     def set_show_pending(self, show_name, pending):
         btn = self._show_btn_map.get(show_name)
@@ -13737,6 +13882,26 @@ class MainWindow(QMainWindow):
                     self._skip_next_preroll_interstitial = True
                     self._log_event('auto_advance', from_kind='interstitial', index=int(cur_idx),
                                     skip_preroll=True)
+        except Exception:
+            pass
+
+        # Guard against a STALE end-of-file. Bump music plays on the shared video
+        # player; when it reaches natural EOF at nearly the same instant the bump
+        # script finishes (which stops the music and starts the episode), the
+        # already-queued playbackFinished from the music is delivered *after* the
+        # episode has started and would be misread as "episode finished" — causing
+        # a spurious advance and an endless interlude/bump loop. A real episode
+        # never ends within ~1s of starting, so ignore such an EOF.
+        try:
+            started = float(getattr(self, '_play_start_monotonic', 0.0) or 0.0)
+            if started and (time.monotonic() - started) < 1.0:
+                try:
+                    self._log_event('stale_eof_ignored',
+                                    elapsed=round(time.monotonic() - started, 3),
+                                    index=int(getattr(self.playlist_manager, 'current_index', -1)))
+                except Exception:
+                    pass
+                return
         except Exception:
             pass
 
