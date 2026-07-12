@@ -22,6 +22,9 @@ class MpvPlayer(QWidget):
         self._dll_dir_handles = []
         
         self.mpv = None
+        self._cached_pause = True
+        self._cached_core_idle = True
+        self._cached_idle_active = True
         self._init_mpv()
 
     def _prepare_windows_mpv_dll_search(self):
@@ -189,7 +192,12 @@ class MpvPlayer(QWidget):
             def mouse_dbl_click_handler():
                 QMetaObject.invokeMethod(self, "_emit_fullscreen_requested", Qt.QueuedConnection)
 
-            # Fullscreen toggle is handled by the Windows native message hook in main.py.
+            # Fullscreen toggle via F key — must bind in mpv because the embedded
+            # native X11/video window steals key events before Qt's eventFilter sees
+            # them. The Qt-side handler in main.py serves as fallback for windowed mode.
+            @self.mpv.on_key_press('f')
+            def f_key_handler():
+                QMetaObject.invokeMethod(self, "_emit_fullscreen_requested", Qt.QueuedConnection)
 
             @self.mpv.on_key_press('ESC')
             def esc_key_handler():
@@ -209,7 +217,17 @@ class MpvPlayer(QWidget):
 
             @self.mpv.property_observer('pause')
             def pause_observer(_name, value):
-                QMetaObject.invokeMethod(self, "_emit_paused", Qt.QueuedConnection, Q_ARG(bool, bool(value if value is not None else False)))
+                v = bool(value if value is not None else False)
+                self._cached_pause = v
+                QMetaObject.invokeMethod(self, "_emit_paused", Qt.QueuedConnection, Q_ARG(bool, v))
+
+            @self.mpv.property_observer('core-idle')
+            def core_idle_observer(_name, value):
+                self._cached_core_idle = bool(value if value is not None else True)
+
+            @self.mpv.property_observer('idle-active')
+            def idle_active_observer(_name, value):
+                self._cached_idle_active = bool(value if value is not None else True)
 
             @self.mpv.property_observer('mouse-pos')
             def mouse_pos_observer(_name, value):
@@ -293,6 +311,18 @@ class MpvPlayer(QWidget):
                 self.errorOccurred.emit(self._init_error)
             except Exception:
                 pass
+
+    @property
+    def is_paused(self):
+        return self._cached_pause
+
+    @property
+    def is_core_idle(self):
+        return self._cached_core_idle
+
+    @property
+    def is_idle_active(self):
+        return self._cached_idle_active
 
     def play(self, filepath):
         if self.mpv:

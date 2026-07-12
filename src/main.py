@@ -98,6 +98,8 @@ SHOW_CATALOG = [
     {"name": "Dr. Stone",          "icon": "drstone-icon.png",     "type": "show", "shuffle_mode": "off",      "year": 2019},
     {"name": "Mythbusters",       "icon": "mythbusters-icon.png", "type": "show", "shuffle_mode": "standard", "year": 2003},
     {"name": "Trailer Park Boys", "icon": "tpb-icon.png",         "type": "show", "shuffle_mode": "off",      "year": 2001},
+    {"name": "Solo Leveling",     "icon": "solo-leveling-icon.png", "type": "show", "shuffle_mode": "off",      "year": 2024},
+    {"name": "How Its Made",  "icon": "how-its-made-icon.png",  "type": "show", "shuffle_mode": "standard", "year": 2001},
     # Movies
     {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
     {"name": "Scooby-Doo and the Ghoul School (1988)", "icon": "sd-ghool-school-icon.png", "type": "movie", "shuffle_mode": "off", "year": 1988},
@@ -2488,6 +2490,18 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join('TPB', 'Episodes'),
             os.path.join('TPB'),
         ]),
+        ("Solo Leveling", [
+            os.path.join('Shows', 'Solo Leveling', 'Episodes'),
+            os.path.join('Shows', 'Solo Leveling'),
+            os.path.join('Solo Leveling', 'Episodes'),
+            os.path.join('Solo Leveling'),
+        ]),
+        ("How Its Made", [
+            os.path.join('Shows', 'How Its Made', 'Episodes'),
+            os.path.join('Shows', 'How Its Made'),
+            os.path.join('How Its Made', 'Episodes'),
+            os.path.join('How Its Made'),
+        ]),
         # Movies
         ("Birdman (2014)", [
             os.path.join('Movies', 'Birdman (2014)'),
@@ -2880,6 +2894,18 @@ def auto_detect_show_folders_web(mount_roots_override):
             os.path.join('Shows', 'TPB'),
             os.path.join('TPB', 'Episodes'),
             os.path.join('TPB'),
+        ]),
+        ("Solo Leveling", [
+            os.path.join('Shows', 'Solo Leveling', 'Episodes'),
+            os.path.join('Shows', 'Solo Leveling'),
+            os.path.join('Solo Leveling', 'Episodes'),
+            os.path.join('Solo Leveling'),
+        ]),
+        ("How Its Made", [
+            os.path.join('Shows', 'How Its Made', 'Episodes'),
+            os.path.join('Shows', 'How Its Made'),
+            os.path.join('How Its Made', 'Episodes'),
+            os.path.join('How Its Made'),
         ]),
         # Movies
         ("Birdman (2014)", [
@@ -9718,9 +9744,12 @@ class MainWindow(QMainWindow):
         start_timer = False
         # If paused, keep shown.
         # If playing, start timer to hide.
-        if hasattr(self, 'player') and self.player.mpv:
-             if not self.player.mpv.pause and not self.player.mpv.core_idle:
-                 start_timer = True
+        try:
+            if hasattr(self, 'player') and self.player and self.player.mpv:
+                if not self.player.is_paused and not self.player.is_core_idle:
+                    start_timer = True
+        except Exception:
+            pass
         
         # Don't start auto-hide timer while cursor is hovering over controls
         if start_timer:
@@ -9763,44 +9792,50 @@ class MainWindow(QMainWindow):
             return
 
         # Only hide if playing
-        if hasattr(self, 'player') and self.player.mpv:
-            if not self.player.mpv.pause and not self.player.mpv.core_idle:
-                 # Don't hide if cursor is over controls — restart timer instead
-                 try:
-                     cw = self.play_mode_widget.controls_widget
-                     if cw.isVisible():
-                         cursor_pos = QCursor.pos()
-                         global_rect = QRect(cw.mapToGlobal(QPoint(0, 0)), cw.size())
-                         if global_rect.contains(cursor_pos):
-                             self.hover_timer.start()
-                             return
-                 except Exception:
-                     pass
+        try:
+            if hasattr(self, 'player') and self.player and self.player.mpv:
+                if not self.player.is_paused and not self.player.is_core_idle:
+                    # Don't hide if cursor is over controls — restart timer instead
+                    try:
+                        cw = self.play_mode_widget.controls_widget
+                        if cw.isVisible():
+                            cursor_pos = QCursor.pos()
+                            global_rect = QRect(cw.mapToGlobal(QPoint(0, 0)), cw.size())
+                            if global_rect.contains(cursor_pos):
+                                self.hover_timer.start()
+                                return
+                    except Exception:
+                        pass
 
-                 self.play_mode_widget.controls_widget.setVisible(False)
+                    self.play_mode_widget.controls_widget.setVisible(False)
 
-                 # Fullscreen: hide cursor with the controls.
-                 try:
-                     self._set_fullscreen_cursor_hidden(True)
-                 except Exception:
-                     pass
+                    # Fullscreen: hide cursor with the controls.
+                    try:
+                        self._set_fullscreen_cursor_hidden(True)
+                    except Exception:
+                        pass
 
-                 try:
-                     self._sync_episode_overlay_visibility()
-                 except Exception:
-                     pass
+                    try:
+                        self._sync_episode_overlay_visibility()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def check_fullscreen_inactivity(self):
         # Failsafe: if we are in fullscreen, playing, and controls are visible
         # check if it's been > 3 seconds since last activity.
         if self.isFullScreen() and self.play_mode_widget.controls_widget.isVisible():
-            if hasattr(self, 'player') and self.player.mpv:
-                 # Check playing state
-                 is_playing = (not self.player.mpv.pause) and (not self.player.mpv.core_idle)
-                 if is_playing:
-                     diff = time.time() - self.last_activity_time
-                     if diff > 3.5: # 3.5s threshold (slightly larger than hover)
-                         self.hide_controls()
+            try:
+                if hasattr(self, 'player') and self.player and self.player.mpv:
+                    # Check playing state
+                    is_playing = (not self.player.is_paused) and (not self.player.is_core_idle)
+                    if is_playing:
+                        diff = time.time() - self.last_activity_time
+                        if diff > 3.5: # 3.5s threshold (slightly larger than hover)
+                            self.hide_controls()
+            except Exception:
+                pass
 
     def _update_fullscreen_button_icon(self):
         if not hasattr(self, 'play_mode_widget'):
@@ -11549,6 +11584,24 @@ class MainWindow(QMainWindow):
     def play_index(self, index, record_history=True, bypass_bump_gate=False, *, suppress_ui: bool = False):
         pm = self.playlist_manager
 
+        # Deduplication: prevent rapid repeated calls for the same index that
+        # cause stop→start→stop cycling and can wedge mpv into a bad state.
+        try:
+            now = time.monotonic()
+            last_call = getattr(self, '_play_index_last_mono', 0.0)
+            last_idx = getattr(self, '_play_index_last_idx', -1)
+            if int(index) == int(last_idx) and (now - last_call) < 0.5:
+                try:
+                    self._log_event('play_index_dupe_dropped', index=int(index),
+                                    elapsed_ms=int(round((now - last_call) * 1000)))
+                except Exception:
+                    pass
+                return
+            self._play_index_last_mono = now
+            self._play_index_last_idx = int(index)
+        except Exception:
+            pass
+
         # If the user is starting the same show again, silently resume from disk
         # for the default start index (no prompts).
         try:
@@ -13265,11 +13318,12 @@ class MainWindow(QMainWindow):
 
     def toggle_play(self):
         # If player is idle but we have a playlist, start playing
-        idle = False
+        idle = True
         try:
-             idle = self.player.mpv.idle_active
-        except:
-             idle = True # assume
+            if hasattr(self, 'player') and self.player and self.player.mpv:
+                idle = self.player.is_idle_active
+        except Exception:
+            idle = True
              
         if idle and self.playlist_manager.current_playlist:
             # If we haven't started yet, pick a start index based on shuffle mode.
@@ -13527,7 +13581,8 @@ class MainWindow(QMainWindow):
                 self._play_bump_with_optional_interstitial(bump_item)
                 return
 
-        self.play_index(next_idx, record_history=record_history, suppress_ui=bool(suppress_ui))
+        self.play_index(next_idx, record_history=record_history, suppress_ui=bool(suppress_ui),
+                         bypass_bump_gate=bypass_bump_gate_once)
 
     def _fallback_previous_episode_index(self) -> int:
         pm = getattr(self, 'playlist_manager', None)
@@ -14313,8 +14368,12 @@ class MainWindow(QMainWindow):
                 if self.missing_media_recovery.is_waiting:
                     pass
                 else:
-                    core_idle_now = bool(getattr(mpv, 'core_idle', False))
-                    paused_now = bool(getattr(mpv, 'pause', True))
+                    try:
+                        core_idle_now = self.player.is_core_idle
+                        paused_now = self.player.is_paused
+                    except Exception:
+                        core_idle_now = False
+                        paused_now = True
                     if (not core_idle_now) and (not paused_now) and (not is_bump_video):
                         last_prog = float(getattr(self, '_time_pos_last_progress_mono', 0.0) or 0.0)
                         if last_prog:
@@ -14340,21 +14399,12 @@ class MainWindow(QMainWindow):
             # Fallback: if time-pos is basically duration and mpv is idle/paused.
             pos = self._last_time_pos
             dur = self.total_duration
-            if not dur:
-                try:
-                    dur = float(getattr(mpv, 'duration') or 0)
-                except Exception:
-                    dur = 0
 
-            core_idle = False
-            paused = True
             try:
-                core_idle = bool(getattr(mpv, 'core_idle'))
+                core_idle = self.player.is_core_idle
+                paused = self.player.is_paused
             except Exception:
                 core_idle = False
-            try:
-                paused = bool(getattr(mpv, 'pause'))
-            except Exception:
                 paused = True
 
             pos_at_end = False
