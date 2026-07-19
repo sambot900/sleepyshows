@@ -814,11 +814,24 @@ class PlaylistManager:
                 return True
         return False
 
+    def _is_scooby_doo_playlist(self):
+        for idx in self._episode_indices()[:30]:
+            p = (self._episode_path_for_index(idx) or '').lower()
+            if 'scooby' in p:
+                return True
+        return False
+
     def _is_part1_episode(self, path):
         if not path:
             return False
         base = os.path.splitext(os.path.basename(str(path)))[0]
         return re.search(r'\(1\)\s*$', base.strip()) is not None
+
+    def _is_pt1_episode(self, path):
+        if not path:
+            return False
+        base = os.path.splitext(os.path.basename(str(path)))[0]
+        return re.search(r'\bpt1\s*$', base.strip(), re.IGNORECASE) is not None
 
     def _next_chronological_episode_index_after(self, episode_index):
         ordered = self._chronological_episode_indices()
@@ -1036,6 +1049,12 @@ class PlaylistManager:
             if anchor >= 0 and self.shuffle_mode in ('standard', 'season') and self._forced_next_episode_index is None:
                 cur_path = self._episode_path_for_index(anchor)
                 if self._is_koth_playlist() and self._is_part1_episode(cur_path):
+                    forced = self._next_chronological_episode_index_after(anchor)
+                    if forced != -1 and forced != anchor:
+                        if forced in self.play_queue:
+                            self.play_queue = [i for i in self.play_queue if i != forced]
+                        return int(forced)
+                if self._is_scooby_doo_playlist() and self._is_pt1_episode(cur_path):
                     forced = self._next_chronological_episode_index_after(anchor)
                     if forced != -1 and forced != anchor:
                         if forced in self.play_queue:
@@ -1301,17 +1320,24 @@ class PlaylistManager:
                 # so that after the injection we still continue to part 2.
                 if self.shuffle_mode in ('standard', 'season'):
                     cur_path = self._episode_path_for_index(self.current_index)
-                    if self._is_koth_playlist() and self._is_part1_episode(cur_path):
+                    if (self._is_koth_playlist() and self._is_part1_episode(cur_path)) or \
+                       (self._is_scooby_doo_playlist() and self._is_pt1_episode(cur_path)):
                         forced = self._next_chronological_episode_index_after(self.current_index)
                         if forced != -1:
                             self._forced_next_episode_index = forced
                 return nxt
 
-            # Multipart KOTH rule: in shuffle mode, if episode ends with "(1)", force
-            # the next chronological episode once, then resume shuffling.
+            # Multipart rule: in shuffle mode, if episode is part 1, force the next
+            # chronological episode once, then resume shuffling.
             if self.shuffle_mode in ('standard', 'season') and self._forced_next_episode_index is None:
                 cur_path = self._episode_path_for_index(self.current_index)
                 if self._is_koth_playlist() and self._is_part1_episode(cur_path):
+                    forced = self._next_chronological_episode_index_after(self.current_index)
+                    if forced != -1 and forced != self.current_index:
+                        if forced in self.play_queue:
+                            self.play_queue = [i for i in self.play_queue if i != forced]
+                        return forced
+                if self._is_scooby_doo_playlist() and self._is_pt1_episode(cur_path):
                     forced = self._next_chronological_episode_index_after(self.current_index)
                     if forced != -1 and forced != self.current_index:
                         if forced in self.play_queue:
