@@ -13160,6 +13160,9 @@ class MainWindow(QMainWindow):
          # If script is finished, cut off music and advance to the next item.
          if self.current_card_index >= len(self.current_bump_script):
              self.lbl_bump_text.setText("")
+             # Save pending-next before stop_bump_playback clears it.
+             pending = getattr(self, '_pending_next_index', None)
+             pending_record_history = bool(getattr(self, '_pending_next_record_history', True))
              self.stop_bump_playback()
              # Switch back to the video surface now so the empty bump widget
              # (near-black background) is never visible between bump and episode.
@@ -13168,15 +13171,11 @@ class MainWindow(QMainWindow):
              except Exception:
                  pass
              self._bump_state = BumpState.TRANSITIONING
-             pending = getattr(self, '_pending_next_index', None)
              if pending is not None:
                  idx = int(pending)
-                 record_history = bool(getattr(self, '_pending_next_record_history', True))
-                 self._pending_next_index = None
-                 self._pending_next_record_history = True
                  self._advancing_from_bump_end = True
                  try:
-                     self.play_index(idx, record_history=record_history, bypass_bump_gate=True)
+                     self.play_index(idx, record_history=pending_record_history, bypass_bump_gate=True)
                  finally:
                      self._advancing_from_bump_end = False
                  return
