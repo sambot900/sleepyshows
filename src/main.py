@@ -23,6 +23,7 @@ import datetime
 
 from bump_state import BumpState
 from sleep_timer import SleepTimerController
+from auto_show import AutoShowController
 from missing_media_recovery import MissingMediaRecovery
 from play_history_dialog import PlayHistoryDialog
 
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QDockWidget, QFrame, QSizePolicy, QToolButton, QStyle, QGridLayout,
                                QStyleOptionButton, QStyleOptionToolButton, QStyleOptionComboBox, QStylePainter, QStyleOptionSlider,
                                QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-                                QComboBox,
+                                QComboBox, QSpinBox,
                                 QWidgetAction,
                                 QAbstractButton, QLayout, QScrollArea)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop, QFileSystemWatcher, QVariantAnimation
@@ -1051,6 +1052,10 @@ class BumpsModeWidget(QWidget):
         self.btn_auto_sleep_timer = QPushButton("Auto Sleep Timer…")
         self.btn_auto_sleep_timer.clicked.connect(self.main_window.show_auto_sleep_timer_dialog)
         layout.addWidget(self.btn_auto_sleep_timer)
+
+        self.btn_auto_show = QPushButton("Auto-Show…")
+        self.btn_auto_show.clicked.connect(self.main_window.show_auto_show_dialog)
+        layout.addWidget(self.btn_auto_show)
 
         # --- Sound settings ---
         def add_toggle_row(label_text, initial_checked, on_toggle):
@@ -6304,6 +6309,13 @@ class PlayModeWidget(QWidget):
         # Single-press cycle (menu dropdown is still available from the top menu).
         self.btn_sleep_timer.clicked.connect(self.main_window.cycle_sleep_timer_quick)
         right_layout.addWidget(self.btn_sleep_timer)
+
+        self.btn_auto_show = TriStrokeButton("AUTO-SHOW\nOFF")
+        self.btn_auto_show.setFixedSize(110, button_height)
+        self.btn_auto_show.setStyleSheet(track_font_style + " background: transparent; border: none; color: white;")
+        self.btn_auto_show.setCheckable(True)
+        self.btn_auto_show.clicked.connect(self.main_window.toggle_auto_show_for_night)
+        right_layout.addWidget(self.btn_auto_show)
         
         # Shuffle Button (Icon with text)
         self.btn_shuffle = TriStrokeToolButton()
@@ -6536,6 +6548,7 @@ class PlayModeWidget(QWidget):
                 'prevnext': 100,
                 'play': 160,
                 'sleep': 120,
+                'auto_show': 110,
                 'audio': 110,
                 'sub': 110,
                 'shuffle': 100,
@@ -6549,6 +6562,7 @@ class PlayModeWidget(QWidget):
                 'prevnext': 54,
                 'play': 70,
                 'sleep': 66,
+                'auto_show': 82,
                 'audio': 60,
                 'sub': 60,
                 'shuffle': 52,
@@ -6563,6 +6577,7 @@ class PlayModeWidget(QWidget):
                 'prevnext': 88,
                 'play': 144,
                 'sleep': 112,
+                'auto_show': 100,
                 'audio': 100,
                 'sub': 100,
                 'shuffle': 88,
@@ -6576,6 +6591,7 @@ class PlayModeWidget(QWidget):
                 'prevnext': 54,
                 'play': 70,
                 'sleep': 66,
+                'auto_show': 82,
                 'audio': 60,
                 'sub': 60,
                 'shuffle': 60,
@@ -6590,6 +6606,7 @@ class PlayModeWidget(QWidget):
                 'prevnext': 64,
                 'play': 108,
                 'sleep': 86,
+                'auto_show': 88,
                 'audio': 90,
                 'sub': 90,
                 'shuffle': 72,
@@ -6603,6 +6620,7 @@ class PlayModeWidget(QWidget):
                 'prevnext': 54,
                 'play': 70,
                 'sleep': 66,
+                'auto_show': 82,
                 'audio': 60,
                 'sub': 60,
                 'shuffle': 60,
@@ -6610,6 +6628,11 @@ class PlayModeWidget(QWidget):
                 'vol': 70,
                 'fs': 54,
             }
+
+        # Windows fonts can make this label wider than the compact width plan.
+        mins['auto_show'] = max(
+            mins['auto_show'], self.btn_auto_show.fontMetrics().horizontalAdvance('AUTO-SHOW') + 16)
+        base['auto_show'] = max(base['auto_show'], mins['auto_show'])
 
         # Apply base sizes.
         _set_w(self.btn_menu, base['menu'], button_h)
@@ -6619,6 +6642,7 @@ class PlayModeWidget(QWidget):
         _set_w(self.btn_next, base['prevnext'], button_h)
         _set_w(self.btn_seek_fwd, base['seek'], button_h)
         _set_w(self.btn_sleep_timer, base['sleep'], button_h)
+        _set_w(self.btn_auto_show, base['auto_show'], button_h)
         _set_w(self.btn_audio_track, base['audio'], button_h)
         _set_w(self.btn_subtitle, base['sub'], button_h)
         _set_w(self.btn_shuffle, base['shuffle'], button_h)
@@ -6652,6 +6676,7 @@ class PlayModeWidget(QWidget):
             self.btn_audio_track,
             self.btn_subtitle,
             self.btn_sleep_timer,
+            self.btn_auto_show,
             self.btn_shuffle,
             self.lbl_volume if show_vol_label else None,
             self.slider_vol,
@@ -6672,6 +6697,7 @@ class PlayModeWidget(QWidget):
             self.btn_sleep_timer,
             self.btn_subtitle,
             self.btn_audio_track,
+            self.btn_auto_show,
         ]
         for w in right_hide_order:
             if w is not None:
@@ -6684,6 +6710,7 @@ class PlayModeWidget(QWidget):
             self.btn_audio_track,
             self.btn_subtitle,
             self.btn_sleep_timer,
+            self.btn_auto_show,
             self.btn_shuffle,
             self.lbl_volume if show_vol_label else None,
             self.slider_vol,
@@ -6699,6 +6726,7 @@ class PlayModeWidget(QWidget):
                 (self.btn_subtitle, mins['sub']),
                 (self.btn_audio_track, mins['audio']),
                 (self.btn_sleep_timer, mins['sleep']),
+                (self.btn_auto_show, mins['auto_show']),
                 (self.btn_menu, mins['menu']),
                 (self.btn_shuffle, mins['shuffle']),
                 (self.btn_seek_back, mins['seek']),
@@ -6745,6 +6773,7 @@ class PlayModeWidget(QWidget):
                         self.btn_audio_track,
                         self.btn_subtitle,
                         self.btn_sleep_timer,
+                        self.btn_auto_show,
                         self.btn_shuffle,
                         self.lbl_volume if show_vol_label else None,
                         self.slider_vol,
@@ -7566,10 +7595,19 @@ class MainWindow(QMainWindow):
         # arm AUTO so it is "always on" and recurs nightly without user action.
         try:
             self.sleep_timer.set_auto_target(self._auto_sleep_time)
+            self.sleep_timer.set_nightly_enabled(self._auto_sleep_enabled)
             if self._auto_sleep_enabled:
                 self.sleep_timer.start_auto()
         except Exception:
             pass
+
+        self.auto_show = AutoShowController(
+            self, enabled=self._settings.get('auto_show_enabled', False),
+            show_name=self._settings.get('auto_show_name', ''),
+            delay_minutes=self._settings.get('auto_show_delay_minutes', 60),
+        )
+        self.auto_show.state_changed.connect(self._on_auto_show_state_changed)
+        self.auto_show.switch_requested.connect(self._switch_to_auto_show)
         
         # Mouse Hover Timer
         self.hover_timer = QTimer(self)
@@ -7614,7 +7652,7 @@ class MainWindow(QMainWindow):
         self._play_start_monotonic = None
         self._played_since_start = False
         self._advancing_from_eof = False
-        self._skip_penalty_applied_for_start = None
+        self._skip_exposure_applied_for_start = None
 
         # Fullscreen transition/state helpers (Windows reliability).
         self._pre_fullscreen_geometry = None
@@ -7628,10 +7666,9 @@ class MainWindow(QMainWindow):
         self._playback_log_path = os.path.join(_get_user_config_dir(), 'playback_events.jsonl')
         self._last_stop_reason = None
 
-        # Per-episode position tracking: preserves playback progress when
-        # the user skips away from an episode and later returns to it.
-        # Maps episode key (str) -> time position in seconds (float).
+        # Chronological progress only: episode key -> (position, duration).
         self._episode_positions: dict = {}
+        self._resume_position_for_start = None
         self._last_stop_reason_at = None
 
         # Resume/recovery: persist the generated episode queue + position locally so we
@@ -7914,6 +7951,7 @@ class MainWindow(QMainWindow):
         
         # --- UI Setup ---
         self.setup_ui()
+        self._update_auto_show_ui()
         self.setStyleSheet(DARK_THEME)
 
         # Re-apply startup geometry AFTER content is set up, so the resize
@@ -7976,6 +8014,7 @@ class MainWindow(QMainWindow):
             'player_error', 'mpv_end_file', 'bump_video_end_file',
             'bump_video_error', 'media_missing', 'media_reappeared',
             'stop_reason', 'episode_skipped', 'auto_advance', 'bump_gate',
+            'auto_show_unavailable',
         }
 
         lines: list[str] = []
@@ -8293,7 +8332,7 @@ class MainWindow(QMainWindow):
             queue_keys = []
 
         try:
-            idx = int(getattr(pm, 'current_index', -1) or -1) if pm is not None else -1
+            idx = int(getattr(pm, 'current_index', -1)) if pm is not None else -1
         except Exception:
             idx = -1
         if idx >= 0 and pm is not None:
@@ -8394,6 +8433,10 @@ class MainWindow(QMainWindow):
                             payload[k] = prev[k]
         except Exception:
             pass
+
+        if pm is not None and pm.shuffle_mode != 'off':
+            payload['time_pos_s'] = None
+            payload['duration_s'] = None
 
         return payload
 
@@ -8551,11 +8594,17 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-        # 2) Restore queue (best-effort).
-        try:
-            pm.restore_episode_queue_from_keys(list(st.get('queue_episode_keys') or []))
-        except Exception:
-            pass
+        # Loading can arm auto-resume again; this restore owns the start.
+        self._pending_auto_resume_state = None
+        self._pending_auto_resume_playlist = None
+
+        # Chronological queues may be restored. Shuffle queues use current
+        # exposure scores, including skips made in the previous session.
+        if pm.shuffle_mode == 'off':
+            try:
+                pm.restore_episode_queue_from_keys(list(st.get('queue_episode_keys') or []))
+            except Exception:
+                pass
 
         # 3) Pick the episode index to resume.
         idx = -1
@@ -8567,85 +8616,42 @@ class MainWindow(QMainWindow):
             idx = -1
         if idx < 0:
             try:
-                idx = int(st.get('current_index', -1) or -1)
+                idx = int(st.get('current_index', -1))
             except Exception:
                 idx = -1
 
+        if idx < 0 or idx >= len(pm.current_playlist):
+            return
+
+        idx, position = self._episode_resume_start(idx, st.get('time_pos_s'), st.get('duration_s'))
         if idx < 0:
+            self.stop_playback()
             return
 
         # Resume playback without bump gating.
         try:
-            self.play_index(int(idx), record_history=False, bypass_bump_gate=True, suppress_ui=False)
+            self.play_index(int(idx), record_history=False, bypass_bump_gate=True,
+                            suppress_ui=False, start_position=position)
         except Exception:
             return
 
-        # Seek after the file is actually playing, not on a blind timer.
-        # A fixed 350 ms delay races against mpv's asynchronous file load
-        # and audio-device init; seeking too early can leave mpv in a
-        # broken state (video frame stuck, audio never initialised, or
-        # unresponsive pause toggle).
+    def _episode_resume_start(self, index, position, duration):
+        """Resolve chronological resume; the next episode always starts fresh."""
+        pm = self.playlist_manager
+        if pm.shuffle_mode != 'off':
+            return index, 0.0
         try:
-            pos_s = st.get('time_pos_s', None)
-            pos_s = float(pos_s) if pos_s is not None else None
-        except Exception:
-            pos_s = None
-        if pos_s is not None and pos_s > 0:
-            seek_to = max(0.0, float(pos_s) - 3.0)
-            self._seek_when_playing(seek_to)
-
-    def _seek_when_playing(self, target: float, retries: int = 15, interval_ms: int = 100):
-        """Seek to *target* seconds once mpv has actually started playing.
-
-        mpv.loadfile / play is asynchronous: the file may still be loading
-        and the audio device may still be initialising 350 ms later.
-        Seeking before playback has started can leave mpv in a broken state
-        (stuck video frame, missing audio, unresponsive pause toggle).
-
-        This method polls ``time_pos`` every *interval_ms* until the
-        property is reported (indicating playback is underway) and then
-        issues the seek.  If playback never starts the seek is skipped.
-        """
-        try:
-            if not hasattr(self, 'player') or not self.player:
-                return
-            mpv_obj = getattr(self.player, 'mpv', None)
-            if mpv_obj is None:
-                return
-        except Exception:
-            return
-
-        if retries <= 0:
-            return
-
-        try:
-            time_pos = getattr(mpv_obj, 'time_pos', None)
-            duration = getattr(mpv_obj, 'duration', None)
-        except Exception:
-            time_pos = None
-            duration = None
-
-        if time_pos is not None and duration is not None:
-            try:
-                self.player.seek(float(target))
-            except Exception:
-                pass
-        elif time_pos is not None and time_pos > 0 and duration is None:
-            # Position is reporting but duration is still unknown —
-            # the file is actively playing. Seek anyway.
-            try:
-                self.player.seek(float(target))
-            except Exception:
-                pass
-        else:
-            # mpv is still loading — wait and retry.
-            try:
-                QTimer.singleShot(
-                    int(interval_ms),
-                    lambda: self._seek_when_playing(target, retries - 1, interval_ms),
-                )
-            except Exception:
-                pass
+            position = max(0.0, float(position or 0.0))
+            duration = float(duration or 0.0)
+        except (TypeError, ValueError):
+            return index, 0.0
+        if position > 0 and duration > 0 and duration - position <= 20.0:
+            next_index = pm._next_chronological_episode_index_after(index)
+            if next_index >= 0:
+                key = pm._norm_path_key(pm._episode_path_for_index(next_index))
+                self._episode_positions.pop(key, None)
+            return next_index, 0.0
+        return index, max(0.0, position - 3.0)
 
     def _save_current_episode_position(self):
         """Persist the current episode's time-pos to the in-memory
@@ -8654,10 +8660,10 @@ class MainWindow(QMainWindow):
         if getattr(self, '_in_bump_playback', False):
             return
         pm = getattr(self, 'playlist_manager', None)
-        if pm is None:
+        if pm is None or pm.shuffle_mode != 'off':
             return
         try:
-            idx = int(getattr(pm, 'current_index', -1) or -1)
+            idx = int(getattr(pm, 'current_index', -1))
         except Exception:
             return
         if idx < 0:
@@ -8680,7 +8686,7 @@ class MainWindow(QMainWindow):
 
         # Only save if the player is actually on this item (not a bump).
         try:
-            last_target = str(getattr(self, '_last_play_target', '') or '').strip()
+            last_target = str(getattr(self, '_last_play_source_path', '') or '').strip()
             if last_target:
                 last_key = str(pm._norm_path_key(last_target) or '')
                 if key != last_key:
@@ -8693,39 +8699,11 @@ class MainWindow(QMainWindow):
             pos = self._last_time_pos
         except Exception:
             pos = None
-        if pos is None:
-            try:
-                if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
-                    pos = getattr(self.player.mpv, 'time_pos', None)
-            except Exception:
-                pos = None
         if pos is not None and float(pos) > 0:
             try:
-                self._episode_positions[key] = float(pos)
+                self._episode_positions[key] = (float(pos), float(self.total_duration or 0.0))
             except Exception:
                 pass
-
-    def _maybe_restore_episode_position(self, target: str):
-        """If *target* has a saved per-episode position and the auto-resume
-        flow is NOT active, seek to it once mpv starts playing."""
-        if getattr(self, '_pending_auto_resume_state', None) is not None:
-            return
-        pm = getattr(self, 'playlist_manager', None)
-        if pm is None:
-            return
-        try:
-            key = str(pm._norm_path_key(str(target or '')) or '')
-        except Exception:
-            return
-        if not key:
-            return
-        try:
-            saved = self._episode_positions.get(key)
-        except Exception:
-            saved = None
-        if saved is not None and float(saved) > 0:
-            seek_to = max(0.0, float(saved) - 3.0)
-            self._seek_when_playing(seek_to)
 
     def _norm_match_path(self, p: str) -> str:
         try:
@@ -8760,6 +8738,9 @@ class MainWindow(QMainWindow):
             self._pending_auto_resume_playlist = None
         except Exception:
             pass
+
+        if self.playlist_manager.shuffle_mode != 'off':
+            return
 
         try:
             st = self._load_resume_state()
@@ -8808,6 +8789,10 @@ class MainWindow(QMainWindow):
         return 0
 
     def _maybe_auto_resume_on_first_play(self, requested_index: int) -> bool:
+        if self.playlist_manager.shuffle_mode != 'off':
+            self._pending_auto_resume_state = None
+            self._pending_auto_resume_playlist = None
+            return False
         st = getattr(self, '_pending_auto_resume_state', None)
         if not isinstance(st, dict) or not st:
             return False
@@ -8815,7 +8800,7 @@ class MainWindow(QMainWindow):
         pm = getattr(self, 'playlist_manager', None)
         try:
             # Only trigger before anything has started for this playlist.
-            if pm is not None and int(getattr(pm, 'current_index', -1) or -1) != -1:
+            if pm is not None and int(getattr(pm, 'current_index', -1)) != -1:
                 self._pending_auto_resume_state = None
                 self._pending_auto_resume_playlist = None
                 return False
@@ -8855,6 +8840,8 @@ class MainWindow(QMainWindow):
             return False
 
     def _maybe_auto_resume_for_target(self, target_path: str) -> bool:
+        if self.playlist_manager.shuffle_mode != 'off':
+            return False
         try:
             st = self._load_resume_state()
         except Exception:
@@ -10745,6 +10732,8 @@ class MainWindow(QMainWindow):
             pass
 
         self.sleep_timer.set_auto_target(time_str)
+        self.sleep_timer.set_nightly_enabled(enabled)
+        self.auto_show.refresh_boundary()
         if enabled:
             # "Always on": arm AUTO immediately so the user can rely on it.
             self.sleep_timer.start_auto()
@@ -10757,6 +10746,161 @@ class MainWindow(QMainWindow):
                 self._update_sleep_timer_ui()
             except Exception:
                 pass
+
+    def set_auto_show_settings(self, enabled, show_name, delay_minutes):
+        show_name = str(show_name or '').strip()
+        delay_minutes = AutoShowController.parse_delay(delay_minutes)
+        self._settings.update({
+            'auto_show_enabled': bool(enabled),
+            'auto_show_name': show_name,
+            'auto_show_delay_minutes': delay_minutes,
+        })
+        self.auto_show.configure(enabled, show_name, delay_minutes)
+
+    def toggle_auto_show_for_night(self):
+        self.auto_show.toggle_for_night()
+
+    def _on_auto_show_state_changed(self):
+        override = self.auto_show.export_override()
+        if override is None:
+            self._settings.pop('auto_show_night_override', None)
+        else:
+            self._settings['auto_show_night_override'] = override
+        self._save_user_settings()
+        self._update_auto_show_ui()
+
+    def _update_auto_show_ui(self):
+        widget = getattr(self, 'play_mode_widget', None)
+        if widget is None or not hasattr(widget, 'btn_auto_show'):
+            return
+        controller = self.auto_show
+        button = widget.btn_auto_show
+        button.setText(f"AUTO-SHOW\n{'ON' if controller.enabled else 'OFF'}")
+        button.setChecked(controller.enabled)
+        button.setEnabled(bool(controller.show_name))
+        if not controller.show_name:
+            button.setToolTip("Choose a destination in Settings → Auto-Show.")
+            return
+        reset_time = self.sleep_timer.auto_time_label() if self.auto_sleep_enabled else 'midnight'
+        detail = f"Switch to {controller.show_name} after {controller.delay_minutes} minutes of playback."
+        if controller.error:
+            detail = controller.error
+        elif controller.switched:
+            detail = f"Tonight's switch to {controller.show_name} is complete."
+        button.setToolTip(f"{detail}\nToggle for tonight only. Resets to the app setting at {reset_time}.")
+
+    def show_auto_show_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Auto-Show")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+
+        info = QLabel(
+            "Switch to your chosen show once each night after the selected amount of playback.\n"
+            "Pauses do not count. Your sleep timer continues after the switch.\n"
+            "The player toggle applies only for tonight. It resets to this setting at the auto sleep "
+            "time, or at midnight when auto sleep is disabled."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        enable_row = QHBoxLayout()
+        enable_toggle = ToggleSwitch()
+        enable_toggle.setChecked(self.auto_show.default_enabled)
+        enable_row.addWidget(enable_toggle)
+        enable_row.addWidget(QLabel("Enable Auto-Show each night"))
+        enable_row.addStretch(1)
+        layout.addLayout(enable_row)
+
+        show_row = QHBoxLayout()
+        show_row.addWidget(QLabel("Switch to:"))
+        shows = QComboBox()
+        shows.addItem("Choose a show…", '')
+        movies = {entry['name'] for entry in SHOW_CATALOG if entry['type'] == 'movie'}
+        names = {entry['name'] for entry in SHOW_CATALOG if entry['type'] == 'show'}
+        try:
+            names.update(os.path.splitext(name)[0] for name in os.listdir(get_local_playlists_dir())
+                         if name.lower().endswith('.json') and name.lower() != 'exposure_scores.json'
+                         and os.path.splitext(name)[0] not in movies)
+        except OSError:
+            pass
+        if self.auto_show.show_name:
+            names.add(self.auto_show.show_name)
+        for name in sorted(names, key=natural_sort_key):
+            shows.addItem(name, name)
+        shows.setCurrentIndex(max(0, shows.findData(self.auto_show.show_name)))
+        show_row.addWidget(shows, 1)
+        layout.addLayout(show_row)
+
+        delay_row = QHBoxLayout()
+        delay_row.addWidget(QLabel("Switch after:"))
+        delay = QSpinBox()
+        delay.setRange(1, 1440)
+        delay.setSuffix(" minutes of playback")
+        delay.setValue(self.auto_show.delay_minutes)
+        delay_row.addWidget(delay)
+        layout.addLayout(delay_row)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(dlg.reject)
+        buttons.addWidget(cancel)
+        save = QPushButton("Save")
+
+        def save_settings():
+            name = str(shows.currentData() or '')
+            if enable_toggle.isChecked() and not name:
+                QMessageBox.information(dlg, "Auto-Show", "Choose a destination show to enable Auto-Show.")
+                return
+            self.set_auto_show_settings(enable_toggle.isChecked(), name, delay.value())
+            dlg.accept()
+
+        save.clicked.connect(save_settings)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        dlg.resize(520, 330)
+        dlg.exec()
+
+    def _switch_to_auto_show(self, show_name):
+        filename = resolve_playlist_path(os.path.join('playlists', f'{show_name}.json'))
+        if self._norm_match_path(getattr(self, 'current_playlist_filename', '') or '') == self._norm_match_path(filename):
+            return
+        try:
+            data = playlist_io.load_playlist_json(filename).data
+            items = data.get('playlist', [])
+            if not isinstance(items, list) or not any(
+                self.playlist_manager.is_episode_item(item)
+                and (isinstance(item, str) and bool(item.strip())
+                     or isinstance(item, dict) and bool(item.get('path')))
+                for item in items
+            ):
+                raise ValueError('The destination playlist has no episodes.')
+        except Exception as exc:
+            message = f"Auto-Show couldn't switch to {show_name}. The playlist is unavailable."
+            self.auto_show.report_error(message)
+            self._log_event('auto_show_unavailable', show=show_name, error=str(exc))
+            self._show_mpv_osd_text(message, duration_ms=4000)
+            return
+
+        self._persist_resume_state(force=True, reason='auto_show_switch')
+        self._save_current_episode_position()
+        self._maybe_record_episode_skip()
+        self.playlist_manager._save_exposure_scores(force=True)
+        self.stop_bump_playback()
+        self.missing_media_recovery.stop()
+        self._play_index_last_mono = 0.0
+        # Loading a playlist never restarts the sleep countdown or its nightly
+        # schedule. Start immediately, following the destination's shuffle mode.
+        self.load_playlist(filename, auto_play=False)
+        if self._norm_match_path(getattr(self, 'current_playlist_filename', '') or '') != self._norm_match_path(filename):
+            self.auto_show.report_error(f"Auto-Show couldn't load {show_name}.")
+            return
+        start_index = self._predict_default_start_index()
+        self.play_index(start_index, bypass_bump_gate=True, suppress_ui=True)
+        self._log_event('auto_show_switched', show=show_name)
+        _record_show_played(show_name)
 
     def show_auto_sleep_timer_dialog(self):
         from PySide6.QtWidgets import QTimeEdit
@@ -10772,7 +10916,7 @@ class MainWindow(QMainWindow):
 
         info = QLabel(
             "Automatically stop playback at a set local time each night.\n"
-            "Once enabled it stays on and recurs nightly \u2014 no need to reset it."
+            "This nightly shutoff stays active when you select a countdown or Off in the player."
         )
         info.setWordWrap(True)
         info.setStyleSheet("font-size: 14px; color: #e0e0e0;")
@@ -11776,8 +11920,18 @@ class MainWindow(QMainWindow):
             pass
         return False
 
-    def play_index(self, index, record_history=True, bypass_bump_gate=False, *, suppress_ui: bool = False):
+    def play_index(self, index, record_history=True, bypass_bump_gate=False, *,
+                   suppress_ui: bool = False, start_position: float | None = None):
         pm = self.playlist_manager
+
+        # If the user is starting the same show again, silently resume from disk
+        # for the default start index (no prompts).
+        try:
+            if not bypass_bump_gate and start_position is None:
+                if self._maybe_auto_resume_on_first_play(int(index)):
+                    return
+        except Exception:
+            pass
 
         # Deduplication: prevent rapid repeated calls for the same index that
         # cause stop→start→stop cycling and can wedge mpv into a bad state.
@@ -11797,31 +11951,32 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # If the user is starting the same show again, silently resume from disk
-        # for the default start index (no prompts).
-        try:
-            if not bypass_bump_gate:
-                if self._maybe_auto_resume_on_first_play(int(index)):
-                    return
-        except Exception:
-            pass
-
         try:
             suppress_ui = bool(suppress_ui) or self._should_suppress_auto_nav_ui()
         except Exception:
             suppress_ui = bool(suppress_ui)
         try:
             if index is not None and int(index) != int(getattr(pm, 'current_index', -1)):
-                self._maybe_apply_episode_skip_penalty()
+                self._maybe_record_episode_skip()
         except Exception:
             pass
 
-        # New track start: clear per-start penalty bookkeeping.
-        self._skip_penalty_applied_for_start = None
+        # New track start: clear per-start skip bookkeeping.
+        self._skip_exposure_applied_for_start = None
         if 0 <= index < len(pm.current_playlist):
             # Save the current episode's position so we can restore it later
             # if the user navigates back (skip-to-prev / play_previous).
             self._save_current_episode_position()
+
+            if start_position is None:
+                key = pm._norm_path_key(pm._episode_path_for_index(index))
+                position, duration = self._episode_positions.get(key, (0.0, 0.0))
+                index, start_position = self._episode_resume_start(index, position, duration)
+                if index < 0:
+                    self.stop_playback()
+                    return
+            if pm.shuffle_mode != 'off':
+                start_position = 0.0
 
             # Cut off startup ambient audio as soon as playback begins.
             self._stop_startup_ambient()
@@ -11871,6 +12026,9 @@ class MainWindow(QMainWindow):
                 pass
             self._play_start_monotonic = time.monotonic()
             self._played_since_start = False
+            self._last_time_pos = None
+            self.total_duration = 0
+            self._resume_position_for_start = float(start_position or 0.0)
 
             # Record playback history for Prev navigation.
             if record_history:
@@ -11881,7 +12039,8 @@ class MainWindow(QMainWindow):
 
             # Record episode start for shuffle avoidance.
             try:
-                pm.mark_episode_started(index, sleep_timer_on=bool(getattr(self, 'sleep_timer_active', False)))
+                pm.mark_episode_started(index, sleep_timer_on=bool(
+                    self.sleep_timer_active or self.auto_sleep_enabled))
             except Exception:
                 pass
             
@@ -11929,8 +12088,7 @@ class MainWindow(QMainWindow):
                         _ = int(self.player.winId())
                     except Exception:
                         pass
-                    self.player.play(target)
-                    self._maybe_restore_episode_position(target)
+                    self.player.play(target, start_position=start_position)
                     self._played_since_start = True
                     QTimer.singleShot(200, self._update_track_button_labels)
                     prefix = "[IL]" if itype == 'interstitial' else ""
@@ -11983,8 +12141,7 @@ class MainWindow(QMainWindow):
                      _ = int(self.player.winId())
                  except Exception:
                      pass
-                 self.player.play(target)
-                 self._maybe_restore_episode_position(target)
+                 self.player.play(target, start_position=start_position)
                  self._played_since_start = True
                  self.setWindowTitle(f"Sleepy Shows - {os.path.basename(item)}")
                  try:
@@ -13537,8 +13694,8 @@ class MainWindow(QMainWindow):
                 pass
             self.player.toggle_pause()
 
-    def _maybe_apply_episode_skip_penalty(self):
-        """Apply a small penalty when an episode is skipped/cut off."""
+    def _maybe_record_episode_skip(self):
+        """Record a skip even when navigation outruns asynchronous file loading."""
         try:
             if bool(getattr(self, '_advancing_from_eof', False)):
                 return False
@@ -13567,13 +13724,15 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
-        # If the player is idle (no active file), don't apply a penalty.
-        try:
-            if hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
-                if bool(getattr(self.player.mpv, 'core_idle', True)):
-                    return False
-        except Exception:
-            pass
+        if (getattr(self, '_in_bump_playback', False)
+                or getattr(self, '_pending_bump_item', None) is not None):
+            return False
+
+        # A bump/interlude can keep the previous episode's playlist index.
+        # It must not turn that completed episode into a skip.
+        source = getattr(self, '_last_play_source_path', None)
+        if source and pm._norm_path_key(source) != pm._norm_path_key(pm._episode_path_for_index(idx)):
+            return False
 
         # Only apply when we're in the normal video view (not bump view).
         try:
@@ -13585,7 +13744,7 @@ class MainWindow(QMainWindow):
         # Avoid double-applying for the same playback start.
         try:
             start_key = (idx, getattr(self, '_play_start_monotonic', None))
-            if getattr(self, '_skip_penalty_applied_for_start', None) == start_key:
+            if getattr(self, '_skip_exposure_applied_for_start', None) == start_key:
                 return False
         except Exception:
             start_key = None
@@ -13594,11 +13753,9 @@ class MainWindow(QMainWindow):
         # If duration is unknown, we still treat manual navigation/stop as a cut-off.
         try:
             pos = self._last_time_pos
-            if pos is None and hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
-                pos = getattr(self.player.mpv, 'time_pos', None)
             dur = self.total_duration
-            if (dur is None or float(dur) <= 0) and hasattr(self, 'player') and self.player and getattr(self.player, 'mpv', None):
-                dur = getattr(self.player.mpv, 'duration', None)
+            if getattr(self.player.mpv, 'path', None) != self._last_play_target:
+                pos = dur = None
 
             if pos is not None and dur is not None and float(dur) > 0:
                 if float(pos) >= (float(dur) - 0.15):
@@ -13607,12 +13764,12 @@ class MainWindow(QMainWindow):
             pass
 
         try:
-            delta = pm.apply_episode_skip_penalty(idx, points=1.0)
+            delta = pm.mark_episode_skipped(idx)
         except Exception:
             return False
 
         try:
-            self._skip_penalty_applied_for_start = start_key
+            self._skip_exposure_applied_for_start = start_key
         except Exception:
             pass
 
@@ -13628,7 +13785,7 @@ class MainWindow(QMainWindow):
 
     def stop_playback(self):
         try:
-            self._maybe_apply_episode_skip_penalty()
+            self._maybe_record_episode_skip()
         except Exception:
             pass
 
@@ -13656,6 +13813,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.player.stop()
+        auto_show = getattr(self, 'auto_show', None)
+        if auto_show is not None:
+            auto_show._tick()
+        self.playlist_manager._save_exposure_scores(force=True)
         try:
             self._set_stop_reason('stop_playback')
         except Exception:
@@ -13688,7 +13849,7 @@ class MainWindow(QMainWindow):
 
         # Manual forward navigation mid-episode counts as a skip/cut-off.
         try:
-            self._maybe_apply_episode_skip_penalty()
+            self._maybe_record_episode_skip()
         except Exception:
             pass
 
@@ -13811,7 +13972,7 @@ class MainWindow(QMainWindow):
 
         # Manual forward navigation mid-episode counts as a skip/cut-off.
         try:
-            self._maybe_apply_episode_skip_penalty()
+            self._maybe_record_episode_skip()
         except Exception:
             pass
 
@@ -13938,7 +14099,7 @@ class MainWindow(QMainWindow):
 
         # 2) Otherwise, step back through actual playback history.
         try:
-            self._maybe_apply_episode_skip_penalty()
+            self._maybe_record_episode_skip()
         except Exception:
             pass
         pm = self.playlist_manager
@@ -14263,6 +14424,9 @@ class MainWindow(QMainWindow):
             return
         
     def on_player_paused(self, paused):
+        auto_show = getattr(self, 'auto_show', None)
+        if auto_show is not None:
+            auto_show._tick()
         suppress_ui = False
         try:
             suppress_ui = self._should_suppress_auto_nav_ui()
@@ -14450,7 +14614,7 @@ class MainWindow(QMainWindow):
     def update_seeker(self, time_pos):
         # If the sleep timer is enabled, start/resume countdown only once
         # playback is actually progressing.
-        if getattr(self, 'sleep_timer_active', False):
+        if self.sleep_timer_active or self.auto_sleep_enabled:
             self._resume_sleep_countdown_if_needed()
 
         self._last_time_pos = time_pos
@@ -14503,6 +14667,8 @@ class MainWindow(QMainWindow):
 
     def _check_playback_end(self):
         # Runs on the Qt thread.
+        # Flush the final changes in a rapid skip burst after the I/O throttle.
+        self.playlist_manager._save_exposure_scores()
         try:
             if not hasattr(self, 'player') or not self.player or not getattr(self.player, 'mpv', None):
                 return
@@ -14659,6 +14825,33 @@ class MainWindow(QMainWindow):
         self.total_duration = duration
         self.update_time_label(0, duration) # Reset current? or keep
 
+        # Old resume files can have a position without a duration. Apply the
+        # completion rule once the resumed file's duration becomes available.
+        resume_position = self._resume_position_for_start
+        if (resume_position and duration and self.playlist_manager.shuffle_mode == 'off'
+                and not getattr(self, '_in_bump_playback', False)):
+            loaded_path = getattr(self.player.mpv, 'path', None)
+            if loaded_path == self._last_play_target:
+                self._resume_position_for_start = None
+                idx, _ = self._episode_resume_start(
+                    self.playlist_manager.current_index, resume_position + 3.0, duration)
+                if idx != self.playlist_manager.current_index:
+                    start_key = self._play_start_monotonic
+
+                    def advance_completed_resume():
+                        if self._play_start_monotonic != start_key:
+                            return
+                        self._advancing_from_eof = True
+                        try:
+                            if idx < 0:
+                                self.stop_playback()
+                            else:
+                                self.play_index(idx, bypass_bump_gate=True, start_position=0.0)
+                        finally:
+                            self._advancing_from_eof = False
+
+                    QTimer.singleShot(0, advance_completed_resume)
+
         try:
             self._persist_resume_state(force=False, reason='duration')
         except Exception:
@@ -14715,10 +14908,12 @@ class MainWindow(QMainWindow):
         self.stop_playback()
         self.set_mode(0) # Go to Welcome
 
-        if was_auto:
+        if was_auto or self.auto_sleep_enabled:
             # AUTO is "always on": keep it armed for the next night. The
             # controller already advanced its next trigger before firing.
             try:
+                if not was_auto:
+                    self.start_auto_sleep_timer()
                 self._update_sleep_timer_ui()
             except Exception:
                 pass
@@ -14731,6 +14926,8 @@ class MainWindow(QMainWindow):
             self.cancel_sleep_timer()
 
     def closeEvent(self, event):
+        self.auto_show._timer.stop()
+        self.playlist_manager._save_exposure_scores(force=True)
         try:
             self._log_event('app_close')
         except Exception:

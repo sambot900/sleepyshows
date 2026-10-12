@@ -70,10 +70,18 @@ class MpvPlayer(QWidget):
         # may inspect PATH directly when locating mpv-*.dll.
         try:
             cur = os.environ.get('PATH', '')
+            existing_dirs = {
+                os.path.normcase(os.path.abspath(entry))
+                for entry in cur.split(os.pathsep) if entry
+            }
             to_prepend = []
             for d in usable_dirs:
-                if d and d not in cur:
+                key = os.path.normcase(os.path.abspath(d))
+                # Qt adds its own subdirectory to PATH. A substring match would
+                # mistake that for the parent directory containing libmpv.
+                if key not in existing_dirs:
                     to_prepend.append(d)
+                    existing_dirs.add(key)
             if to_prepend:
                 os.environ['PATH'] = os.pathsep.join(to_prepend) + os.pathsep + cur
         except Exception:
@@ -324,7 +332,7 @@ class MpvPlayer(QWidget):
     def is_idle_active(self):
         return self._cached_idle_active
 
-    def play(self, filepath):
+    def play(self, filepath, start_position: float = 0.0):
         if self.mpv:
             # On some platforms/window-manager transitions (notably fullscreen
             # toggles on Windows), the underlying native window handle can be
@@ -334,7 +342,10 @@ class MpvPlayer(QWidget):
             if wid:
                 self.mpv.wid = wid
             try:
-                self.mpv.play(filepath)
+                # Keep the start offset local to this load. A delayed seek can
+                # otherwise land on a different file after rapid navigation.
+                self.mpv.loadfile(filepath, start=max(0.0, float(start_position)),
+                                  resume_playback='no')
                 self.mpv.pause = False
             except Exception as e:
                 self.errorOccurred.emit(f"MPV play failed: {e}")

@@ -4,11 +4,17 @@ A robust video player with sleep timer functionality, episode browser, and playl
 
 ## Features
 - Sleep Timer
+- Auto-Show: switch to a chosen show after a configurable amount of playback
 - Play/Pause/Previous/Next controls
 - Episode browser by season
 - Playlist creation (source folders, ordering, culling, shuffling)
 - Interlude media injection
 - Portable mode (local files) or Web mode (LAN mounts)
+
+Configure Auto-Show in Settings. The player toggle changes it for the current night;
+it returns to the saved preference at the auto sleep time, or midnight when auto
+sleep is disabled. Pauses don't count toward the delay, and switching shows keeps
+the remaining sleep timer and nightly shutoff schedule.
 
 ## Usage
 1. Install dependencies: `pip install -r requirements.txt`
@@ -20,6 +26,16 @@ A robust video player with sleep timer functionality, episode browser, and playl
    - Windows: `python-mpv` needs `libmpv-2.dll`. The build script will build the app and copy the DLL into `dist/` automatically (it will install `mpv.net` via `winget` if needed).
      - Prereq: install 7-Zip (so `7z.exe` is available): `winget install --id 7zip.7zip -e`
      - Navigate to the project directory first, then run: `powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1`
+
+## Testing
+
+On Windows, run `py -3 -m unittest discover -s tests -v` for playback, exposure,
+nightly timers, Auto-Show, and Qt settings/control regressions. Run
+`py -3 tests/smoke_mpv.py -v` to also test real playback with generated media,
+including saved mpv resume positions, rapid file changes, and Unicode paths.
+The playback check requires `libmpv-2.dll` next to Python or in the project root.
+Both commands use temporary media/settings. On Linux, use `python` in place of
+`py -3`.
 
 ## Portable vs Web Mode
 

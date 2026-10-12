@@ -37,6 +37,8 @@ class SleepTimerController(QObject):
         self.mode: str = 'countdown'
         self.auto_hour: int = 2
         self.auto_minute: int = 0
+        # The recurring setting survives temporary Countdown/Off selections.
+        self.nightly_enabled: bool = False
         self._auto_next_trigger: datetime | None = None
 
         self._timer = QTimer(self)
@@ -76,9 +78,18 @@ class SleepTimerController(QObject):
         self.auto_hour = h
         self.auto_minute = m
         # If AUTO is already armed, recompute the next trigger from the new time.
-        if self.active and self.mode == 'auto':
+        if self.nightly_enabled or self.auto_active:
             self._auto_next_trigger = self._compute_next_trigger(datetime.now())
             self._update_ui()
+
+    def set_nightly_enabled(self, enabled: bool) -> None:
+        self.nightly_enabled = bool(enabled)
+        if self.nightly_enabled:
+            self._auto_next_trigger = self._compute_next_trigger(datetime.now())
+        elif not self.auto_active:
+            self._auto_next_trigger = None
+        self._notify_exposure(self.active or self.nightly_enabled)
+        self._resume_if_needed()
 
     def start_auto(self) -> None:
         """Arm AUTO mode: stop playback at the configured local time, nightly."""
@@ -104,10 +115,12 @@ class SleepTimerController(QObject):
         try:
             self.active = False
             self.mode = 'countdown'
-            self._auto_next_trigger = None
-            self._notify_exposure(False)
+            if not self.nightly_enabled:
+                self._auto_next_trigger = None
+            self._notify_exposure(self.nightly_enabled)
             self.remaining_ms = 0
             self._pause()
+            self._resume_if_needed()
             self._update_ui()
             self._sync_menu()
             self._sync_welcome_screen(False)
@@ -170,24 +183,30 @@ class SleepTimerController(QObject):
             self._timer.stop()
 
     def _resume_if_needed(self) -> None:
-        if not self.active:
+        if not self.active and not self.nightly_enabled:
             self._pause()
             return
 
         # In AUTO mode, remaining_ms is intentionally 0; gate countdown-only
         # expiry checks to countdown mode so the AUTO wall-clock trigger can run.
-        if self.mode != 'auto' and self.remaining_ms <= 0:
+        if self.active and self.mode != 'auto' and self.remaining_ms <= 0 and not self.nightly_enabled:
             self._pause()
             return
         if not self._is_show_playing():
             self._pause()
             return
         if not self._timer.isActive():
+            # A shutoff missed while idle belongs to the previous night.
+            # Starting after it must remain possible, including a 30m override.
+            now = datetime.now()
+            if self.nightly_enabled or self.auto_active:
+                if self._auto_next_trigger is None or now >= self._auto_next_trigger:
+                    self._auto_next_trigger = self._compute_next_trigger(now)
             self._last_tick = time.monotonic()
             self._timer.start()
 
     def _tick(self) -> None:
-        if not self.active:
+        if not self.active and not self.nightly_enabled:
             self._pause()
             self._update_ui()
             return
@@ -197,7 +216,7 @@ class SleepTimerController(QObject):
             self._update_ui()
             return
 
-        if self.mode == 'auto':
+        if self.nightly_enabled or self.auto_active:
             now = datetime.now()
             if self._auto_next_trigger is None:
                 self._auto_next_trigger = self._compute_next_trigger(now)
@@ -206,6 +225,9 @@ class SleepTimerController(QObject):
                 # working across nights without any user action.
                 self._auto_next_trigger = self._compute_next_trigger(now)
                 self.expired.emit()
+                self._update_ui()
+                return
+        if not self.active or self.mode == 'auto':
             self._update_ui()
             return
 

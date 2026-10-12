@@ -117,6 +117,7 @@ class PlaylistManager:
         self._session_episode_plays = 0
         self._session_bump_plays = 0
         self._session_interstitial_plays = 0
+        self._current_episode_exposure = None
 
         # Exposure-ordered interstitial queue (paths).
         self._interstitial_queue = []
@@ -141,6 +142,7 @@ class PlaylistManager:
         self.playback_history = []
         self.playback_history_pos = -1
         self._forced_next_episode_index = None
+        self._current_episode_exposure = None
 
         # New viewing session: reset exposure scaling counters.
         self._session_episode_plays = 0
@@ -433,49 +435,21 @@ class PlaylistManager:
         self._save_exposure_scores()
         return float(delta)
 
-    def apply_episode_skip_penalty(self, index, points: float = 1.0):
-        """Apply a small negative adjustment for skipped/cut-off episodes.
+    def mark_episode_skipped(self, index):
+        """Retain 80% of this start's exposure without advancing sleep tiers.
 
-        The deduction is applied to the *base* points, before user factors.
-        That means we subtract (points * factor) from the stored exposure score.
+        Starts receive the full score provisionally. Adjust that same award,
+        including its episode/season factor, exactly once even before mpv loads.
         """
-        try:
-            idx = int(index)
-        except Exception:
+        play = self._current_episode_exposure
+        if not play or play['index'] != index or play['skipped']:
             return 0.0
-
-        if idx < 0 or idx >= len(self.current_playlist):
-            return 0.0
-        if not self.is_episode_item(self.current_playlist[idx]):
-            return 0.0
-
-        try:
-            p = self._episode_path_for_index(idx)
-        except Exception:
-            p = ''
-        key = self._norm_path_key(p)
-        if not key:
-            return 0.0
-
-        try:
-            pts = float(points)
-        except Exception:
-            pts = 1.0
-        pts = abs(pts)
-        if pts <= 0:
-            return 0.0
-
-        try:
-            factor = float(self._effective_episode_factor(p))
-        except Exception:
-            factor = 1.0
-
-        delta = -float(pts) * float(factor)
-        try:
-            self.episode_exposure_scores[key] = float(self.episode_exposure_scores.get(key, 0.0) or 0.0) + float(delta)
-        except Exception:
-            self.episode_exposure_scores[key] = float(delta)
-
+        play['skipped'] = True
+        delta = -0.2 * play['delta']
+        key = play['key']
+        self.episode_exposure_scores[key] += delta
+        if play['tier_counted']:
+            self._session_episode_plays = max(0, self._session_episode_plays - 1)
         self._exposure_dirty = True
         self._save_exposure_scores()
         return float(delta)
@@ -843,6 +817,7 @@ class PlaylistManager:
         return ordered[pos + 1]
 
     def mark_episode_started(self, index, *, sleep_timer_on: bool | None = None):
+        self._current_episode_exposure = None
         # Track episode history for avoidance rules.
         if index is None or index < 0:
             return
@@ -850,6 +825,10 @@ class PlaylistManager:
             return
         if not self.is_episode_item(self.current_playlist[index]):
             return
+
+        # A direct selection or resume can start an episode still in the queue.
+        # Consume it just as a normal queue pick would.
+        self.play_queue = [i for i in self.play_queue if i != index]
 
         # Keep exposure behavior in sync with the UI sleep timer.
         if sleep_timer_on is not None:
@@ -885,8 +864,11 @@ class PlaylistManager:
             except Exception:
                 self.episode_exposure_scores[key] = float(delta)
 
-            self._exposure_dirty = True
-            self._save_exposure_scores()
+            self._current_episode_exposure = {
+                'index': index, 'key': key, 'delta': float(delta),
+                'tier_counted': bool(self._sleep_timer_active_for_exposure),
+                'skipped': False,
+            }
 
             try:
                 self.episode_play_counts[key] = int(self.episode_play_counts.get(key, 0) or 0) + 1
@@ -897,6 +879,8 @@ class PlaylistManager:
         # Keep history bounded.
         if len(self.episode_history) > 50:
             self.episode_history = self.episode_history[-50:]
+        self._exposure_dirty = True
+        self._save_exposure_scores()
 
     def record_playback_index(self, index):
         if index is None or index < 0:
