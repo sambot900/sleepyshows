@@ -1057,6 +1057,10 @@ class BumpsModeWidget(QWidget):
         self.btn_auto_show.clicked.connect(self.main_window.show_auto_show_dialog)
         layout.addWidget(self.btn_auto_show)
 
+        self.btn_trim = QPushButton("Trim")
+        self.btn_trim.clicked.connect(self.main_window.show_trim_dialog)
+        layout.addWidget(self.btn_trim)
+
         # --- Sound settings ---
         def add_toggle_row(label_text, initial_checked, on_toggle):
             row = QHBoxLayout()
@@ -8645,7 +8649,8 @@ class MainWindow(QMainWindow):
             duration = float(duration or 0.0)
         except (TypeError, ValueError):
             return index, 0.0
-        if position > 0 and duration > 0 and duration - position <= 20.0:
+        _, end_trim = self._episode_trim(index)
+        if position > 0 and duration > 0 and duration - position <= max(20.0, end_trim):
             next_index = pm._next_chronological_episode_index_after(index)
             if next_index >= 0:
                 key = pm._norm_path_key(pm._episode_path_for_index(next_index))
@@ -10863,6 +10868,127 @@ class MainWindow(QMainWindow):
         dlg.resize(520, 330)
         dlg.exec()
 
+    def _show_trim(self, show_name):
+        """Return validated seconds; only catalog entries marked as shows qualify."""
+        if not any(entry['name'] == show_name and entry['type'] == 'show'
+                   for entry in SHOW_CATALOG):
+            return 0, 0
+        settings = getattr(self, '_settings', {}).get('show_trim', {})
+        values = settings.get(show_name, {}) if isinstance(settings, dict) else {}
+        if not isinstance(values, dict):
+            return 0, 0
+
+        def seconds(key):
+            try:
+                return max(0, min(86400, int(values.get(key, 0))))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        return seconds('start_seconds'), seconds('end_seconds')
+
+    def _episode_trim(self, index):
+        pm = self.playlist_manager
+        if not 0 <= index < len(pm.current_playlist) or not pm.is_episode_item(pm.current_playlist[index]):
+            return 0, 0
+        filename = getattr(self, 'current_playlist_filename', None) or ''
+        return self._show_trim(os.path.splitext(os.path.basename(filename))[0])
+
+    def _episode_playback_end(self, duration):
+        """Use the active load's end limit for EOF fallback and skip accounting."""
+        pm = self.playlist_manager
+        index = pm.current_index
+        if (getattr(self, '_in_bump_playback', False)
+                or getattr(self, '_pending_bump_item', None) is not None
+                or not 0 <= index < len(pm.current_playlist)
+                or not pm.is_episode_item(pm.current_playlist[index])
+                or pm._norm_path_key(getattr(self, '_last_play_source_path', ''))
+                != pm._norm_path_key(pm._episode_path_for_index(index))):
+            return duration
+        return max(0.0, float(duration) - getattr(self, '_active_episode_trim', (0, 0))[1])
+
+    def show_trim_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Trim")
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+        info = QLabel(
+            "Skip the beginning and end of every episode of a show. Movies are excluded.\n"
+            "Use 0 seconds to disable either skip. Changes apply when an episode starts."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        shows = QComboBox()
+        shows.setObjectName('trim_show')
+        draft = {entry['name']: self._show_trim(entry['name'])
+                 for entry in SHOW_CATALOG if entry['type'] == 'show'}
+        for name in sorted(draft, key=natural_sort_key):
+            shows.addItem(name, name)
+        current = os.path.splitext(os.path.basename(self.current_playlist_filename or ''))[0]
+        shows.setCurrentIndex(max(0, shows.findData(current)))
+        show_row = QHBoxLayout()
+        show_label = QLabel("Show:")
+        show_label.setBuddy(shows)
+        show_row.addWidget(show_label)
+        show_row.addWidget(shows, 1)
+        layout.addLayout(show_row)
+
+        fields = []
+        for label, object_name in (("Skip at beginning:", 'trim_start_seconds'),
+                                   ("Skip at end:", 'trim_end_seconds')):
+            row = QHBoxLayout()
+            field = QSpinBox()
+            field.setObjectName(object_name)
+            field.setRange(0, 86400)
+            field.setSuffix(" seconds")
+            field_label = QLabel(label)
+            field_label.setBuddy(field)
+            row.addWidget(field_label)
+            row.addWidget(field)
+            layout.addLayout(row)
+            fields.append(field)
+
+        selected = shows.currentData()
+
+        def load_values():
+            for field, value in zip(fields, draft.get(selected, (0, 0))):
+                field.setValue(value)
+
+        def remember_values():
+            if selected:
+                draft[selected] = tuple(field.value() for field in fields)
+
+        def change_show():
+            nonlocal selected
+            remember_values()
+            selected = shows.currentData()
+            load_values()
+
+        load_values()
+        shows.currentIndexChanged.connect(change_show)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(dlg.reject)
+        buttons.addWidget(cancel)
+        save = QPushButton("Save")
+
+        def save_settings():
+            remember_values()
+            self._settings['show_trim'] = {
+                name: {'start_seconds': start, 'end_seconds': end}
+                for name, (start, end) in draft.items() if start or end
+            }
+            self._save_user_settings()
+            dlg.accept()
+
+        save.clicked.connect(save_settings)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        dlg.resize(520, 280)
+        dlg.exec()
+
     def _switch_to_auto_show(self, show_name):
         filename = resolve_playlist_path(os.path.join('playlists', f'{show_name}.json'))
         if self._norm_match_path(getattr(self, 'current_playlist_filename', '') or '') == self._norm_match_path(filename):
@@ -11983,6 +12109,9 @@ class MainWindow(QMainWindow):
             self.stop_bump_playback()
             pm.current_index = index
             item = pm.current_playlist[index]
+            start_trim, end_trim = self._episode_trim(index)
+            playback_start_position = max(float(start_position or 0.0), start_trim)
+            trim_options = {'end_trim': end_trim} if end_trim else {}
 
             # Global bump gate: when enabled, play a bump before any episode playback,
             # including the first episode (even if we're starting mid-queue).
@@ -12029,6 +12158,7 @@ class MainWindow(QMainWindow):
             self._last_time_pos = None
             self.total_duration = 0
             self._resume_position_for_start = float(start_position or 0.0)
+            self._active_episode_trim = (start_trim, end_trim)
 
             # Record playback history for Prev navigation.
             if record_history:
@@ -12088,7 +12218,7 @@ class MainWindow(QMainWindow):
                         _ = int(self.player.winId())
                     except Exception:
                         pass
-                    self.player.play(target, start_position=start_position)
+                    self.player.play(target, start_position=playback_start_position, **trim_options)
                     self._played_since_start = True
                     QTimer.singleShot(200, self._update_track_button_labels)
                     prefix = "[IL]" if itype == 'interstitial' else ""
@@ -12141,7 +12271,7 @@ class MainWindow(QMainWindow):
                      _ = int(self.player.winId())
                  except Exception:
                      pass
-                 self.player.play(target, start_position=start_position)
+                 self.player.play(target, start_position=playback_start_position, **trim_options)
                  self._played_since_start = True
                  self.setWindowTitle(f"Sleepy Shows - {os.path.basename(item)}")
                  try:
@@ -13758,7 +13888,7 @@ class MainWindow(QMainWindow):
                 pos = dur = None
 
             if pos is not None and dur is not None and float(dur) > 0:
-                if float(pos) >= (float(dur) - 0.15):
+                if float(pos) >= (self._episode_playback_end(dur) - 0.15):
                     return False
         except Exception:
             pass
@@ -13813,6 +13943,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.player.stop()
+        # Invalidate deferred completion callbacks for the stopped load.
+        self._play_start_monotonic = None
         auto_show = getattr(self, 'auto_show', None)
         if auto_show is not None:
             auto_show._tick()
@@ -14305,6 +14437,15 @@ class MainWindow(QMainWindow):
         try:
             started = float(getattr(self, '_play_start_monotonic', 0.0) or 0.0)
             if started and (time.monotonic() - started) < 1.0:
+                # A short or fully trimmed episode can legitimately end during
+                # the stale-event guard. Retry only if this same load is idle.
+                if any(getattr(self, '_active_episode_trim', (0, 0))):
+                    def finish_short_trimmed_episode():
+                        if (self._play_start_monotonic == started
+                                and self.player.mpv.idle_active):
+                            self.on_playback_finished()
+
+                    QTimer.singleShot(1100, finish_short_trimmed_episode)
                 try:
                     self._log_event('stale_eof_ignored',
                                     elapsed=round(time.monotonic() - started, 3),
@@ -14487,6 +14628,18 @@ class MainWindow(QMainWindow):
             pass
 
         self._log_event('mpv_end_file', reason=r, target=target)
+
+        # mpv reports an empty start/end range as a load error. When Trim
+        # consumes an episode, finish it normally instead of entering recovery.
+        start_trim, end_trim = getattr(self, '_active_episode_trim', (0, 0))
+        if (r.lower() == 'error' and (start_trim or end_trim)
+                and not getattr(self, '_in_bump_playback', False)
+                and getattr(self, '_pending_bump_item', None) is None
+                and self.total_duration > 0
+                and max(start_trim, self._resume_position_for_start or 0.0)
+                >= self._episode_playback_end(self.total_duration)):
+            self.on_playback_finished()
+            return
 
         # If this wasn't EOF, capture it as a stop reason for overnight debugging.
         try:
@@ -14770,7 +14923,8 @@ class MainWindow(QMainWindow):
             pos_at_end = False
             if dur and pos is not None:
                 try:
-                    pos_at_end = float(pos) >= (float(dur) - 0.15)
+                    end = float(dur) if is_bump_video else self._episode_playback_end(dur)
+                    pos_at_end = float(pos) >= (end - 0.15)
                 except Exception:
                     pos_at_end = False
 
@@ -14926,6 +15080,7 @@ class MainWindow(QMainWindow):
             self.cancel_sleep_timer()
 
     def closeEvent(self, event):
+        self._play_start_monotonic = None
         self.auto_show._timer.stop()
         self.playlist_manager._save_exposure_scores(force=True)
         try:

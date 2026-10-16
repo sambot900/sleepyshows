@@ -33,6 +33,7 @@ class PlaybackHarness:
         "_arm_auto_resume_for_playlist", "_apply_resume_state", "_capture_resume_state",
         "_predict_default_start_index", "_norm_match_path", "update_duration",
         "skip_to_next_episode",
+        "_show_trim", "_episode_trim", "_episode_playback_end",
     ):
         locals()[name] = getattr(MainWindow, name)
 
@@ -254,6 +255,7 @@ class BackendLoadTests(unittest.TestCase):
             with patch("player_backend.sys.platform", "win32"), \
                  patch("player_backend.sys.executable", os.path.join(dll_dir, "python.exe")), \
                  patch.dict(os.environ, {"PATH": qt_dir}), \
+                 patch("player_backend.os.path.isfile", side_effect=lambda path: path == os.path.join(dll_dir, "libmpv-2.dll")), \
                  patch("player_backend.os.add_dll_directory", create=True) as add_dir:
                 MpvPlayer._prepare_windows_mpv_dll_search(backend)
                 self.assertIn(dll_dir, os.environ["PATH"].split(os.pathsep))
@@ -268,6 +270,7 @@ class BackendLoadTests(unittest.TestCase):
             with patch("player_backend.sys.platform", "win32"), \
                  patch("player_backend.sys.executable", os.path.join(folder, "python.exe")), \
                  patch.dict(os.environ, {"PATH": existing_path}), \
+                 patch("player_backend.os.path.isfile", side_effect=lambda path: path == os.path.join(folder, "libmpv-2.dll")), \
                  patch("player_backend.os.add_dll_directory", create=True):
                 MpvPlayer._prepare_windows_mpv_dll_search(backend)
                 self.assertEqual(os.environ["PATH"], existing_path)
@@ -277,9 +280,9 @@ class BackendLoadTests(unittest.TestCase):
         MpvPlayer.play(backend, "a.mkv", start_position=500)
         MpvPlayer.play(backend, "b.mkv")
         self.assertEqual(backend.mpv.loadfile.call_args_list[0].kwargs,
-                         {"start": 500.0, "resume_playback": "no"})
+                         {"start": 500.0, "end": "none", "resume_playback": "no"})
         self.assertEqual(backend.mpv.loadfile.call_args_list[1].kwargs,
-                         {"start": 0.0, "resume_playback": "no"})
+                         {"start": 0.0, "end": "none", "resume_playback": "no"})
         backend.mpv.seek.assert_not_called()
         backend.errorOccurred.emit.assert_not_called()
 

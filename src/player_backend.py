@@ -332,7 +332,7 @@ class MpvPlayer(QWidget):
     def is_idle_active(self):
         return self._cached_idle_active
 
-    def play(self, filepath, start_position: float = 0.0):
+    def play(self, filepath, start_position: float = 0.0, *, end_trim: float = 0.0):
         if self.mpv:
             # On some platforms/window-manager transitions (notably fullscreen
             # toggles on Windows), the underlying native window handle can be
@@ -344,8 +344,12 @@ class MpvPlayer(QWidget):
             try:
                 # Keep the start offset local to this load. A delayed seek can
                 # otherwise land on a different file after rapid navigation.
+                # Negative end times are relative to the file's duration. mpv
+                # emits its normal EOF, preserving episode/bump transitions.
+                # Explicitly clear the limit for movies, interludes and bumps.
+                end = -float(end_trim) if end_trim > 0 else 'none'
                 self.mpv.loadfile(filepath, start=max(0.0, float(start_position)),
-                                  resume_playback='no')
+                                  end=end, resume_playback='no')
                 self.mpv.pause = False
             except Exception as e:
                 self.errorOccurred.emit(f"MPV play failed: {e}")

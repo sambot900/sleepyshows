@@ -5,6 +5,7 @@ A robust video player with sleep timer functionality, episode browser, and playl
 ## Features
 - Sleep Timer
 - Auto-Show: switch to a chosen show after a configurable amount of playback
+- Trim: per-show beginning and ending skips, in seconds (Windows and Linux)
 - Play/Pause/Previous/Next controls
 - Episode browser by season
 - Playlist creation (source folders, ordering, culling, shuffling)
@@ -15,6 +16,13 @@ Configure Auto-Show in Settings. The player toggle changes it for the current ni
 it returns to the saved preference at the auto sleep time, or midnight when auto
 sleep is disabled. Pauses don't count toward the delay, and switching shows keeps
 the remaining sleep timer and nightly shutoff schedule.
+
+In **Settings → Trim**, choose a show and enter how many seconds to skip at the
+beginning and end of each episode. Each show saves its own values; 0 disables
+either skip. You can edit several shows before pressing Save. Changes apply when
+an episode starts. Chronological playback keeps your resume position beyond the
+intro, and an episode that reaches its trimmed ending advances normally. Movies,
+bumps, and interludes are excluded.
 
 ## Usage
 1. Install dependencies: `pip install -r requirements.txt`
@@ -33,6 +41,8 @@ On Windows, run `py -3 -m unittest discover -s tests -v` for playback, exposure,
 nightly timers, Auto-Show, and Qt settings/control regressions. Run
 `py -3 tests/smoke_mpv.py -v` to also test real playback with generated media,
 including saved mpv resume positions, rapid file changes, and Unicode paths.
+Trim checks also cover per-show persistence, movie/interlude exclusion, resume
+behavior and real mpv playback ending early and advancing to the next episode.
 The playback check requires `libmpv-2.dll` next to Python or in the project root.
 Both commands use temporary media/settings. On Linux, use `python` in place of
 `py -3`.
