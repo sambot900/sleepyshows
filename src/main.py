@@ -108,6 +108,7 @@ SHOW_CATALOG = [
     {"name": "Scooby-Doo! 13 Ghosts of (1985)", "icon": "13-ghosts-of-sd.png", "type": "show", "shuffle_mode": "standard", "year": 1985},
     {"name": "Scooby-Doo! Mystery Incorporated (2022)", "icon": "mystery-inc-icon.png", "type": "show", "shuffle_mode": "off", "year": 2022},
     {"name": "What's New Scooby-Doo! (2002-2006)", "icon": "whats-new-sd-icon.png", "type": "show", "shuffle_mode": "standard", "year": 2002},
+    {"name": "Ghost Files",      "icon": "gf-icon.png",          "type": "show", "shuffle_mode": "standard", "year": 2022},
     # Movies
     {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
     {"name": "Scooby-Doo and the Ghoul School (1988)", "icon": "sd-ghool-school-icon.png", "type": "movie", "shuffle_mode": "off", "year": 1988},
@@ -2612,6 +2613,12 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join("Whats New Scooby-Doo", 'Episodes'),
             os.path.join("Whats New Scooby-Doo"),
         ]),
+        ("Ghost Files", [
+            os.path.join('Shows', 'Ghost Files', 'Episodes'),
+            os.path.join('Shows', 'Ghost Files'),
+            os.path.join('Ghost Files', 'Episodes'),
+            os.path.join('Ghost Files'),
+        ]),
         # Movies
         ("Birdman (2014)", [
             os.path.join('Movies', 'Birdman (2014)'),
@@ -3110,6 +3117,12 @@ def auto_detect_show_folders_web(mount_roots_override):
             os.path.join('Shows', "Whats New Scooby-Doo"),
             os.path.join("Whats New Scooby-Doo", 'Episodes'),
             os.path.join("Whats New Scooby-Doo"),
+        ]),
+        ("Ghost Files", [
+            os.path.join('Shows', 'Ghost Files', 'Episodes'),
+            os.path.join('Shows', 'Ghost Files'),
+            os.path.join('Ghost Files', 'Episodes'),
+            os.path.join('Ghost Files'),
         ]),
         # Movies
         ("Birdman (2014)", [
