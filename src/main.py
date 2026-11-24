@@ -109,6 +109,8 @@ SHOW_CATALOG = [
     {"name": "Scooby-Doo! Mystery Incorporated (2022)", "icon": "mystery-inc-icon.png", "type": "show", "shuffle_mode": "off", "year": 2022},
     {"name": "What's New Scooby-Doo! (2002-2006)", "icon": "whats-new-sd-icon.png", "type": "show", "shuffle_mode": "standard", "year": 2002},
     {"name": "Ghost Files",      "icon": "gf-icon.png",          "type": "show", "shuffle_mode": "standard", "year": 2022},
+    {"name": "Buzzfeed Unsolved Supernatural", "icon": "unsolved-icon.png", "type": "show", "shuffle_mode": "standard", "year": 2016},
+    {"name": "Mystery Files",    "icon": "mf-icon.png",          "type": "show", "shuffle_mode": "standard", "year": 2023},
     # Movies
     {"name": "Birdman (2014)",     "icon": "birdman-icon.png",    "type": "movie", "shuffle_mode": "off", "year": 2014},
     {"name": "Scooby-Doo and the Ghoul School (1988)", "icon": "sd-ghool-school-icon.png", "type": "movie", "shuffle_mode": "off", "year": 1988},
@@ -2619,6 +2621,18 @@ def auto_detect_show_folders(volume_label='T7'):
             os.path.join('Ghost Files', 'Episodes'),
             os.path.join('Ghost Files'),
         ]),
+        ("Buzzfeed Unsolved Supernatural", [
+            os.path.join('Shows', 'Buzzfeed Unsolved Supernatural', 'Episodes'),
+            os.path.join('Shows', 'Buzzfeed Unsolved Supernatural'),
+            os.path.join('Buzzfeed Unsolved Supernatural', 'Episodes'),
+            os.path.join('Buzzfeed Unsolved Supernatural'),
+        ]),
+        ("Mystery Files", [
+            os.path.join('Shows', 'Mystery Files', 'Episodes'),
+            os.path.join('Shows', 'Mystery Files'),
+            os.path.join('Mystery Files', 'Episodes'),
+            os.path.join('Mystery Files'),
+        ]),
         # Movies
         ("Birdman (2014)", [
             os.path.join('Movies', 'Birdman (2014)'),
@@ -3123,6 +3137,18 @@ def auto_detect_show_folders_web(mount_roots_override):
             os.path.join('Shows', 'Ghost Files'),
             os.path.join('Ghost Files', 'Episodes'),
             os.path.join('Ghost Files'),
+        ]),
+        ("Buzzfeed Unsolved Supernatural", [
+            os.path.join('Shows', 'Buzzfeed Unsolved Supernatural', 'Episodes'),
+            os.path.join('Shows', 'Buzzfeed Unsolved Supernatural'),
+            os.path.join('Buzzfeed Unsolved Supernatural', 'Episodes'),
+            os.path.join('Buzzfeed Unsolved Supernatural'),
+        ]),
+        ("Mystery Files", [
+            os.path.join('Shows', 'Mystery Files', 'Episodes'),
+            os.path.join('Shows', 'Mystery Files'),
+            os.path.join('Mystery Files', 'Episodes'),
+            os.path.join('Mystery Files'),
         ]),
         # Movies
         ("Birdman (2014)", [
