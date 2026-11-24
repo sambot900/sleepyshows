@@ -1,5 +1,6 @@
-"""Exercise Auto-Show settings and responsive controls with real Qt widgets."""
+"""Exercise settings and responsive player controls with real Qt widgets."""
 from contextlib import ExitStack
+from datetime import datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,8 @@ from unittest.mock import Mock, patch
 from test_playback_regressions import APP
 import main
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QComboBox, QDialog, QPushButton, QSpinBox
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QComboBox, QDialog, QMenu, QPushButton, QSpinBox
 
 
 class PlayerUiTests(unittest.TestCase):
@@ -46,12 +48,153 @@ class PlayerUiTests(unittest.TestCase):
         self.window.show()
         APP.processEvents()
 
-    def close_window(self):
-        self.window.close()
-        for timer in self.window.findChildren(QTimer):
+    def close_window(self, window=None):
+        window = self.window if window is None else window
+        window.close()
+        for timer in window.findChildren(QTimer):
             timer.stop()
-        self.window.deleteLater()
+        window.deleteLater()
         APP.processEvents()
+
+    def test_auto_volume_controls_sync_and_save_the_reduction_and_manual_volume(self):
+        window = self.window
+        controls = window.play_mode_widget
+        settings = window.bumps_mode_widget
+        setting = settings.chk_auto_volume
+        checkbox = controls.chk_auto_volume
+        reduction = settings.findChild(QSpinBox, 'auto_volume_reduction')
+        self.assertEqual(reduction.value(), 20)
+        self.assertIsNone(controls.findChild(QSpinBox, 'auto_volume_reduction'))
+
+        reduction.setValue(40)
+        self.assertEqual(window._load_user_settings()['auto_volume_reduction_percent'], 40)
+        self.assertFalse(checkbox.isChecked())
+        setting.click()
+        self.assertTrue(checkbox.isChecked())
+        checkbox.click()
+        self.assertFalse(setting.isChecked())
+        checkbox.click()
+        self.assertTrue(setting.isChecked())
+
+        controls.slider_vol.setValue(65)
+        self.assertEqual(window.player.mpv.volume, 65)
+        with patch('sleep_timer.time.monotonic', return_value=100.0) as monotonic:
+            window.player.mpv.pause = False
+            window.player.mpv.core_idle = False
+            window.start_sleep_timer(10)
+            monotonic.return_value += 300
+            window.sleep_timer._tick()
+        self.assertAlmostEqual(window.player.mpv.volume, 52)
+        self.assertEqual(controls.slider_vol.value(), 65)
+
+        window.sleep_timer.pause()
+        window.close()
+        reopened = main.MainWindow()
+        self.addCleanup(self.close_window, reopened)
+        self.assertTrue(reopened.play_mode_widget.chk_auto_volume.isChecked())
+        self.assertTrue(reopened.bumps_mode_widget.chk_auto_volume.isChecked())
+        self.assertEqual(reopened.bumps_mode_widget.findChild(QSpinBox, 'auto_volume_reduction').value(), 40)
+        self.assertEqual(reopened.play_mode_widget.slider_vol.value(), 65)
+        self.assertEqual(reopened.player.mpv.volume, 65)
+
+    def test_auto_volume_follows_countdown_pause_manual_adjustment_and_cancel(self):
+        window = self.window
+        timer = window.sleep_timer
+        player = window.player.mpv
+        window.fx_player.mpv = Mock()
+        window.fx_player.set_volume(50)
+        window.set_auto_volume_enabled(True)
+        window.play_mode_widget.slider_vol.setValue(60)
+        player.pause = False
+        player.core_idle = False
+
+        with patch('sleep_timer.time.monotonic', return_value=100.0) as monotonic:
+            window.start_sleep_timer(10)
+            self.assertEqual(player.volume, 60)
+            monotonic.return_value += 300
+            timer._tick()
+            self.assertAlmostEqual(player.volume, 54)
+            self.assertAlmostEqual(window.fx_player.mpv.volume, 45)
+
+            player.pause = True
+            timer.pause()
+            monotonic.return_value += 1200
+            timer._tick()
+            self.assertAlmostEqual(player.volume, 54)
+
+            player.pause = False
+            timer.resume_if_needed()
+            window.play_mode_widget.slider_vol.setValue(70)
+            self.assertAlmostEqual(player.volume, 63)
+            monotonic.return_value += 150
+            timer._tick()
+            self.assertAlmostEqual(player.volume, 59.5)
+
+            window.play_mode_widget.chk_auto_volume.click()
+            self.assertEqual(player.volume, 70)
+            self.assertEqual(window.fx_player.mpv.volume, 50)
+            window.play_mode_widget.chk_auto_volume.click()
+            monotonic.return_value += 75
+            timer._tick()
+            self.assertAlmostEqual(player.volume, 63)
+            window.cancel_sleep_timer()
+            self.assertEqual(player.volume, 70)
+            self.assertEqual(window.fx_player.mpv.volume, 50)
+
+            window.start_sleep_timer(1)
+            monotonic.return_value += 60
+            with patch.object(window.player, 'set_volume', wraps=window.player.set_volume) as volume:
+                timer._tick()
+                self.assertEqual([call.args[0] for call in volume.call_args_list], [56, 70])
+            self.assertFalse(timer.active)
+
+    def test_auto_volume_follows_earliest_shutoff_across_midnight_and_resets_at_expiry(self):
+        window = self.window
+        timer = window.sleep_timer
+        player = window.player.mpv
+        player.stop.side_effect = lambda: setattr(player, 'core_idle', True)
+        window.set_auto_volume_enabled(True)
+
+        with patch('sleep_timer.datetime') as clock, patch(
+            'sleep_timer.time.monotonic', return_value=100.0
+        ) as monotonic:
+            clock.now.return_value = datetime(2026, 10, 12, 23, 30)
+            window.set_auto_sleep_settings(True, '00:30')
+            window.start_sleep_timer(180)
+            player.pause = False
+            player.core_idle = False
+            timer.resume_if_needed()
+            self.assertEqual(player.volume, 100)
+
+            clock.now.return_value += timedelta(minutes=30)
+            monotonic.return_value += 1800
+            timer._tick()
+            self.assertAlmostEqual(player.volume, 90)
+
+            reduction = window.bumps_mode_widget.findChild(QSpinBox, 'auto_volume_reduction')
+            reduction.setValue(40)
+            self.assertAlmostEqual(player.volume, 80)
+            reduction.setValue(0)
+            self.assertAlmostEqual(player.volume, 100)
+            reduction.setValue(100)
+            self.assertAlmostEqual(player.volume, 50)
+
+            clock.now.return_value += timedelta(minutes=30)
+            monotonic.return_value += 1800
+            with patch.object(window.player, 'set_volume', wraps=window.player.set_volume) as volume:
+                timer._tick()
+                self.assertEqual([call.args[0] for call in volume.call_args_list], [0, 100])
+            self.assertTrue(timer.auto_active)
+            self.assertTrue(player.core_idle)
+
+            clock.now.return_value += timedelta(hours=23)
+            player.core_idle = False
+            timer.resume_if_needed()
+            self.assertEqual(player.volume, 100)
+            clock.now.return_value += timedelta(minutes=30)
+            monotonic.return_value += 1800
+            timer._tick()
+            self.assertAlmostEqual(player.volume, 50)
 
     def test_settings_dialog_saves_default_and_player_toggle_only_overrides_tonight(self):
         errors = []
@@ -103,7 +246,64 @@ class PlayerUiTests(unittest.TestCase):
             APP.processEvents()
             if button.isVisible():
                 self.assertGreaterEqual(button.width(), button.fontMetrics().horizontalAdvance("AUTO-SHOW") + 16)
+            checkbox = controls.chk_auto_volume
+            self.assertTrue(checkbox.isVisible())
+            self.assertGreaterEqual(checkbox.width(), checkbox.sizeHint().width())
         self.assertTrue(button.isVisible())
+
+    def test_skip_sections_menu_saves_a_scrubbed_range_and_deletes_it(self):
+        window = self.window
+        window.set_mode(2)
+        path = str(Path(self.tmp.name, 'S01E01.mkv'))
+        window.bumps_enabled = False
+        window.playlist_manager.current_playlist = [{'type': 'video', 'path': path}]
+        window.current_playlist_filename = str(Path(self.tmp.name, 'King of the Hill.json'))
+        window.play_index(0, bypass_bump_gate=True, start_position=0)
+        window.player.mpv.path = path
+        window.player.mpv.time_pos = 10.25
+        window.update_duration(100)
+
+        with patch.object(window.player, 'set_playback_end') as playback_end, patch.object(
+            window.player, 'set_playback_keep_open', return_value='no'
+        ) as keep_open:
+            window.play_mode_widget.btn_skip_sections.click()
+            menu = APP.activePopupWidget()
+            self.assertIsInstance(menu, QMenu)
+            menu.actions()[0].trigger()
+            menu.close()
+            dialog = window._skip_section_dialog
+            self.assertTrue(dialog.isVisible())
+            self.assertFalse(dialog.isModal())
+            self.assertTrue(window.player.mpv.pause)
+            self.assertEqual(dialog.time_field.text(), '00:10.250')
+            playback_end.assert_called_once_with(None)
+            keep_open.assert_called_once_with('yes')
+
+            dialog.time_field.selectAll()
+            QTest.keyClicks(dialog.time_field, '00:12')
+            window.update_seeker(11)
+            self.assertEqual(dialog.time_field.text(), '00:12')
+            dialog.confirm.click()
+            self.assertEqual(dialog.time_field.text(), '00:11')
+
+            window.seek_video(3500)
+            window.player.mpv.seek.assert_called_once_with(35, reference='absolute', precision='exact')
+            window.update_seeker(35)
+            self.assertEqual(dialog.time_field.text(), '00:35')
+            dialog.confirm.click()
+            self.assertIsNone(window._skip_section_dialog)
+            self.assertFalse(window.player.mpv.pause)
+            keep_open.assert_called_with('no')
+            key = window.playlist_manager._norm_path_key(path)
+            self.assertEqual(window._load_user_settings()['skip_sections'], {key: [[12, 35]]})
+
+            window.play_mode_widget.btn_skip_sections.click()
+            menu = APP.activePopupWidget()
+            submenu = menu.actions()[1].menu()
+            submenu.actions()[0].trigger()
+            menu.close()
+            self.assertEqual(window._load_user_settings()['skip_sections'], {})
+            self.assertEqual(window._active_skip_ranges, ())
 
     def open_trim_dialog(self, configure):
         errors = []

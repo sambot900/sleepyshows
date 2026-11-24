@@ -34,6 +34,8 @@ class PlaybackHarness:
         "_predict_default_start_index", "_norm_match_path", "update_duration",
         "skip_to_next_episode",
         "_show_trim", "_episode_trim", "_episode_playback_end",
+        "_episode_skip_key", "_current_skip_key", "_refresh_episode_skip_ranges",
+        "_dismiss_skip_section_editor", "_skip_section_at_playhead",
     ):
         locals()[name] = getattr(MainWindow, name)
 
@@ -43,6 +45,8 @@ class PlaybackHarness:
         self._pending_auto_resume_state = None
         self._pending_auto_resume_playlist = None
         self._last_time_pos = None
+        self._skip_section_dialog = None
+        self.is_seeking = False
         self.total_duration = 0
         self._play_start_monotonic = None
         self._resume_position_for_start = None

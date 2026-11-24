@@ -366,9 +366,23 @@ class MpvPlayer(QWidget):
         if self.mpv:
             self.mpv.stop()
     
-    def seek(self, position):
+    def set_playback_end(self, position):
+        """Set an absolute end time for the current file, or clear its limit."""
         if self.mpv:
-            self.mpv.seek(position, reference="absolute")
+            end = 'none' if position is None else float(position)
+            self.mpv.__setitem__('end', end, file_local=True)
+
+    def set_playback_keep_open(self, mode):
+        previous = self.mpv['keep-open']
+        self.mpv.__setitem__('keep-open', mode, file_local=True)
+        return previous
+
+    def seek(self, position, *, exact=False):
+        if self.mpv:
+            if exact:
+                self.mpv.seek(position, reference="absolute", precision="exact")
+            else:
+                self.mpv.seek(position, reference="absolute")
 
     def seek_relative(self, offset):
         if self.mpv:
@@ -519,6 +533,8 @@ class MpvAudioPlayer:
 
     def __init__(self):
         self.mpv = None
+        self.volume = 100.0
+        self._volume_scale = 1.0
         self._init_mpv()
 
     def _init_mpv(self):
@@ -544,8 +560,16 @@ class MpvAudioPlayer:
             self.mpv.stop()
 
     def set_volume(self, volume):
+        self.volume = volume
+        self._apply_volume()
+
+    def set_volume_scale(self, scale: float):
+        self._volume_scale = scale
+        self._apply_volume()
+
+    def _apply_volume(self):
         if self.mpv:
-            self.mpv.volume = volume
+            self.mpv.volume = self.volume * self._volume_scale
 
     def shutdown(self):
         if self.mpv:

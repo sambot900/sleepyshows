@@ -139,6 +139,31 @@ class MpvSmokeTests(unittest.TestCase):
         window.play_index(0, bypass_bump_gate=True)
         self.wait_for(lambda: window.playlist_manager.current_index == 1)
 
+    def test_skip_sections_seek_inside_playback_and_extend_trims(self):
+        window = self.trim_window(start=1, end=52)
+        pm = window.playlist_manager
+        window._settings['skip_sections'] = {
+            pm._norm_path_key(self.paths[0]): [[0.5, 2], [2.4, 4], [5, 9]]
+        }
+        positions = []
+        self.player.positionChanged.connect(window._skip_section_at_playhead)
+        self.player.positionChanged.connect(lambda pos: positions.append((pm.current_index, pos)))
+        window.play_index(0, bypass_bump_gate=True)
+        self.wait_for(lambda: pm.current_index == 1 and self.player.mpv.path == self.paths[1])
+        first_positions = [pos for index, pos in positions if index == 0]
+        self.assertGreaterEqual(min(first_positions), 2)
+        self.assertTrue(any(3.9 <= pos < 5.2 for pos in first_positions))
+        self.assertFalse(any(2.7 < pos < 3.9 for pos in first_positions))
+        self.assertLessEqual(max(first_positions), 5.2)
+
+    def test_skip_sections_covering_a_whole_episode_advance(self):
+        window = self.trim_window(start=4, end=54)
+        key = window.playlist_manager._norm_path_key(self.paths[0])
+        window._settings['skip_sections'] = {key: [[3, 10]]}
+        self.player.positionChanged.connect(window._skip_section_at_playhead)
+        window.play_index(0, bypass_bump_gate=True)
+        self.wait_for(lambda: window.playlist_manager.current_index == 1)
+
 
 if __name__ == "__main__":
     print(f"Testing real mpv with {sys.platform}, Python {sys.version.split()[0]}")

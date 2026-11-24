@@ -21,6 +21,7 @@ class SleepTimerController(QObject):
     """
 
     expired = Signal()
+    timing_changed = Signal()
 
     def __init__(self, main_window, default_minutes: int = 180):
         super().__init__(main_window)
@@ -31,6 +32,7 @@ class SleepTimerController(QObject):
         self.active: bool = False
         self.remaining_ms: int = 0
         self._last_tick: float | None = None
+        self._countdown_id = 0
 
         # Sleep timer mode: 'countdown' (fixed number of minutes) or 'auto'
         # (stops playback at a fixed local wall-clock time, recurring nightly).
@@ -60,13 +62,14 @@ class SleepTimerController(QObject):
             self.active = True
             self._notify_exposure(True)
             self.remaining_ms = int(minutes * 60 * 1000)
+            self._countdown_id += 1
             self._last_tick = None
 
             print(f"DEBUG: Start Timer {minutes}m")
 
             self._update_ui()
             self._pause()
-            self._resume_if_needed()
+            self.resume_if_needed()
             self._sync_menu()
             self._sync_welcome_screen(True)
         except Exception as e:
@@ -81,6 +84,7 @@ class SleepTimerController(QObject):
         if self.nightly_enabled or self.auto_active:
             self._auto_next_trigger = self._compute_next_trigger(datetime.now())
             self._update_ui()
+            self.timing_changed.emit()
 
     def set_nightly_enabled(self, enabled: bool) -> None:
         self.nightly_enabled = bool(enabled)
@@ -89,7 +93,7 @@ class SleepTimerController(QObject):
         elif not self.auto_active:
             self._auto_next_trigger = None
         self._notify_exposure(self.active or self.nightly_enabled)
-        self._resume_if_needed()
+        self.resume_if_needed()
 
     def start_auto(self) -> None:
         """Arm AUTO mode: stop playback at the configured local time, nightly."""
@@ -105,7 +109,7 @@ class SleepTimerController(QObject):
 
             self._update_ui()
             self._pause()
-            self._resume_if_needed()
+            self.resume_if_needed()
             self._sync_menu()
             self._sync_welcome_screen(True)
         except Exception as e:
@@ -120,7 +124,7 @@ class SleepTimerController(QObject):
             self._notify_exposure(self.nightly_enabled)
             self.remaining_ms = 0
             self._pause()
-            self._resume_if_needed()
+            self.resume_if_needed()
             self._update_ui()
             self._sync_menu()
             self._sync_welcome_screen(False)
@@ -133,6 +137,29 @@ class SleepTimerController(QObject):
         if not self.active or self.mode == 'auto' or self.remaining_ms <= 0:
             return 0
         return max(1, int((self.remaining_ms + 59999) // 60000))
+
+    def next_shutoff(self) -> tuple[tuple[int | None, datetime | None], float] | None:
+        """Return the current schedule and seconds until its earliest shutoff."""
+        seconds = []
+        countdown_id = None
+        if self.active and self.mode == 'countdown':
+            countdown_id = self._countdown_id
+            remaining = self.remaining_ms / 1000
+            if self._last_tick is not None:
+                remaining -= max(0.0, time.monotonic() - self._last_tick)
+            seconds.append(remaining)
+
+        nightly_target = self._auto_next_trigger if self.nightly_enabled or self.auto_active else None
+        if nightly_target is not None:
+            seconds.append((nightly_target - datetime.now()).total_seconds())
+
+        if seconds:
+            return (countdown_id, nightly_target), max(0.0, min(seconds))
+        return None
+
+    @property
+    def running(self) -> bool:
+        return self._timer.isActive()
 
     @property
     def auto_active(self) -> bool:
@@ -172,6 +199,7 @@ class SleepTimerController(QObject):
 
     def resume_if_needed(self) -> None:
         self._resume_if_needed()
+        self.timing_changed.emit()
 
     # ------------------------------------------------------------------
     # Internal
@@ -221,6 +249,7 @@ class SleepTimerController(QObject):
             if self._auto_next_trigger is None:
                 self._auto_next_trigger = self._compute_next_trigger(now)
             if now >= self._auto_next_trigger:
+                self.timing_changed.emit()
                 # Re-arm for the following night before firing so AUTO keeps
                 # working across nights without any user action.
                 self._auto_next_trigger = self._compute_next_trigger(now)
@@ -229,6 +258,7 @@ class SleepTimerController(QObject):
                 return
         if not self.active or self.mode == 'auto':
             self._update_ui()
+            self.timing_changed.emit()
             return
 
         now = time.monotonic()
@@ -245,6 +275,7 @@ class SleepTimerController(QObject):
 
         self.remaining_ms = max(0, self.remaining_ms - elapsed_ms)
         self._update_ui()
+        self.timing_changed.emit()
         if self.remaining_ms <= 0:
             self.expired.emit()
 

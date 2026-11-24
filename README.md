@@ -4,6 +4,7 @@ A robust video player with sleep timer functionality, episode browser, and playl
 
 ## Features
 - Sleep Timer
+- Auto-Volume fade before the sleep timer shuts off
 - Auto-Show: switch to a chosen show after a configurable amount of playback
 - Trim: per-show beginning and ending skips, in seconds (Windows and Linux)
 - Play/Pause/Previous/Next controls
@@ -17,12 +18,22 @@ it returns to the saved preference at the auto sleep time, or midnight when auto
 sleep is disabled. Pauses don't count toward the delay, and switching shows keeps
 the remaining sleep timer and nightly shutoff schedule.
 
+Enable Auto-Volume in Settings or below the player’s volume slider. It gradually
+reduces playback volume by the percentage saved in Settings (20% by default)
+before the next countdown or clock-time shutoff. The slider keeps your chosen
+volume, which returns after the shutoff, timer cancellation, or an app restart.
+
 In **Settings → Trim**, choose a show and enter how many seconds to skip at the
 beginning and end of each episode. Each show saves its own values; 0 disables
 either skip. You can edit several shows before pressing Save. Changes apply when
 an episode starts. Chronological playback keeps your resume position beyond the
 intro, and an episode that reaches its trimmed ending advances normally. Movies,
 bumps, and interludes are excluded.
+
+Use **Skip Sections** beside the seek bar to add or delete ranges for the
+current video. Confirm the start and end using the playhead or enter timestamps.
+Saved sections survive app rebuilds. When sections overlap each other or a
+show's Trim settings, playback skips the combined range at its earliest start.
 
 ## Usage
 1. Install dependencies: `pip install -r requirements.txt`

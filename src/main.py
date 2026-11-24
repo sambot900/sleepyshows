@@ -24,6 +24,7 @@ import datetime
 from bump_state import BumpState
 from sleep_timer import SleepTimerController
 from auto_show import AutoShowController
+from skip_sections import SkipSectionDialog, format_timestamp, merge_sections, saved_sections, section_at
 from missing_media_recovery import MissingMediaRecovery
 from play_history_dialog import PlayHistoryDialog
 
@@ -34,7 +35,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QDockWidget, QFrame, QSizePolicy, QToolButton, QStyle, QGridLayout,
                                QStyleOptionButton, QStyleOptionToolButton, QStyleOptionComboBox, QStylePainter, QStyleOptionSlider,
                                QLineEdit, QProgressBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-                                QComboBox, QSpinBox,
+                                QComboBox, QSpinBox, QCheckBox,
                                 QWidgetAction,
                                 QAbstractButton, QLayout, QScrollArea)
 from PySide6.QtCore import Qt, QTimer, QSize, Signal, QPropertyAnimation, QEasingCurve, QRect, QEvent, QObject, QThread, Slot, QPoint, QEventLoop, QFileSystemWatcher, QVariantAnimation
@@ -54,6 +55,9 @@ from services import web_mode_paths
 
 
 THEME_COLOR = "#0a2a5e"
+AUTO_VOLUME_TOOLTIP = "Gradually lower playback volume before the sleep timer ends."
+DEFAULT_AUTO_VOLUME_REDUCTION_PERCENT = 20
+SEEK_SLIDER_STEPS = 10000
 
 
 def _theme_color():
@@ -1055,6 +1059,28 @@ class BumpsModeWidget(QWidget):
         self.btn_auto_sleep_timer = QPushButton("Auto Sleep Timer…")
         self.btn_auto_sleep_timer.clicked.connect(self.main_window.show_auto_sleep_timer_dialog)
         layout.addWidget(self.btn_auto_sleep_timer)
+
+        self.chk_auto_volume = QCheckBox("Auto-Volume")
+        self.chk_auto_volume.setToolTip(AUTO_VOLUME_TOOLTIP)
+        self.chk_auto_volume.setChecked(self.main_window.auto_volume_enabled)
+        self.chk_auto_volume.clicked.connect(self.main_window.set_auto_volume_enabled)
+
+        reduction_spin = QSpinBox()
+        reduction_spin.setObjectName("auto_volume_reduction")
+        reduction_spin.setRange(0, 100)
+        reduction_spin.setSuffix("%")
+        reduction_spin.setKeyboardTracking(False)
+        reduction_spin.setValue(self.main_window.auto_volume_reduction_percent)
+        reduction_spin.valueChanged.connect(self.main_window.set_auto_volume_reduction)
+
+        reduction_label = QLabel("Reduction")
+        reduction_label.setBuddy(reduction_spin)
+        auto_volume_row = QHBoxLayout()
+        auto_volume_row.addWidget(self.chk_auto_volume)
+        auto_volume_row.addWidget(reduction_label)
+        auto_volume_row.addWidget(reduction_spin)
+        auto_volume_row.addStretch(1)
+        layout.addLayout(auto_volume_row)
 
         self.btn_auto_show = QPushButton("Auto-Show…")
         self.btn_auto_show.clicked.connect(self.main_window.show_auto_show_dialog)
@@ -6234,11 +6260,16 @@ class PlayModeWidget(QWidget):
                 border: none;
             }}
         """)
-        self.slider_seek.setRange(0, 100)
+        self.slider_seek.setRange(0, SEEK_SLIDER_STEPS)
+        self.slider_seek.setSingleStep(SEEK_SLIDER_STEPS // 100)
+        self.slider_seek.setPageStep(SEEK_SLIDER_STEPS // 10)
         self.slider_seek.sliderMoved.connect(self.main_window.seek_video) # On drag/click
         self.slider_seek.sliderPressed.connect(self.main_window.on_seek_start)
         self.slider_seek.sliderReleased.connect(self.main_window.on_seek_end)
         seek_layout.addWidget(self.slider_seek)
+        self.btn_skip_sections = QPushButton("Skip Sections")
+        self.btn_skip_sections.clicked.connect(self.main_window.show_skip_sections_menu)
+        seek_layout.addWidget(self.btn_skip_sections)
         
         controls_layout.addLayout(seek_layout)
         
@@ -6384,15 +6415,29 @@ class PlayModeWidget(QWidget):
         self.lbl_volume = QLabel("Vol:")
         self.lbl_volume.setStyleSheet("font-size: 14pt; color: white;")
         right_layout.addWidget(self.lbl_volume)
-        
+
+        self.volume_controls = QWidget()
+        self.volume_controls.setStyleSheet("background: transparent;")
+        self.volume_controls.setFixedSize(150, button_height)
+        volume_layout = QVBoxLayout(self.volume_controls)
+        volume_layout.setContentsMargins(0, 0, 0, 0)
+        volume_layout.setSpacing(0)
+
         self.slider_vol = QSlider(Qt.Horizontal)
         self.slider_vol.setRange(0, 100)
-        self.slider_vol.setValue(100)
-        self.slider_vol.setFixedWidth(150)
-        self.slider_vol.setFixedHeight(50)
+        self.slider_vol.setValue(self.main_window.playback_volume)
+        self.slider_vol.setAccessibleName("Playback volume")
         self._apply_volume_slider_style()
         self.slider_vol.valueChanged.connect(self.main_window.set_volume)
-        right_layout.addWidget(self.slider_vol)
+        volume_layout.addWidget(self.slider_vol, 1)
+
+        self.chk_auto_volume = QCheckBox("Auto-Volume")
+        self.chk_auto_volume.setStyleSheet("font-size: 10pt; color: white;")
+        self.chk_auto_volume.setToolTip(AUTO_VOLUME_TOOLTIP)
+        self.chk_auto_volume.setChecked(self.main_window.auto_volume_enabled)
+        self.chk_auto_volume.clicked.connect(self.main_window.set_auto_volume_enabled)
+        volume_layout.addWidget(self.chk_auto_volume, alignment=Qt.AlignHCenter)
+        right_layout.addWidget(self.volume_controls)
 
         self.btn_fullscreen = TriStrokeButton()
         enter_fs_icon = QIcon.fromTheme(
@@ -6676,6 +6721,8 @@ class PlayModeWidget(QWidget):
         mins['auto_show'] = max(
             mins['auto_show'], self.btn_auto_show.fontMetrics().horizontalAdvance('AUTO-SHOW') + 16)
         base['auto_show'] = max(base['auto_show'], mins['auto_show'])
+        mins['vol'] = max(mins['vol'], self.chk_auto_volume.sizeHint().width())
+        base['vol'] = max(base['vol'], mins['vol'])
 
         # Apply base sizes.
         _set_w(self.btn_menu, base['menu'], button_h)
@@ -6691,7 +6738,7 @@ class PlayModeWidget(QWidget):
         _set_w(self.btn_shuffle, base['shuffle'], button_h)
         if show_vol_label:
             _set_w(self.lbl_volume, base['vol_label'], button_h)
-        _set_w(self.slider_vol, base['vol'], 50)
+        _set_w(self.volume_controls, base['vol'], button_h)
         _set_w(self.btn_fullscreen, base['fs'], button_h)
 
         # Compute the minimum used width for current fixed widths, including layout spacing.
@@ -6722,7 +6769,7 @@ class PlayModeWidget(QWidget):
             self.btn_auto_show,
             self.btn_shuffle,
             self.lbl_volume if show_vol_label else None,
-            self.slider_vol,
+            self.volume_controls,
             self.btn_fullscreen,
         ])
 
@@ -6756,7 +6803,7 @@ class PlayModeWidget(QWidget):
             self.btn_auto_show,
             self.btn_shuffle,
             self.lbl_volume if show_vol_label else None,
-            self.slider_vol,
+            self.volume_controls,
             self.btn_fullscreen,
         ])
         used = int(used_left + used_playback + used_right + outer_space_total)
@@ -6765,7 +6812,7 @@ class PlayModeWidget(QWidget):
         if overflow > 0:
             # Shrink lowest-priority / widest items first.
             shrink_order = [
-                (self.slider_vol, mins['vol']),
+                (self.volume_controls, mins['vol']),
                 (self.btn_subtitle, mins['sub']),
                 (self.btn_audio_track, mins['audio']),
                 (self.btn_sleep_timer, mins['sleep']),
@@ -6819,7 +6866,7 @@ class PlayModeWidget(QWidget):
                         self.btn_auto_show,
                         self.btn_shuffle,
                         self.lbl_volume if show_vol_label else None,
-                        self.slider_vol,
+                        self.volume_controls,
                         self.btn_fullscreen,
                     ])
                     used = int(used_left + used_playback + used_right + outer_space_total)
@@ -7464,6 +7511,24 @@ class MainWindow(QMainWindow):
         self._settings = self._load_user_settings()
         self.startup_crickets_enabled = bool(self._settings.get('startup_crickets_enabled', True))
         self.normalize_audio_enabled = bool(self._settings.get('normalize_audio_enabled', False))
+        self.auto_volume_enabled = bool(self._settings.get('auto_volume_enabled', False))
+        try:
+            reduction = int(self._settings.get(
+                'auto_volume_reduction_percent', DEFAULT_AUTO_VOLUME_REDUCTION_PERCENT
+            ))
+        except (TypeError, ValueError, OverflowError):
+            reduction = DEFAULT_AUTO_VOLUME_REDUCTION_PERCENT
+        self.auto_volume_reduction_percent = max(0, min(100, reduction))
+        try:
+            self.playback_volume = max(0, min(100, int(self._settings.get('playback_volume', 100))))
+        except (TypeError, ValueError, OverflowError):
+            self.playback_volume = 100
+        self._volume_save_timer = QTimer(self)
+        self._volume_save_timer.setSingleShot(True)
+        self._volume_save_timer.setInterval(300)
+        self._volume_save_timer.timeout.connect(self._save_user_settings)
+        self._auto_volume_start = None
+        self._auto_volume_progress = 0.0
         _set_gradient_scheme(str(self._settings.get('gradient_scheme', 'Default') or 'Default'))
         self.bump_images_dir = self._settings.get('bump_images_dir', None)
         self.bump_audio_fx_dir = self._settings.get('bump_audio_fx_dir', None)
@@ -7692,6 +7757,7 @@ class MainWindow(QMainWindow):
         self.is_seeking = False
         self.total_duration = 0
         self._last_time_pos = None
+        self._skip_section_dialog = None
         self._play_start_monotonic = None
         self._played_since_start = False
         self._advancing_from_eof = False
@@ -7786,6 +7852,9 @@ class MainWindow(QMainWindow):
 
         # Audio-only MPV instance used for bump sound effects.
         self.fx_player = MpvAudioPlayer()
+        self.player.set_volume(self.playback_volume)
+        self.sleep_timer.timing_changed.connect(self._update_auto_volume)
+        self.sleep_timer.expired.connect(self._reset_auto_volume)
         self._bump_fx_stop_timer = QTimer(self)
         self._bump_fx_stop_timer.setSingleShot(True)
         self._bump_fx_stop_timer.timeout.connect(self._stop_bump_fx)
@@ -8293,13 +8362,14 @@ class MainWindow(QMainWindow):
     def _save_user_settings(self):
         try:
             if not self._settings_path:
-                return
+                return False
             tmp_path = self._settings_path + ".tmp"
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 json.dump(self._settings, f, indent=2)
             os.replace(tmp_path, self._settings_path)
+            return True
         except Exception:
-            return
+            return False
 
     def _load_resume_state(self) -> dict:
         try:
@@ -8688,7 +8758,13 @@ class MainWindow(QMainWindow):
             duration = float(duration or 0.0)
         except (TypeError, ValueError):
             return index, 0.0
-        _, end_trim = self._episode_trim(index)
+        start_trim, end_trim = self._episode_trim(index)
+        if duration > 0:
+            sections = saved_sections(getattr(self, '_settings', {}), self._episode_skip_key(index))
+            if sections:
+                merged = merge_sections(sections, start_trim, end_trim, duration)
+                if merged and merged[-1][1] == duration:
+                    end_trim = duration - merged[-1][0]
         if position > 0 and duration > 0 and duration - position <= max(20.0, end_trim):
             next_index = pm._next_chronological_episode_index_after(index)
             if next_index >= 0:
@@ -10014,7 +10090,7 @@ class MainWindow(QMainWindow):
 
     def hide_controls(self):
         # Only auto-hide in fullscreen.
-        if not self.isFullScreen():
+        if not self.isFullScreen() or self._skip_section_dialog is not None:
             return
 
         # Only hide if playing
@@ -10791,6 +10867,57 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def set_auto_volume_enabled(self, enabled: bool):
+        self.auto_volume_enabled = bool(enabled)
+        self._settings['auto_volume_enabled'] = self.auto_volume_enabled
+        self._save_user_settings()
+        self.bumps_mode_widget.chk_auto_volume.setChecked(self.auto_volume_enabled)
+        self.play_mode_widget.chk_auto_volume.setChecked(self.auto_volume_enabled)
+        self._update_auto_volume()
+
+    def set_auto_volume_reduction(self, percent: int):
+        self.auto_volume_reduction_percent = percent
+        self._settings['auto_volume_reduction_percent'] = percent
+        self._save_user_settings()
+        self._apply_auto_volume()
+
+    def _update_auto_volume(self):
+        shutoff = self.sleep_timer.next_shutoff() if self.auto_volume_enabled else None
+        if shutoff is None:
+            self._reset_auto_volume()
+            return
+
+        schedule, seconds = shutoff
+        if self._auto_volume_start is not None and schedule != self._auto_volume_start[0]:
+            self._reset_auto_volume()
+        if not self.sleep_timer.running:
+            return
+        if self._auto_volume_start is None:
+            self._auto_volume_start = (schedule, seconds)
+
+        start_seconds = self._auto_volume_start[1]
+        progress = max(0.0, 1.0 - seconds / start_seconds) if start_seconds > 0 else 1.0
+        self._set_auto_volume_progress(max(self._auto_volume_progress, progress))
+
+    def _reset_auto_volume(self):
+        self._auto_volume_start = None
+        self._set_auto_volume_progress(0.0)
+
+    def _set_auto_volume_progress(self, progress: float):
+        if progress != self._auto_volume_progress:
+            self._auto_volume_progress = progress
+            if self.auto_volume_reduction_percent:
+                self._apply_auto_volume()
+
+    @property
+    def _auto_volume_factor(self) -> float:
+        return 1.0 - self.auto_volume_reduction_percent * self._auto_volume_progress / 100
+
+    def _apply_auto_volume(self):
+        factor = self._auto_volume_factor
+        self.player.set_volume(self.playback_volume * factor)
+        self.fx_player.set_volume_scale(factor)
+
     def set_auto_show_settings(self, enabled, show_name, delay_minutes):
         show_name = str(show_name or '').strip()
         delay_minutes = AutoShowController.parse_delay(delay_minutes)
@@ -10932,6 +11059,145 @@ class MainWindow(QMainWindow):
         filename = getattr(self, 'current_playlist_filename', None) or ''
         return self._show_trim(os.path.splitext(os.path.basename(filename))[0])
 
+    def _episode_skip_key(self, index):
+        pm = self.playlist_manager
+        if (index is not None and 0 <= index < len(pm.current_playlist)
+                and pm.is_episode_item(pm.current_playlist[index])):
+            return pm._norm_path_key(pm._episode_path_for_index(index))
+        return ''
+
+    def _current_skip_key(self):
+        if (self._play_start_monotonic is None or self._in_bump_playback
+                or self._pending_bump_item is not None):
+            return ''
+        key = self._episode_skip_key(self.playlist_manager.current_index)
+        if key == self.playlist_manager._norm_path_key(self._last_play_source_path):
+            return key
+        return ''
+
+    def show_skip_sections_menu(self):
+        if self._skip_section_dialog is not None:
+            self._skip_section_dialog.raise_()
+            return
+
+        key = self._current_skip_key()
+        play_start = self._play_start_monotonic
+        menu = QMenu(self)
+        create = menu.addAction('New Skip Section…')
+        create.setEnabled(bool(key and self.total_duration > 0))
+        delete = QMenu('Delete Skip Section', menu)
+        menu.addMenu(delete)
+        sections = saved_sections(self._settings, key) if key else ()
+        delete.menuAction().setEnabled(bool(sections))
+
+        def choose(section=None):
+            if not key or play_start != self._play_start_monotonic or key != self._current_skip_key():
+                return
+            if section is None:
+                self._edit_skip_section(key, play_start)
+            else:
+                remaining = tuple(item for item in saved_sections(self._settings, key) if item != section)
+                if self._save_skip_sections(key, remaining):
+                    self._refresh_episode_skip_ranges(self.total_duration, restore_end=True)
+
+        create.triggered.connect(lambda _checked=False: choose())
+        for start, end in sections:
+            action = delete.addAction(f'{format_timestamp(start)} – {format_timestamp(end)}')
+            action.triggered.connect(lambda _checked=False, section=(start, end): choose(section))
+        menu.aboutToHide.connect(menu.deleteLater)
+        button = self.play_mode_widget.btn_skip_sections
+        menu.popup(button.mapToGlobal(QPoint(0, button.height())))
+
+    def _edit_skip_section(self, key, play_start):
+        mpv = self.player.mpv
+        if not mpv or mpv.path != self._last_play_target or mpv.time_pos is None:
+            return
+        position = max(0.0, min(self.total_duration, mpv.time_pos))
+        was_playing = not mpv.pause
+        self.player.pause()
+        keep_open = self.player.set_playback_keep_open('yes')
+        self.player.set_playback_end(None)
+        dialog = SkipSectionDialog(self, position=position, duration=self.total_duration)
+        self._skip_section_dialog = dialog
+        self.show_controls()
+
+        def finish(_result):
+            if self._skip_section_dialog is not dialog:
+                return
+            self._skip_section_dialog = None
+            if play_start != self._play_start_monotonic or key != self._current_skip_key():
+                return
+            if mpv.time_pos is not None and abs(mpv.time_pos - position) > 0.001:
+                self.player.seek(position, exact=True)
+            if dialog.section is not None:
+                sections = saved_sections(self._settings, key)
+                self._save_skip_sections(key, tuple(sorted(set(sections + (dialog.section,)))))
+            self._refresh_episode_skip_ranges(self.total_duration, restore_end=True)
+            self.player.set_playback_keep_open(keep_open)
+            if was_playing and mpv.pause:
+                self.player.toggle_pause()
+
+        dialog.finished.connect(finish)
+        dialog.show()
+
+    def _dismiss_skip_section_editor(self):
+        dialog = getattr(self, '_skip_section_dialog', None)
+        if dialog is not None:
+            self._skip_section_dialog = None
+            dialog.reject()
+
+    def _save_skip_sections(self, key, sections):
+        old_settings = self._settings
+        stored = old_settings.get('skip_sections')
+        videos = dict(stored) if isinstance(stored, dict) else {}
+        if sections:
+            videos[key] = list(sections)
+        else:
+            videos.pop(key, None)
+        self._settings = {**old_settings, 'skip_sections': videos}
+        if not self._save_user_settings():
+            self._settings = old_settings
+            QMessageBox.warning(self, 'Skip Sections', 'Your skip sections could not be saved.')
+            return False
+        self._active_episode_skip_sections = sections
+        return True
+
+    def _refresh_episode_skip_ranges(self, duration, *, restore_end=False):
+        sections = getattr(self, '_active_episode_skip_sections', ())
+        if duration <= 0 or (not sections and not restore_end):
+            return
+        mpv = self.player.mpv
+        if not self._current_skip_key() or mpv is None or mpv.path != self._last_play_target:
+            return
+        start_trim, end_trim = self._active_episode_trim
+        merged = merge_sections(sections, start_trim, end_trim, duration)
+        tail = merged[-1][0] if merged and merged[-1][1] == duration else None
+        self._active_skip_end = tail
+        self._active_skip_ranges = (merged[:-1] if tail is not None else merged) if sections else ()
+        self._last_section_seek = None
+        if self._skip_section_dialog is None and (restore_end or tail is not None):
+            self.player.set_playback_end(tail)
+
+    def _skip_section_at_playhead(self, position):
+        ranges = getattr(self, '_active_skip_ranges', ())
+        if (not ranges or position is None or self.is_seeking or self._in_bump_playback
+                or self._pending_bump_item is not None or self._play_start_monotonic is None
+                or section_at(ranges, position) is None):
+            return
+        mpv = self.player.mpv
+        if not mpv or mpv.path != self._last_play_target or mpv.seeking or mpv.time_pos is None:
+            return
+        section = section_at(ranges, mpv.time_pos)
+        if section is None:
+            return
+        target = section[1]
+        now = time.monotonic()
+        if self._last_section_seek and self._last_section_seek[0] == target:
+            if now - self._last_section_seek[1] < 0.5:
+                return
+        self._last_section_seek = target, now
+        self.player.seek(target, exact=True)
+
     def _episode_playback_end(self, duration):
         """Use the active load's end limit for EOF fallback and skip accounting."""
         pm = self.playlist_manager
@@ -10943,6 +11209,10 @@ class MainWindow(QMainWindow):
                 or pm._norm_path_key(getattr(self, '_last_play_source_path', ''))
                 != pm._norm_path_key(pm._episode_path_for_index(index))):
             return duration
+        if getattr(self, '_skip_section_dialog', None) is not None:
+            return duration
+        if getattr(self, '_active_skip_end', None) is not None:
+            return self._active_skip_end
         return max(0.0, float(duration) - getattr(self, '_active_episode_trim', (0, 0))[1])
 
     def show_trim_dialog(self):
@@ -11132,6 +11402,8 @@ class MainWindow(QMainWindow):
         self.set_auto_sleep_settings(enable_toggle.isChecked(), time_str)
 
     def set_mode(self, index):
+        if index != 2 and self._skip_section_dialog is not None:
+            self._skip_section_dialog.reject()
         self.mode_stack.setCurrentIndex(index)
         self.update_menu_mode_state()
 
@@ -12144,12 +12416,18 @@ class MainWindow(QMainWindow):
                 start_position = 0.0
 
             # Cut off startup ambient audio as soon as playback begins.
+            self._dismiss_skip_section_editor()
             self._stop_startup_ambient()
             self.stop_bump_playback()
             pm.current_index = index
             item = pm.current_playlist[index]
             start_trim, end_trim = self._episode_trim(index)
             playback_start_position = max(float(start_position or 0.0), start_trim)
+            sections = saved_sections(getattr(self, '_settings', {}), self._episode_skip_key(index))
+            if sections:
+                section = section_at(merge_sections(sections, start_trim), playback_start_position)
+                if section is not None:
+                    playback_start_position = section[1]
             trim_options = {'end_trim': end_trim} if end_trim else {}
 
             # Global bump gate: when enabled, play a bump before any episode playback,
@@ -12198,6 +12476,11 @@ class MainWindow(QMainWindow):
             self.total_duration = 0
             self._resume_position_for_start = float(start_position or 0.0)
             self._active_episode_trim = (start_trim, end_trim)
+            self._active_playback_start = playback_start_position
+            self._active_episode_skip_sections = sections
+            self._active_skip_ranges = ()
+            self._active_skip_end = None
+            self._last_section_seek = None
 
             # Record playback history for Prev navigation.
             if record_history:
@@ -13367,16 +13650,11 @@ class MainWindow(QMainWindow):
 
         try:
             if hasattr(self, 'fx_player') and self.fx_player:
-                # Reduce outro sounds by 3 dB.
-                # mpv volume is a linear scale (0..100), so multiply by 10^(-3/20).
+                # Temporarily lower the outro's base volume independently of the fade.
                 try:
-                    prev_vol = None
-                    if getattr(self.fx_player, 'mpv', None) is not None:
-                        prev_vol = getattr(self.fx_player.mpv, 'volume', None)
-                    if prev_vol is not None:
-                        self._bump_fx_prev_volume = float(prev_vol)
-                        atten = 10 ** (-3.0 / 20.0)
-                        self.fx_player.set_volume(float(prev_vol) * float(atten))
+                    self._bump_fx_prev_volume = self.fx_player.volume
+                    atten = 10 ** (-3.0 / 20.0)
+                    self.fx_player.set_volume(self._bump_fx_prev_volume * atten)
                 except Exception:
                     self._bump_fx_prev_volume = None
                 # Avoid os.path.exists() checks on network paths; let mpv handle missing files.
@@ -13953,6 +14231,7 @@ class MainWindow(QMainWindow):
         return bool(delta)
 
     def stop_playback(self):
+        self._dismiss_skip_section_editor()
         try:
             self._maybe_record_episode_skip()
         except Exception:
@@ -14478,10 +14757,11 @@ class MainWindow(QMainWindow):
             if started and (time.monotonic() - started) < 1.0:
                 # A short or fully trimmed episode can legitimately end during
                 # the stale-event guard. Retry only if this same load is idle.
-                if any(getattr(self, '_active_episode_trim', (0, 0))):
+                if (any(getattr(self, '_active_episode_trim', (0, 0)))
+                        or getattr(self, '_active_episode_skip_sections', ())):
                     def finish_short_trimmed_episode():
                         if (self._play_start_monotonic == started
-                                and self.player.mpv.idle_active):
+                                and self.player._get_prop('idle_active', False)):
                             self.on_playback_finished()
 
                     QTimer.singleShot(1100, finish_short_trimmed_episode)
@@ -14671,12 +14951,12 @@ class MainWindow(QMainWindow):
         # mpv reports an empty start/end range as a load error. When Trim
         # consumes an episode, finish it normally instead of entering recovery.
         start_trim, end_trim = getattr(self, '_active_episode_trim', (0, 0))
-        if (r.lower() == 'error' and (start_trim or end_trim)
+        if (r.lower() == 'error'
+                and (start_trim or end_trim or getattr(self, '_active_episode_skip_sections', ()))
                 and not getattr(self, '_in_bump_playback', False)
                 and getattr(self, '_pending_bump_item', None) is None
                 and self.total_duration > 0
-                and max(start_trim, self._resume_position_for_start or 0.0)
-                >= self._episode_playback_end(self.total_duration)):
+                and self._active_playback_start >= self._episode_playback_end(self.total_duration)):
             self.on_playback_finished()
             return
 
@@ -14774,22 +15054,21 @@ class MainWindow(QMainWindow):
 
     # Control Proxies
     def set_volume(self, value):
-        self.player.set_volume(value)
+        self.playback_volume = value
+        self._settings['playback_volume'] = value
+        self._volume_save_timer.start()
+        self.player.set_volume(value * self._auto_volume_factor)
 
     def on_seek_start(self):
         self.is_seeking = True
         
     def on_seek_end(self):
-        val = self.play_mode_widget.slider_seek.value()
-        # Calculate target time
-        if self.total_duration > 0:
-            pct = max(0.0, min(100.0, float(val)))
-            target = (pct / 100.0) * float(self.total_duration)
-            self.player.seek(target)
+        self.seek_video(self.play_mode_widget.slider_seek.value())
         self.is_seeking = False
 
     def seek_relative(self, offset):
         if self.player:
+            self._last_section_seek = None
             self.player.seek_relative(offset)
 
     def seek_video(self, val):
@@ -14797,9 +15076,13 @@ class MainWindow(QMainWindow):
         # Seek immediately so timeline clicks work.
         try:
             if self.total_duration > 0:
-                pct = max(0.0, min(100.0, float(val)))
-                target = (pct / 100.0) * float(self.total_duration)
-                self.player.seek(target)
+                fraction = max(0.0, min(1.0, float(val) / SEEK_SLIDER_STEPS))
+                target = fraction * float(self.total_duration)
+                self._last_section_seek = None
+                if self._skip_section_dialog is not None:
+                    self.player.seek(target, exact=True)
+                else:
+                    self.player.seek(target)
         except Exception:
             return
 
@@ -14810,6 +15093,11 @@ class MainWindow(QMainWindow):
             self._resume_sleep_countdown_if_needed()
 
         self._last_time_pos = time_pos
+        if self._skip_section_dialog is not None:
+            if time_pos is not None:
+                self._skip_section_dialog.set_playhead(max(0.0, min(self.total_duration, time_pos)))
+        else:
+            self._skip_section_at_playhead(time_pos)
 
         # Progress tracking for missing-media stall detection.
         try:
@@ -14846,14 +15134,14 @@ class MainWindow(QMainWindow):
             pos = float(time_pos) if time_pos is not None else 0.0
 
             # mpv often reports time-pos that never exactly equals duration,
-            # so snap to 100% when we're effectively at the end.
+            # so snap to the maximum when we're effectively at the end.
             if pos >= max(0.0, dur - 0.10):
-                percent = 100
+                slider_position = SEEK_SLIDER_STEPS
             else:
                 ratio = 0.0 if dur <= 0 else max(0.0, min(1.0, pos / dur))
-                percent = int(round(ratio * 100.0))
+                slider_position = round(ratio * SEEK_SLIDER_STEPS)
 
-            self.play_mode_widget.slider_seek.setValue(percent)
+            self.play_mode_widget.slider_seek.setValue(slider_position)
             
         self.update_time_label(time_pos, self.total_duration)
 
@@ -14861,6 +15149,8 @@ class MainWindow(QMainWindow):
         # Runs on the Qt thread.
         # Flush the final changes in a rapid skip burst after the I/O throttle.
         self.playlist_manager._save_exposure_scores()
+        if getattr(self, '_skip_section_dialog', None) is not None:
+            return
         try:
             if not hasattr(self, 'player') or not self.player or not getattr(self.player, 'mpv', None):
                 return
@@ -15017,6 +15307,7 @@ class MainWindow(QMainWindow):
     def update_duration(self, duration):
         self.total_duration = duration
         self.update_time_label(0, duration) # Reset current? or keep
+        self._refresh_episode_skip_ranges(duration)
 
         # Old resume files can have a position without a duration. Apply the
         # completion rule once the resumed file's duration becomes available.
@@ -15119,8 +15410,12 @@ class MainWindow(QMainWindow):
             self.cancel_sleep_timer()
 
     def closeEvent(self, event):
+        self._dismiss_skip_section_editor()
         self._play_start_monotonic = None
         self.auto_show._timer.stop()
+        if self._volume_save_timer.isActive():
+            self._volume_save_timer.stop()
+            self._save_user_settings()
         self.playlist_manager._save_exposure_scores(force=True)
         try:
             self._log_event('app_close')
